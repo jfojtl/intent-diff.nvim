@@ -1,0 +1,17 @@
+describe("config", function()
+  it("merges user opts over defaults", function()
+    local config = require("intentdiff.config")
+    config.setup({ provider_opts = { model = "sonnet" }, sidebar_width = 50 })
+    assert.equals("sonnet", config.options.provider_opts.model)
+    assert.equals("claude", config.options.provider_opts.cmd) -- default preserved
+    assert.equals(50, config.options.sidebar_width)
+    assert.equals(60000, config.options.provider_opts.timeout_ms)
+  end)
+
+  it("setup twice starts from defaults, not previous merge", function()
+    local config = require("intentdiff.config")
+    config.setup({ sidebar_width = 50 })
+    config.setup({})
+    assert.equals(36, config.options.sidebar_width)
+  end)
+end)
