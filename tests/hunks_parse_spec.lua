@@ -1,0 +1,83 @@
+local hunks = require("intentdiff.hunks")
+
+local DIFF = table.concat({
+  "diff --git a/src/a.lua b/src/a.lua",
+  "index 111..222 100644",
+  "--- a/src/a.lua",
+  "+++ b/src/a.lua",
+  "@@ -10,3 +10,4 @@ local ctx",
+  " keep",
+  "-old",
+  "+new",
+  "+extra",
+  "@@ -30,2 +31,2 @@",
+  "-x",
+  "+y",
+  " keep",
+  "diff --git a/old.lua b/renamed.lua",
+  "similarity index 90%",
+  "rename from old.lua",
+  "rename to renamed.lua",
+  "--- a/old.lua",
+  "+++ b/renamed.lua",
+  "@@ -1,1 +1,1 @@",
+  "-a",
+  "+b",
+  "diff --git a/added.lua b/added.lua",
+  "new file mode 100644",
+  "--- /dev/null",
+  "+++ b/added.lua",
+  "@@ -0,0 +1,2 @@",
+  "+l1",
+  "+l2",
+  "diff --git a/gone.lua b/gone.lua",
+  "deleted file mode 100644",
+  "--- a/gone.lua",
+  "+++ /dev/null",
+  "@@ -1,2 +0,0 @@",
+  "-l1",
+  "-l2",
+}, "\n") .. "\n"
+
+describe("hunks.parse", function()
+  local parsed, files
+  before_each(function() parsed, files = hunks.parse(DIFF) end)
+
+  it("assigns per-file sequential ids", function()
+    assert.equals("src/a.lua:1", parsed[1].id)
+    assert.equals("src/a.lua:2", parsed[2].id)
+    assert.equals("renamed.lua:1", parsed[3].id)
+    assert.equals(5, #parsed)
+  end)
+
+  it("parses ranges end-exclusive", function()
+    assert.same({ start_line = 10, end_line = 13 }, parsed[1].original)
+    assert.same({ start_line = 10, end_line = 14 }, parsed[1].modified)
+  end)
+
+  it("normalizes zero-length ranges to zero-width anchors", function()
+    assert.same({ start_line = 1, end_line = 1 }, parsed[4].original)  -- @@ -0,0
+    assert.same({ start_line = 1, end_line = 1 }, parsed[5].modified)  -- +0,0
+  end)
+
+  it("detects rename, added, deleted statuses", function()
+    assert.equals("old.lua", parsed[3].old_path)
+    assert.equals("A", parsed[4].status)
+    assert.equals("D", parsed[5].status)
+    assert.same({ path = "added.lua", status = "A", old_path = nil }, files[3])
+  end)
+
+  it("captures raw hunk text and content hash", function()
+    assert.truthy(parsed[1].text:find("^@@ %-10,3"))
+    assert.truthy(parsed[1].text:find("%+extra\n"))
+    assert.equals(vim.fn.sha256(parsed[1].text), parsed[1].content_hash)
+  end)
+
+  it("builds a whole-file hunk for untracked files", function()
+    local h = hunks.untracked_hunk("nu.lua", { "a", "b", "c" })
+    assert.equals("nu.lua:1", h.id)
+    assert.equals("??", h.status)
+    assert.same({ start_line = 1, end_line = 1 }, h.original)
+    assert.same({ start_line = 1, end_line = 4 }, h.modified)
+  end)
+end)
