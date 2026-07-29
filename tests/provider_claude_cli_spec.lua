@@ -36,6 +36,17 @@ describe("claude_cli.parse_response", function()
     assert.is_nil(r)
     assert.truthy(err)
   end)
+
+  it("handles trailing prose containing braces", function()
+    local r = claude_cli.parse_response('{"groups":[{"title":"T","hunk_ids":[]}]}\nNote: format is {id: string}')
+    assert.equals("T", r.groups[1].title)
+  end)
+
+  it("handles leading and trailing prose with braces around valid object", function()
+    local r = claude_cli.parse_response('Example config {x: 1}\n{"groups":[{"title":"Fix","hunk_ids":["h1"]}]}\nNote: {done}')
+    assert.equals("Fix", r.groups[1].title)
+    assert.equals("h1", r.groups[1].hunk_ids[1])
+  end)
 end)
 
 describe("claude_cli provider", function()

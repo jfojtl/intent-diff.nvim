@@ -26,11 +26,52 @@ function M.build_prompt(request)
 end
 
 function M.parse_response(text)
-  local body = text:match("({.*})") or text -- strips fences/prose; '.' spans newlines
-  local ok, decoded = pcall(vim.json.decode, body)
-  if ok and type(decoded) == "table" and type(decoded.groups) == "table" then
-    return decoded
+  -- Try candidates in order until one decodes to a table with 'groups' table
+  local candidates = { text }
+
+  -- Candidate 2: the greedy span (current behavior as fallback)
+  local greedy = text:match("({.*})")
+  if greedy then
+    table.insert(candidates, greedy)
   end
+
+  -- Candidate 3: try all {..} spans from each { position to each } position
+  local open_positions = {}
+  local close_positions = {}
+
+  -- Find all { positions
+  local pos = 0
+  while true do
+    pos = text:find("{", pos + 1)
+    if not pos then break end
+    table.insert(open_positions, pos)
+  end
+
+  -- Find all } positions
+  pos = 0
+  while true do
+    pos = text:find("}", pos + 1)
+    if not pos then break end
+    table.insert(close_positions, pos)
+  end
+
+  -- Try combinations: for each opening, try closings from last to first
+  for _, open_pos in ipairs(open_positions) do
+    for i = #close_positions, 1, -1 do
+      local close_pos = close_positions[i]
+      if close_pos > open_pos then
+        table.insert(candidates, text:sub(open_pos, close_pos))
+      end
+    end
+  end
+
+  for _, candidate in ipairs(candidates) do
+    local ok, decoded = pcall(vim.json.decode, candidate)
+    if ok and type(decoded) == "table" and type(decoded.groups) == "table" then
+      return decoded
+    end
+  end
+
   return nil, "provider returned unparseable output"
 end
 
