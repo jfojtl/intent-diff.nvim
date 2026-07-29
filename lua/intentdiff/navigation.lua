@@ -5,15 +5,17 @@ local state = {} -- [tabpage] = ctx
 --- Decide the next move within a group. Pure.
 --- @param file_entries table[] group.files
 --- @param file_i integer current file index
---- @param cursor_line integer cursor line in the modified pane
+--- @param cursor_line integer cursor line in the triggering pane
 --- @param dir 1|-1
+--- @param side "original"|"modified"|nil which side's line numbers to compare against (default "modified")
 --- @return { line: integer }|{ file_i: integer, jump: "first"|"last" }|nil
-function M.plan_move(file_entries, file_i, cursor_line, dir)
+function M.plan_move(file_entries, file_i, cursor_line, dir, side)
+  side = side or "modified"
   local hunks = file_entries[file_i].hunks
   if dir == 1 then
     for _, h in ipairs(hunks) do
-      if h.modified.start_line > cursor_line then
-        return { line = h.modified.start_line }
+      if h[side].start_line > cursor_line then
+        return { line = h[side].start_line }
       end
     end
     if file_entries[file_i + 1] then
@@ -21,8 +23,8 @@ function M.plan_move(file_entries, file_i, cursor_line, dir)
     end
   else
     for i = #hunks, 1, -1 do
-      if hunks[i].modified.start_line < cursor_line then
-        return { line = hunks[i].modified.start_line }
+      if hunks[i][side].start_line < cursor_line then
+        return { line = hunks[i][side].start_line }
       end
     end
     if file_i > 1 then
@@ -42,17 +44,28 @@ local function move(tabpage, dir)
     return
   end
   local session = require("intentdiff.view").get_session(tabpage)
-  local win = session and session.modified_win
+  if not session then
+    return
+  end
+  local cur_win = vim.api.nvim_get_current_win()
+  local side, win
+  if cur_win == session.original_win then
+    side, win = "original", session.original_win
+  else
+    side, win = "modified", session.modified_win
+  end
   if not (win and vim.api.nvim_win_is_valid(win)) then
     return
   end
   local cursor_line = vim.api.nvim_win_get_cursor(win)[1]
-  local plan = M.plan_move(group.files, ctx.file_i, cursor_line, dir)
+  local plan = M.plan_move(group.files, ctx.file_i, cursor_line, dir, side)
   if not plan then
     return
   end
   if plan.line then
-    vim.api.nvim_set_current_win(win)
+    if cur_win ~= win then
+      vim.api.nvim_set_current_win(win)
+    end
     vim.api.nvim_win_set_cursor(win, { plan.line, 0 })
   else
     ctx.file_i = plan.file_i
