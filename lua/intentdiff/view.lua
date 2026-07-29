@@ -48,6 +48,49 @@ end
 
 local visible_by_win = {}
 
+--- Hunks currently applied per tabpage via M.apply_group_folds, so the
+--- TabEnter handler below can re-assert them. Set on success in
+--- apply_group_folds, cleared in M.close_tab.
+M._active_folds = {}
+
+local folds_augroup
+
+--- codediff's own session TabEnter autocmd (codediff/ui/lifecycle/session.lua)
+--- calls `vim.schedule(reapply_keymaps)`, which ends by calling
+--- `compact.refresh(tabpage)` — when the user has `diff.compact = true` this
+--- re-applies codediff's *all-hunks* compact fold, clobbering our
+--- group-filtered foldexpr/visible lines. Re-assert our folds after that runs.
+---
+--- We can't rely on autocmd registration order alone to guarantee we run
+--- after codediff's handler (a later :IntentDiff session could register
+--- codediff's per-tab TabEnter autocmd after this augroup already exists), so
+--- we defer two ticks (nested vim.schedule): codediff's handler's own
+--- vim.schedule callback always lands on the first tick after TabEnter fires,
+--- so scheduling ours from within a first-tick callback guarantees ours runs
+--- on a later tick, deterministically after.
+local function ensure_folds_augroup()
+  if folds_augroup then
+    return
+  end
+  folds_augroup = vim.api.nvim_create_augroup("IntentDiffFolds", { clear = true })
+  vim.api.nvim_create_autocmd("TabEnter", {
+    group = folds_augroup,
+    callback = function()
+      local tab = vim.api.nvim_get_current_tabpage()
+      if not M._active_folds[tab] then
+        return -- inert for tabs without active group folds
+      end
+      vim.schedule(function()
+        vim.schedule(function()
+          if vim.api.nvim_get_current_tabpage() == tab and M._active_folds[tab] then
+            M.apply_group_folds(tab, M._active_folds[tab])
+          end
+        end)
+      end)
+    end,
+  })
+end
+
 function M.foldexpr()
   local visible = visible_by_win[vim.api.nvim_get_current_win()]
   if not visible then
@@ -67,6 +110,7 @@ end
 
 --- Fold everything except `hunks`' ranges (+context) in both panes.
 function M.apply_group_folds(tabpage, hunks)
+  ensure_folds_augroup()
   local session = cd.lifecycle.get_session(tabpage)
   if not session or not session.stored_diff_result then
     return false
@@ -93,6 +137,7 @@ function M.apply_group_folds(tabpage, hunks)
       vim.wo[pane.win].foldenable = true
     end
   end
+  M._active_folds[tabpage] = hunks
   return true
 end
 
@@ -121,6 +166,7 @@ function M.open_tab()
 end
 
 function M.close_tab(sess)
+  M._active_folds[sess.tabpage] = nil
   for _, tab in ipairs(vim.api.nvim_list_tabpages()) do
     if tab == sess.tabpage then
       vim.api.nvim_set_current_tabpage(tab)
@@ -161,6 +207,71 @@ local function show_whole_file(tabpage, sess, file_entry, abs_path)
   end
 end
 
+--- codediff's show_added_virtual_file/show_deleted_virtual_file load their
+--- buffer from a `codediff://` virtual URL: `show_single_file` returns as
+--- soon as the buffer is registered in the session, but its *content* is
+--- fetched asynchronously (codediff.core.git.get_file_content -> vim.schedule)
+--- by codediff.core.virtual_file, which then fires
+--- `User CodeDiffVirtualFileLoaded` with `data = { buf = <the buffer> }`.
+--- Wait for that event (scoped to the buffer this show_file call actually
+--- populated) before calling on_ready, so callers never observe an empty
+--- buffer. Falls back to polling in case the event is ever missed.
+local function wait_for_virtual_file(tabpage, status, on_ready)
+  if not on_ready then
+    return
+  end
+  local session = cd.lifecycle.get_session(tabpage)
+  local buf = session and (status == "A" and session.modified_bufnr or session.original_bufnr)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    vim.schedule(on_ready)
+    return
+  end
+
+  local done = false
+  local group = vim.api.nvim_create_augroup("IntentDiffVirtualFileWait_" .. buf, { clear = true })
+
+  local function finish()
+    if done then
+      return
+    end
+    done = true
+    pcall(vim.api.nvim_del_augroup_by_id, group)
+    on_ready()
+  end
+
+  vim.api.nvim_create_autocmd("User", {
+    group = group,
+    pattern = "CodeDiffVirtualFileLoaded",
+    callback = function(event)
+      if event.data and event.data.buf == buf then
+        finish()
+      end
+    end,
+  })
+
+  local function poll(tries)
+    if done then
+      return
+    end
+    if not vim.api.nvim_buf_is_valid(buf) then
+      finish()
+      return
+    end
+    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    local has_content = #lines > 1 or (lines[1] ~= nil and lines[1] ~= "")
+    if has_content or tries >= 60 then
+      finish()
+      return
+    end
+    vim.defer_fn(function()
+      poll(tries + 1)
+    end, 50)
+  end
+  vim.defer_fn(function()
+    poll(1)
+  end, 50)
+end
+
 --- Render file_entry's diff and fold to its hunks.
 --- sess = { tabpage, git_root, base_revision, target_revision, view_created }
 function M.show_file(sess, file_entry, opts)
@@ -188,7 +299,13 @@ function M.show_file(sess, file_entry, opts)
     else
       show_whole_file(sess.tabpage, sess, file_entry, abs_path)
     end
-    if opts.on_ready then vim.schedule(opts.on_ready) end
+    if file_entry.status == "??" then
+      -- Real file, loaded synchronously by show_untracked_file.
+      if opts.on_ready then vim.schedule(opts.on_ready) end
+    else
+      -- "A"/"D": virtual file, content arrives asynchronously.
+      wait_for_virtual_file(sess.tabpage, file_entry.status, opts.on_ready)
+    end
     return
   end
 
