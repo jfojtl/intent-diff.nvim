@@ -54,4 +54,78 @@ function M.reconcile(inventory, raw_groups)
   return groups
 end
 
+local run_token = 0
+
+--- Build the provider request, honoring size thresholds.
+function M.build_request(inventory)
+  local cfg = require("intentdiff.config").options
+  local hunks = {}
+  for _, h in ipairs(inventory.hunks) do
+    local all = vim.split(h.text, "\n", { trimempty = true })
+    local summary = {}
+    for i = 1, math.min(#all, 4) do
+      summary[i] = all[i]
+    end
+    if #all > 4 then
+      summary[#summary + 1] = ("… (%d more lines)"):format(#all - 4)
+    end
+    hunks[#hunks + 1] = { id = h.id, file = h.file, summary_lines = summary }
+  end
+  return {
+    diff_text = #inventory.diff_text <= cfg.max_full_diff_bytes and inventory.diff_text or nil,
+    hunks = hunks,
+  }
+end
+
+--- Classify: cache → (rematch) → provider → reconcile. See task interface.
+function M.run(inventory, opts, callback)
+  local cache = require("intentdiff.cache")
+  local cfg = require("intentdiff.config").options
+  run_token = run_token + 1
+  local token = run_token
+  local function deliver(groups, err, info)
+    vim.schedule(function()
+      if token == run_token then
+        callback(groups, err, info or {})
+      end
+    end)
+  end
+
+  if not opts.force then
+    local entry = cache.load(inventory.diff_hash)
+    if entry then
+      return deliver(M.reconcile(inventory, entry.groups), nil, { cached = true })
+    end
+    if opts.previous_hash then
+      local prev = cache.load(opts.previous_hash)
+      if prev then
+        local raw, stale = cache.rematch(prev, inventory)
+        return deliver(M.reconcile(inventory, raw), nil, { cached = true, stale_count = stale })
+      end
+    end
+  end
+
+  if #inventory.hunks > cfg.max_hunks then
+    return deliver(M.reconcile(inventory, {}), nil,
+      { skipped = ("diff too large (%d hunks > %d)"):format(#inventory.hunks, cfg.max_hunks) })
+  end
+
+  opts.provider(M.build_request(inventory), function(result, err)
+    vim.schedule(function()
+      if token ~= run_token then
+        return -- superseded by a newer run
+      end
+      if not result then
+        return callback(nil, err or "provider failed", {})
+      end
+      local hunk_hashes = {}
+      for _, h in ipairs(inventory.hunks) do
+        hunk_hashes[h.id] = h.content_hash
+      end
+      cache.save(inventory.diff_hash, { groups = result.groups, hunk_hashes = hunk_hashes })
+      callback(M.reconcile(inventory, result.groups), nil, {})
+    end)
+  end)
+end
+
 return M
