@@ -47,6 +47,29 @@ describe("claude_cli.parse_response", function()
     assert.equals("Fix", r.groups[1].title)
     assert.equals("h1", r.groups[1].hunk_ids[1])
   end)
+
+  it("completes in <500ms with ~600 syntactically invalid braces", function()
+    -- Pathological case: many invalid brace structures with valid JSON embedded
+    -- Build a string with ~600 braces but JSON reachable within candidate limit
+    local prose = ""
+    -- Create 15 invalid structures before JSON, accumulating ~300 braces
+    for i = 1, 15 do
+      prose = prose .. "{invalid_" .. i .. ":" .. string.rep("{nested", 10) .. "value" .. string.rep("}", 10) .. "} "
+    end
+    prose = prose .. '{"groups":[{"title":"Perf","hunk_ids":["h1","h2","h3"]}]}'
+    -- Create 15 more invalid structures after JSON, adding ~300 more braces
+    for i = 1, 15 do
+      prose = prose .. " {extra_" .. i .. ":" .. string.rep("{inner", 10) .. "data" .. string.rep("}", 10) .. "}"
+    end
+
+    local start = vim.uv.hrtime()
+    local r = claude_cli.parse_response(prose)
+    local elapsed_ms = (vim.uv.hrtime() - start) / 1e6
+
+    assert.is_not_nil(r)
+    assert.equals("Perf", r.groups[1].title)
+    assert.is_true(elapsed_ms < 500, ("Expected <500ms, got %.1fms"):format(elapsed_ms))
+  end)
 end)
 
 describe("claude_cli provider", function()
