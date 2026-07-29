@@ -80,4 +80,23 @@ describe("hunks.parse", function()
     assert.same({ start_line = 1, end_line = 1 }, h.original)
     assert.same({ start_line = 1, end_line = 4 }, h.modified)
   end)
+
+  it("does not add phantom trailing line to last hunk", function()
+    -- Regression test for FINDING 1: phantom trailing line corruption
+    assert.equals("@@ -1,2 +0,0 @@\n-l1\n-l2\n", parsed[5].text)
+  end)
+
+  it("normalizes CRLF line endings in diff parsing", function()
+    -- Regression test for FINDING 2: CRLF normalization
+    local diff_crlf = DIFF:gsub("\n", "\r\n")
+    local parsed_crlf, _ = hunks.parse(diff_crlf)
+    -- Check first hunk id is correct (file path should have no \r)
+    assert.equals("src/a.lua:1", parsed_crlf[1].id)
+    -- Check that file path in first hunk has no \r
+    assert.not_match("\r", parsed_crlf[1].file)
+    -- Check that file path in all hunks has no \r
+    for i, hunk in ipairs(parsed_crlf) do
+      assert.not_match("\r", hunk.file, "Hunk " .. i .. " file path contains \\r")
+    end
+  end)
 end)

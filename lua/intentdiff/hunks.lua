@@ -21,7 +21,12 @@ function M.parse(diff_text)
       current = nil
     end
   end
-  for line in (diff_text .. "\n"):gmatch("(.-)\n") do
+  -- Only append "\n" if diff_text doesn't already end with one (FINDING 1 fix)
+  local needs_newline = #diff_text == 0 or diff_text:sub(-1) ~= "\n"
+  local text_to_parse = diff_text .. (needs_newline and "\n" or "")
+  for line in text_to_parse:gmatch("(.-)\n") do
+    -- Strip trailing \r for CRLF normalization (FINDING 2 fix)
+    line = line:gsub("\r$", "")
     local a, b = line:match("^diff %-%-git a/(.-) b/(.+)$")
     if a then
       flush()
