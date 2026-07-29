@@ -38,4 +38,17 @@ function M.wait_for(fn, timeout)
   return result
 end
 
+--- Create an executable shell script named `name` that runs `body` (sh), and
+--- prepend its dir to $PATH. Returns a restore function.
+function M.fake_bin(name, body)
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir, "p")
+  local file = dir .. "/" .. name
+  vim.fn.writefile(vim.list_extend({ "#!/bin/sh" }, vim.split(body, "\n")), file)
+  vim.fn.system({ "chmod", "+x", file })
+  local old_path = vim.env.PATH
+  vim.env.PATH = dir .. ":" .. old_path
+  return function() vim.env.PATH = old_path end
+end
+
 return M
