@@ -75,4 +75,57 @@ function M.untracked_hunk(path, lines)
   }
 end
 
+--- Collect the diff to classify and display. See task interface for opts.
+--- @param callback fun(inventory: Inventory|nil, err: string|nil)
+function M.collect(opts, callback)
+  local args = { "git", "-C", opts.git_root, "diff", "--no-color", "--no-ext-diff" }
+  if opts.base and opts.target then
+    vim.list_extend(args, { opts.base, opts.target })
+  else
+    args[#args + 1] = opts.base or "HEAD"
+  end
+
+  vim.system(args, { text = true }, function(diff_out)
+    local function finish_with(untracked)
+      -- Runs on main loop: vim.fn.* is safe here.
+      if diff_out.code ~= 0 then
+        return callback(nil, "git diff failed: " .. vim.trim(diff_out.stderr or ""))
+      end
+      local diff_text = diff_out.stdout or ""
+      local hunks, files = M.parse(diff_text)
+      for _, path in ipairs(untracked or {}) do
+        local ok, lines = pcall(vim.fn.readfile, opts.git_root .. "/" .. path)
+        if ok then
+          files[#files + 1] = { path = path, status = "??" }
+          hunks[#hunks + 1] = M.untracked_hunk(path, lines)
+        end
+      end
+      local hashes = {}
+      for i, h in ipairs(hunks) do hashes[i] = h.content_hash end
+      callback({
+        hunks = hunks,
+        files = files,
+        diff_text = diff_text,
+        diff_hash = vim.fn.sha256(table.concat(hashes, "\n")),
+      })
+    end
+
+    if opts.base and opts.target then
+      return vim.schedule(function() finish_with(nil) end)
+    end
+    vim.system(
+      { "git", "-C", opts.git_root, "ls-files", "--others", "--exclude-standard" },
+      { text = true },
+      function(ls_out)
+        vim.schedule(function()
+          local untracked = ls_out.code == 0
+              and vim.split(vim.trim(ls_out.stdout or ""), "\n", { trimempty = true })
+            or nil
+          finish_with(untracked)
+        end)
+      end
+    )
+  end)
+end
+
 return M
