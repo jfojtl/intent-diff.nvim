@@ -88,8 +88,16 @@ local function grouped_model(inventory, groups, info, provider_label)
   }
 end
 
+-- Forward-declared: resolve_args' merge-base failure branch needs to close
+-- the already-opened tab/session (defined further down, alongside M.close).
+local close_entry
+
 --- Parse :IntentDiff args → collect opts. cb(collect_opts, base_for_view, target_for_view)
-local function resolve_args(argline, git_root, cb)
+--- `token` identifies the session opened by the caller, so the merge-base
+--- failure branch can close it — resolve_args no longer just notifies and
+--- silently returns without calling cb, which used to leak the opened
+--- tab+sidebar stuck on "⟳ classifying…" forever.
+local function resolve_args(argline, git_root, token, cb)
   local view = require("intentdiff.view")
   local args = vim.split(vim.trim(argline or ""), "%s+", { trimempty = true })
   if #args == 0 then
@@ -105,6 +113,7 @@ local function resolve_args(argline, git_root, cb)
       if err or not mb then
         return vim.schedule(function()
           vim.notify("intent-diff: cannot resolve merge-base of " .. three_dot, vim.log.levels.ERROR)
+          close_entry(token)
         end)
       end
       cb({ git_root = git_root, base = mb }, mb)
@@ -131,6 +140,11 @@ local function classify_and_render(token, opts)
   classify.run(inventory, {
     provider = provider,
     force = opts and opts.force,
+    -- Scope run-supersession to THIS session: without a per-session key,
+    -- classify.run's single module-global "latest run wins" counter meant a
+    -- second concurrent :IntentDiff (or a reclassify in another tab) could
+    -- supersede — and thus silently drop — this session's in-flight result.
+    session_key = token,
   }, function(groups, err, info)
     local current = sessions[token]
     if not current or current.inventory ~= inventory then
@@ -143,6 +157,10 @@ local function classify_and_render(token, opts)
       current.model = grouped_model(current.inventory, groups, info, label)
     end
     current.sidebar.update(current.model)
+    -- Resync any attached navigation ctx to the new model — otherwise ]c/[c
+    -- keeps reading the stale pre-classify model until the user's next
+    -- select_file, even though the sidebar is now showing the new one.
+    require("intentdiff.navigation").update_model(current.sess.tabpage, current.model)
   end)
 end
 
@@ -185,7 +203,7 @@ local function select_file(token, group_i, file_i, opts)
   })
 end
 
-local function close_entry(token)
+close_entry = function(token)
   local entry = sessions[token]
   if not entry then
     return
@@ -289,7 +307,7 @@ function M.open(argline)
   sidebar.update(sessions[token].model)
   vim.cmd("wincmd l") -- focus the (future) diff area right of the sidebar
 
-  resolve_args(argline, git_root, function(collect_opts, base_rev, target_rev)
+  resolve_args(argline, git_root, token, function(collect_opts, base_rev, target_rev)
     require("intentdiff.hunks").collect(collect_opts, function(inventory, err)
       if not inventory then
         vim.notify("intent-diff: " .. err, vim.log.levels.ERROR)

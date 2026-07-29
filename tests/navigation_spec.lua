@@ -176,4 +176,35 @@ describe("navigation integration (move/attach/detach/set_position)", function()
     assert.has_no.errors(function() navigation.next_hunk(tabpage) end)
     assert.equals(1, vim.api.nvim_win_get_cursor(win2)[1])
   end)
+
+  it("update_model replaces ctx.model in place for an attached tabpage", function()
+    navigation.attach(tabpage, ctx)
+    local new_model = { groups = { { files = mk_files() } } }
+    navigation.update_model(tabpage, new_model)
+    assert.equals(new_model, ctx.model)
+  end)
+
+  it("update_model resets group_i and file_i to 1 when group_i is out of range", function()
+    navigation.attach(tabpage, ctx)
+    ctx.group_i, ctx.file_i = 5, 2
+    local new_model = { groups = { { files = mk_files() } } } -- only 1 group
+    navigation.update_model(tabpage, new_model)
+    assert.equals(1, ctx.group_i)
+    assert.equals(1, ctx.file_i)
+  end)
+
+  it("update_model resets file_i to 1 when it is out of range within a still-valid group", function()
+    navigation.attach(tabpage, ctx)
+    ctx.group_i, ctx.file_i = 1, 99
+    local new_model = { groups = { { files = mk_files() } } } -- group 1 has 2 files
+    navigation.update_model(tabpage, new_model)
+    assert.equals(1, ctx.group_i)
+    assert.equals(1, ctx.file_i)
+  end)
+
+  it("update_model is a no-op and does not error when there is no attached state", function()
+    assert.has_no.errors(function()
+      navigation.update_model(tabpage, { groups = {} })
+    end)
+  end)
 end)

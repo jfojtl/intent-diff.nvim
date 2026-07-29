@@ -105,6 +105,39 @@ describe("classify.run", function()
     assert.is_false(first_fired)
   end)
 
+  it("runs with different session_keys do not supersede each other", function()
+    local first, second
+    classify.run(mk_inventory("h-key-a"), {
+      session_key = "session-a",
+      provider = provider_returning({ { title = "A", hunk_ids = { "a.lua:1" } } }),
+    }, function(g) first = g end)
+    classify.run(mk_inventory("h-key-b"), {
+      session_key = "session-b",
+      provider = provider_returning({ { title = "B", hunk_ids = { "a.lua:1" } } }),
+    }, function(g) second = g end)
+    helpers.wait_for(function() return first and second end)
+    assert.equals("A", first[1].title)
+    assert.equals("B", second[1].title)
+  end)
+
+  it("a newer run with the SAME session_key supersedes the older in-flight run", function()
+    local slow_cb
+    local first_fired = false
+    classify.run(mk_inventory("h-key-slow"), {
+      session_key = "session-c",
+      provider = function(_, cb) slow_cb = cb return { cancel = function() end } end,
+    }, function() first_fired = true end)
+    local second
+    classify.run(mk_inventory("h-key-fast"), {
+      session_key = "session-c",
+      provider = provider_returning({ { title = "Second", hunk_ids = { "a.lua:1" } } }),
+    }, function(g) second = g end)
+    helpers.wait_for(function() return second end)
+    slow_cb({ groups = { { title = "Late", hunk_ids = { "a.lua:1" } } } })
+    vim.wait(200, function() return false end, 50)
+    assert.is_false(first_fired)
+  end)
+
   it("skips classification above max_hunks", function()
     config.setup({ cache_dir = vim.fn.tempname(), max_hunks = 0 })
     local groups, info

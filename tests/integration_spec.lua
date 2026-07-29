@@ -77,4 +77,22 @@ describe(":IntentDiff end-to-end", function()
     assert.equals(1, #session.model.groups)
     assert.equals(3, #session.model.groups[1].hunks)
   end)
+
+  it("closes the opened tab and session when the merge-base cannot be resolved", function()
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = fake_provider({}),
+    })
+    local tabs_before = #vim.api.nvim_list_tabpages()
+    require("intentdiff").open("definitely-no-such-branch...")
+
+    local closed = helpers.wait_for(function()
+      return #vim.api.nvim_list_tabpages() == tabs_before or nil
+    end, 10000)
+
+    assert.truthy(closed, "expected the opened tab to be closed after merge-base failure")
+    assert.equals(tabs_before, #vim.api.nvim_list_tabpages())
+    local tab = vim.api.nvim_get_current_tabpage()
+    assert.is_nil(require("intentdiff")._session(tab))
+  end)
 end)

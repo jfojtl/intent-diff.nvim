@@ -54,7 +54,19 @@ function M.reconcile(inventory, raw_groups)
   return groups
 end
 
-local run_token = 0
+-- Latest in-flight run token PER session_key, not a single module-global
+-- counter. A module-global counter meant starting run N+1 for ANY session
+-- (e.g. a second concurrent :IntentDiff, or a reclassify in one tab while
+-- another tab is still loading) silently superseded run N's callback even
+-- when the two runs belonged to different sessions — the older session's
+-- sidebar would then be stuck on "classifying…" forever, since its callback
+-- would never fire. Keying the token per session_key (default: a single
+-- shared key, so callers that never pass session_key keep today's
+-- single-session supersede-the-previous-run-in-THIS-session semantics)
+-- scopes supersession to "a newer run in the same session", which is the
+-- actual invariant we want.
+local run_tokens = {}
+local DEFAULT_SESSION_KEY = {} -- sentinel identity object
 
 --- Build the provider request, honoring size thresholds.
 function M.build_request(inventory)
@@ -81,11 +93,12 @@ end
 function M.run(inventory, opts, callback)
   local cache = require("intentdiff.cache")
   local cfg = require("intentdiff.config").options
-  run_token = run_token + 1
-  local token = run_token
+  local session_key = opts.session_key or DEFAULT_SESSION_KEY
+  run_tokens[session_key] = (run_tokens[session_key] or 0) + 1
+  local token = run_tokens[session_key]
   local function deliver(groups, err, info)
     vim.schedule(function()
-      if token == run_token then
+      if token == run_tokens[session_key] then
         callback(groups, err, info or {})
       end
     end)
@@ -112,8 +125,8 @@ function M.run(inventory, opts, callback)
 
   opts.provider(M.build_request(inventory), function(result, err)
     vim.schedule(function()
-      if token ~= run_token then
-        return -- superseded by a newer run
+      if token ~= run_tokens[session_key] then
+        return -- superseded by a newer run in the same session
       end
       if not result then
         return callback(nil, err or "provider failed", {})

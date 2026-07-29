@@ -103,4 +103,26 @@ function M.set_position(tabpage, group_i, file_i)
   end
 end
 
+--- Resync an attached ctx to a freshly-classified model. Without this, a
+--- reclassify (or the initial classify finishing after the user has already
+--- navigated) leaves ctx.model pointing at stale group/file data while
+--- ctx.group_i/ctx.file_i still index into it — ]c/[c would then read from a
+--- model no longer shown anywhere. No-op if `tabpage` has no attached state.
+function M.update_model(tabpage, model)
+  local ctx = state[tabpage]
+  if not ctx then
+    return
+  end
+  ctx.model = model
+  local groups = model.groups or {}
+  if #groups == 0 or ctx.group_i < 1 or ctx.group_i > #groups then
+    ctx.group_i, ctx.file_i = 1, 1
+    return
+  end
+  local files = groups[ctx.group_i].files or {}
+  if #files == 0 or ctx.file_i < 1 or ctx.file_i > #files then
+    ctx.file_i = 1
+  end
+end
+
 return M
