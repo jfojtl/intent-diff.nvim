@@ -138,6 +138,34 @@ describe("classify.run", function()
     assert.is_false(first_fired)
   end)
 
+  it("cancels the superseded provider run instead of leaving it running", function()
+    local cancelled = 0
+    classify.run(mk_inventory("h-cancel-1"), {
+      session_key = "session-cancel",
+      provider = function() return { cancel = function() cancelled = cancelled + 1 end } end,
+    }, function() end)
+    assert.equals(0, cancelled)
+
+    -- Same session, newer run ⇒ the first provider's job is now pointless.
+    local second
+    classify.run(mk_inventory("h-cancel-2"), {
+      session_key = "session-cancel",
+      provider = provider_returning({ { title = "Second", hunk_ids = { "a.lua:1" } } }),
+    }, function(g) second = g end)
+    helpers.wait_for(function() return second end)
+    assert.equals(1, cancelled)
+
+    -- Closing the session cancels whatever is still in flight.
+    local third_cancelled = 0
+    classify.run(mk_inventory("h-cancel-3"), {
+      session_key = "session-cancel",
+      provider = function() return { cancel = function() third_cancelled = third_cancelled + 1 end } end,
+    }, function() end)
+    assert.is_true(classify.cancel("session-cancel"))
+    assert.equals(1, third_cancelled)
+    assert.is_false(classify.cancel("session-cancel")) -- nothing left to cancel
+  end)
+
   it("skips classification above max_hunks", function()
     config.setup({ cache_dir = vim.fn.tempname(), max_hunks = 0 })
     local groups, info

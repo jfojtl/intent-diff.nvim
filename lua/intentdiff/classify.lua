@@ -68,6 +68,26 @@ end
 local run_tokens = {}
 local DEFAULT_SESSION_KEY = {} -- sentinel identity object
 
+-- Cancel handle returned by the provider for the run currently in flight per
+-- session_key. Superseding a run only stopped us from DELIVERING the old
+-- result; the provider job (a `claude -p` process for the default provider)
+-- kept running to completion, burning tokens and a job slot for an answer
+-- nobody would ever read. Mashing `r` therefore piled up one live CLI process
+-- per press. Keep the handle so the next run — and session close, via
+-- M.cancel — can kill it.
+local run_handles = {}
+
+--- Cancel the in-flight provider run for `session_key`, if any.
+function M.cancel(session_key)
+  local handle = run_handles[session_key or DEFAULT_SESSION_KEY]
+  run_handles[session_key or DEFAULT_SESSION_KEY] = nil
+  if type(handle) == "table" and type(handle.cancel) == "function" then
+    pcall(handle.cancel)
+    return true
+  end
+  return false
+end
+
 --- Build the provider request, honoring size thresholds.
 function M.build_request(inventory)
   local cfg = require("intentdiff.config").options
@@ -94,6 +114,7 @@ function M.run(inventory, opts, callback)
   local cache = require("intentdiff.cache")
   local cfg = require("intentdiff.config").options
   local session_key = opts.session_key or DEFAULT_SESSION_KEY
+  M.cancel(session_key) -- this run supersedes any provider still in flight
   run_tokens[session_key] = (run_tokens[session_key] or 0) + 1
   local token = run_tokens[session_key]
   local function deliver(groups, err, info)
@@ -123,11 +144,12 @@ function M.run(inventory, opts, callback)
       { skipped = ("diff too large (%d hunks > %d)"):format(#inventory.hunks, cfg.max_hunks) })
   end
 
-  opts.provider(M.build_request(inventory), function(result, err)
+  run_handles[session_key] = opts.provider(M.build_request(inventory), function(result, err)
     vim.schedule(function()
       if token ~= run_tokens[session_key] then
         return -- superseded by a newer run in the same session
       end
+      run_handles[session_key] = nil -- this run is done; nothing to cancel
       if not result then
         return callback(nil, err or "provider failed", {})
       end
