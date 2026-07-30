@@ -32,7 +32,13 @@ M.defaults = {
   -- Set to false to keep the sidebar-only-until-<CR> behavior.
   auto_open = true,
   max_full_diff_bytes = 100 * 1024, -- above this, prompt gets per-hunk summaries only
-  max_hunks = 400, -- above this, skip classification with a notice
+  max_hunks = 600, -- above this, skip classification with a notice
+  -- Added and untracked files arrive from git as a single whole-file hunk, so
+  -- they could only ever belong to one intent. Splitting them at blank-line
+  -- boundaries lets different parts of one new file land in different intents,
+  -- and makes the group fold filter meaningful for them. Set enabled = false
+  -- to restore one-hunk-per-added-file.
+  added_file_split = { enabled = true, min_lines = 60, target_lines = 40 },
   cache_dir = vim.fn.stdpath("cache") .. "/intentdiff",
   log_file = vim.fn.stdpath("cache") .. "/intentdiff/intentdiff.log", -- diagnostics log; see :IntentDiffLog
 }

@@ -89,6 +89,106 @@ function M.untracked_hunk(path, lines)
   }
 end
 
+--- Split a whole-file addition into sub-hunks at blank-line boundaries.
+---
+--- Applies only to pure additions — `@@ -0,0 +1,N @@`, which is what git emits
+--- for status "A" and what M.untracked_hunk synthesises for "??". Anything with
+--- a non-empty original side is returned unchanged, so this is safe to run over
+--- every hunk in an inventory.
+---
+--- Blocks are delimited by blank source lines (a body line of exactly "+").
+--- Whole blocks accumulate until the chunk reaches `target_lines`, so a cut
+--- never lands inside a block. A trailing remainder shorter than half the
+--- target is folded back into the previous chunk rather than left as a stub.
+--- @return Hunk[] one or more hunks; the original table when no split applies
+function M.split_added(hunk, opts)
+  opts = opts or {}
+  local min_lines = opts.min_lines or 60
+  local target_lines = opts.target_lines or 40
+
+  local body = {}
+  for line in hunk.text:gmatch("(.-)\n") do
+    if not line:match("^@@") and line:sub(1, 1) ~= "\\" then
+      if line:sub(1, 1) ~= "+" then
+        return { hunk } -- not a pure addition
+      end
+      body[#body + 1] = line
+    end
+  end
+  if #body < min_lines then
+    return { hunk }
+  end
+
+  local blocks, block = {}, {}
+  for _, line in ipairs(body) do
+    block[#block + 1] = line
+    if line == "+" then -- blank source line closes a block
+      blocks[#blocks + 1] = block
+      block = {}
+    end
+  end
+  if #block > 0 then
+    blocks[#blocks + 1] = block
+  end
+
+  local chunks, acc = {}, {}
+  for _, b in ipairs(blocks) do
+    vim.list_extend(acc, b)
+    if #acc >= target_lines then
+      chunks[#chunks + 1] = acc
+      acc = {}
+    end
+  end
+  if #acc > 0 then
+    if #chunks > 0 and #acc < math.floor(target_lines / 2) then
+      vim.list_extend(chunks[#chunks], acc)
+    else
+      chunks[#chunks + 1] = acc
+    end
+  end
+  if #chunks <= 1 then
+    return { hunk }
+  end
+
+  local out, line_no = {}, hunk.modified.start_line
+  for i, chunk in ipairs(chunks) do
+    local header = ("@@ -0,0 +%d,%d @@"):format(line_no, #chunk)
+    local text = header .. "\n" .. table.concat(chunk, "\n") .. "\n"
+    out[i] = {
+      id = hunk.file .. ":" .. i, -- re-derived by M.collect below
+      file = hunk.file,
+      old_path = hunk.old_path,
+      status = hunk.status,
+      header = header,
+      original = { start_line = 1, end_line = 1 },
+      modified = { start_line = line_no, end_line = line_no + #chunk },
+      text = text,
+      additions = #chunk,
+      deletions = 0,
+      content_hash = vim.fn.sha256(text),
+    }
+    line_no = line_no + #chunk
+  end
+  return out
+end
+
+--- Expand added-file hunks in place and renumber every id per file, so ids stay
+--- `<path>:1`, `<path>:2`, … in modified-line order regardless of splitting.
+--- Non-added hunks pass through untouched and keep the id parse() gave them.
+local function apply_added_split(hunks)
+  local cfg = require("intentdiff.config").options.added_file_split or {}
+  local out, per_file = {}, {}
+  for _, h in ipairs(hunks) do
+    local pieces = (cfg.enabled == false) and { h } or M.split_added(h, cfg)
+    for _, piece in ipairs(pieces) do
+      per_file[piece.file] = (per_file[piece.file] or 0) + 1
+      piece.id = piece.file .. ":" .. per_file[piece.file]
+      out[#out + 1] = piece
+    end
+  end
+  return out
+end
+
 --- Collect the diff to classify and display. See task interface for opts.
 --- @param callback fun(inventory: Inventory|nil, err: string|nil)
 function M.collect(opts, callback)
@@ -114,6 +214,9 @@ function M.collect(opts, callback)
           hunks[#hunks + 1] = M.untracked_hunk(path, lines)
         end
       end
+      -- Split BEFORE hashing: the inventory hash must describe the hunks the
+      -- classifier and the cache actually see.
+      hunks = apply_added_split(hunks)
       local hashes = {}
       for i, h in ipairs(hunks) do hashes[i] = h.content_hash end
       callback({
