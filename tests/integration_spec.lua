@@ -705,4 +705,247 @@ describe(":IntentDiff end-to-end", function()
     local tab = vim.api.nvim_get_current_tabpage()
     assert.is_nil(require("intentdiff")._session(tab))
   end)
+
+  -- ------------------------------------------------------------------------
+  -- auto_open: the sidebar used to reach "ready" with two empty codediff
+  -- placeholder panes and stay that way until the user pressed <CR> — nothing
+  -- ever auto-opened. These tests drive :IntentDiff WITHOUT any simulated
+  -- keypress and assert real content shows up on its own.
+  -- ------------------------------------------------------------------------
+
+  --- True once `buf`'s name is a real file path, not one of codediff's empty
+  --- placeholder buffers ("CodeDiff N.N" — nvim resolves the relative name
+  --- against cwd, so it may show up prefixed with the repo path).
+  local function is_placeholder_name(name)
+    return name:match("CodeDiff %d+%.%d+$") ~= nil
+  end
+
+  --- Wait for the modified pane to show `path` with real content (line count
+  --- > 1) and, if given, the fold state at `visible`/`folded` lines. Returns
+  --- the window.
+  local function wait_auto_opened(tab, path, visible, folded)
+    local view = require("intentdiff.view")
+    return helpers.wait_for(function()
+      local cd_session = view.get_session(tab)
+      local w = cd_session and cd_session.modified_win
+      if not (w and vim.api.nvim_win_is_valid(w)) then
+        return nil
+      end
+      local buf = vim.api.nvim_win_get_buf(w)
+      local name = vim.api.nvim_buf_get_name(buf)
+      if not name:find(path, 1, true) then
+        return nil
+      end
+      if vim.api.nvim_buf_line_count(buf) <= 1 then
+        return nil
+      end
+      if vim.wo[w].foldmethod ~= "expr" then
+        return nil
+      end
+      if visible and fold_state(w, visible) ~= -1 then
+        return nil
+      end
+      if folded and not (fold_state(w, folded) > 0) then
+        return nil
+      end
+      return w
+    end, 10000)
+  end
+
+  --- Wait for the modified pane to show ANY real (non-placeholder) content,
+  --- regardless of which file. Used while classification is still loading,
+  --- before groups (and thus a specific expected path) exist.
+  local function wait_content_pane(tab)
+    local view = require("intentdiff.view")
+    return helpers.wait_for(function()
+      local cd_session = view.get_session(tab)
+      local w = cd_session and cd_session.modified_win
+      if not (w and vim.api.nvim_win_is_valid(w)) then
+        return nil
+      end
+      local buf = vim.api.nvim_win_get_buf(w)
+      local name = vim.api.nvim_buf_get_name(buf)
+      if is_placeholder_name(name) then
+        return nil
+      end
+      if vim.api.nvim_buf_line_count(buf) <= 1 then
+        return nil
+      end
+      return w
+    end, 10000)
+  end
+
+  it("auto-opens the first group's first file with content and correct folds, and returns focus to the sidebar", function()
+    make_two_group_repo()
+    local session, tab = open_two_groups()
+
+    -- Group one = a.lua's hunk at line 5 only; group two owns a.lua's hunk
+    -- at line 55. Both panes must hold real content, and the modified pane's
+    -- folds must show group one's hunk while hiding group two's.
+    local win = wait_auto_opened(tab, "a.lua", 5, 55)
+    assert.truthy(win, "modified pane never auto-opened a.lua with group one's folds")
+
+    local cd_session = require("intentdiff.view").get_session(tab)
+    local mbuf = vim.api.nvim_win_get_buf(cd_session.modified_win)
+    local obuf = vim.api.nvim_win_get_buf(cd_session.original_win)
+    assert.is_true(vim.api.nvim_buf_line_count(mbuf) > 1, "modified pane still empty")
+    assert.is_true(vim.api.nvim_buf_line_count(obuf) > 1, "original pane still empty")
+    assert.is_false(is_placeholder_name(vim.api.nvim_buf_get_name(mbuf)))
+    assert.is_false(is_placeholder_name(vim.api.nvim_buf_get_name(obuf)))
+    assert.equals("expr", vim.wo[win].foldmethod)
+    assert.equals(-1, fold_state(win, 5))
+    assert.is_true(fold_state(win, 55) > 0)
+
+    local focused = helpers.wait_for(function()
+      return vim.api.nvim_get_current_win() == session.sidebar.winid or nil
+    end, 10000)
+    assert.truthy(focused, "focus did not return to the sidebar after auto-open")
+  end)
+
+  it("auto-opens a file from the flat 'All changes' group while classification is still loading", function()
+    make_two_group_repo()
+    local deferred_cb
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = function(_, cb)
+        deferred_cb = cb
+        return { cancel = function() end }
+      end,
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local session = helpers.wait_for(function()
+      return require("intentdiff")._session(tab)
+    end, 10000)
+    assert.truthy(session, "session never created")
+
+    -- Still loading: a file from the flat "All changes" group must already
+    -- be shown with real content, before the provider ever responds.
+    local win = wait_content_pane(tab)
+    assert.truthy(win, "no file auto-opened while classification was still loading")
+    assert.equals("loading", require("intentdiff")._session(tab).model.state)
+
+    assert.truthy(deferred_cb, "provider never invoked")
+    deferred_cb({ groups = {
+      { title = "Group one", hunk_ids = { "a.lua:1" } },
+      { title = "Group two", hunk_ids = { "a.lua:2", "b.lua:1" } },
+    } })
+    local done = helpers.wait_for(function()
+      local cur = require("intentdiff")._session(tab)
+      return cur and cur.model.state == "ready" and cur or nil
+    end, 10000)
+    assert.truthy(done, "classification never completed")
+  end)
+
+  it("a manual selection made while classification is still loading survives the deferred callback", function()
+    make_two_group_repo()
+    local deferred_cb
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = function(_, cb)
+        deferred_cb = cb
+        return { cancel = function() end }
+      end,
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local session = helpers.wait_for(function()
+      return require("intentdiff")._session(tab)
+    end, 10000)
+    assert.truthy(session, "session never created")
+
+    -- Wait for the loading-phase auto-open to actually render something
+    -- first, so the manual selection below is a clean, unambiguous override
+    -- rather than a race against the auto-open's own async show_file().
+    assert.truthy(wait_content_pane(tab), "no auto-opened content before manual selection")
+
+    -- Manually select b.lua (file_i=2 in the flat "All changes" group; a.lua
+    -- is file_i=1 and is what auto-open just showed) via the real <CR>
+    -- keymap.
+    local line = sidebar_line(session.sidebar, "file", 1, 2)
+    focus_row(session, line)
+    press(session.sidebar.winid, "<CR>")
+
+    local view = require("intentdiff.view")
+    local win = helpers.wait_for(function()
+      local cd_session = view.get_session(tab)
+      local w = cd_session and cd_session.modified_win
+      if not (w and vim.api.nvim_win_is_valid(w)) then
+        return nil
+      end
+      local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w))
+      return name:find("b.lua", 1, true) and w or nil
+    end, 10000)
+    assert.truthy(win, "manual selection of b.lua never rendered")
+
+    assert.truthy(deferred_cb, "provider never invoked")
+    deferred_cb({ groups = {
+      { title = "Group one", hunk_ids = { "a.lua:1" } },
+      { title = "Group two", hunk_ids = { "a.lua:2", "b.lua:1" } },
+    } })
+    local done = helpers.wait_for(function()
+      local cur = require("intentdiff")._session(tab)
+      return cur and cur.model.state == "ready" and cur or nil
+    end, 10000)
+    assert.truthy(done, "classification never completed")
+
+    -- Give any (incorrect) auto-open a moment to fire, then assert b.lua is
+    -- STILL what's shown — auto-open must never steal a manual selection.
+    vim.wait(300)
+    local cd_session = view.get_session(tab)
+    local final_name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(cd_session.modified_win))
+    assert.truthy(final_name:find("b.lua", 1, true),
+      "auto-open stole the user's manual selection: " .. final_name)
+  end)
+
+  it("auto_open = false leaves the placeholder panes until a manual selection", function()
+    make_two_group_repo()
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      auto_open = false,
+      provider = fake_provider({
+        { title = "Group one", hunk_ids = { "a.lua:1" } },
+        { title = "Group two", hunk_ids = { "a.lua:2", "b.lua:1" } },
+      }),
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local session = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model.state == "ready" and #s.model.groups == 2 and s or nil
+    end, 10000)
+    assert.truthy(session, "session never reached ready with 2 groups")
+
+    -- Give any (wrongly-firing) auto-open a moment, then assert the panes
+    -- are still codediff's empty placeholders.
+    vim.wait(300)
+    local view = require("intentdiff.view")
+    local cd_session = view.get_session(tab)
+    local mbuf = vim.api.nvim_win_get_buf(cd_session.modified_win)
+    local mname = vim.api.nvim_buf_get_name(mbuf)
+    assert.truthy(is_placeholder_name(mname), "expected an empty placeholder pane, got " .. mname)
+    assert.is_true(vim.api.nvim_buf_line_count(mbuf) <= 1)
+
+    -- ...until a manual selection, which still works exactly as before.
+    local win = select_and_wait(session, 1, 1, "a.lua", 5, 55)
+    assert.truthy(win)
+  end)
+
+  it("an empty diff does not error and does not open anything", function()
+    local repo = helpers.make_repo({ ["same.lua"] = "x\ny\nz" })
+    vim.cmd("cd " .. repo)
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = fake_provider({}),
+    })
+    local tabs_before = #vim.api.nvim_list_tabpages()
+    local ok, err = pcall(function() require("intentdiff").open("") end)
+    assert.is_true(ok, "opening an empty diff errored: " .. tostring(err))
+
+    local closed = helpers.wait_for(function()
+      return #vim.api.nvim_list_tabpages() == tabs_before or nil
+    end, 10000)
+    assert.truthy(closed, "expected the opened tab to close for an empty diff")
+    assert.equals(tabs_before, #vim.api.nvim_list_tabpages())
+  end)
 end)

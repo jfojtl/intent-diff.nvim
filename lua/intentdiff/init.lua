@@ -212,6 +212,13 @@ local function persist_last_hash(entry, info)
   require("intentdiff.cache").set_last_hash(entry.scope_key, entry.inventory.diff_hash)
 end
 
+-- Forward-declared: classify_and_render (below) auto-opens/refolds after
+-- every model it renders (flat loading model, then grouped/flat-failure
+-- ready model), but both helpers live further down the file — they depend on
+-- select_file, which itself has to exist before open_file does.
+local auto_open_first
+local refold_shown_file
+
 local function classify_and_render(token, opts)
   local classify = require("intentdiff.classify")
   local entry = sessions[token]
@@ -222,6 +229,10 @@ local function classify_and_render(token, opts)
   local provider, label = resolve_provider()
   entry.model = flat_model(inventory, "loading")
   entry.sidebar.update(entry.model)
+  -- Real content immediately instead of blank codediff placeholders: the
+  -- flat "All changes" group holds every hunk, so its first file's diff is
+  -- complete on its own even before classification groups anything.
+  auto_open_first(token)
   start_elapsed_timer(token) -- live "⟳ classifying… Ns" counter while this run is in flight
   local previous_hash = require("intentdiff.cache").get_last_hash(entry.scope_key)
   classify.run(inventory, {
@@ -263,10 +274,38 @@ local function classify_and_render(token, opts)
     -- keeps reading the stale pre-classify model until the user's next
     -- select_file, even though the sidebar is now showing the new one.
     require("intentdiff.navigation").update_model(current.sess.tabpage, current.model)
+    -- Auto-open the first real group's first file — unless the user already
+    -- picked their own file (manually or via ]c/[c) while this was running,
+    -- in which case their view is left alone and just re-folded to match
+    -- whichever group it now belongs to.
+    if current.user_selected then
+      refold_shown_file(token)
+    else
+      auto_open_first(token)
+    end
   end)
 end
 
-local function select_file(token, group_i, file_i, opts)
+-- Forward-declared: open_file's on_ready closure below wires ]c/[c-driven
+-- navigation back through select_file (which marks entry.user_selected —
+-- see below), so it has to exist before open_file is defined.
+local select_file
+
+--- Show `file_entry` (group_i/file_i in the CURRENT model) in the diff panes
+--- and wire up navigation ctx. Shared by manual/navigation-driven selection
+--- (select_file, below — which also marks entry.user_selected) and auto-open
+--- (auto_open_first, further below — which must NOT mark it).
+---
+--- opts.auto: true only for auto-open call sites. When true, on_ready
+--- re-checks entry.user_selected — which may have flipped true while
+--- show_file() was asynchronously in flight, if the user made their own
+--- selection in the meantime — and bails out entirely rather than clobbering
+--- the navigation ctx or focus the user's own selection now owns. It also
+--- returns focus to the sidebar once the auto-opened content is ready, so the
+--- user can keep navigating group/file rows immediately (see task README /
+--- report). Manual selection (opts.auto unset) leaves focus wherever
+--- codediff's own render left it, unchanged from before this feature.
+local function open_file(token, group_i, file_i, opts)
   local entry = sessions[token]
   if not entry then
     return
@@ -283,6 +322,9 @@ local function select_file(token, group_i, file_i, opts)
       local current = sessions[token]
       if not current then
         return -- closed while show_file() was in flight
+      end
+      if opts and opts.auto and current.user_selected then
+        return -- user selected something else while this auto-open was in flight
       end
       -- Read sess.tabpage fresh: show_file() may have just reconciled it to
       -- the tab codediff actually created (see module-level note above).
@@ -301,8 +343,90 @@ local function select_file(token, group_i, file_i, opts)
         local h = opts.jump == "last" and file_entry.hunks[#file_entry.hunks] or file_entry.hunks[1]
         pcall(vim.api.nvim_win_set_cursor, win, { h.modified.start_line, 0 })
       end
+      if opts and opts.auto and vim.api.nvim_tabpage_is_valid(tabpage)
+          and current.sidebar and vim.api.nvim_win_is_valid(current.sidebar.winid) then
+        vim.api.nvim_set_current_win(current.sidebar.winid)
+      end
     end,
   })
+end
+
+--- Manual (sidebar <CR>) or ]c/[c-driven selection. Marks entry.user_selected
+--- so auto-open never overrides the user's own choice again for this
+--- session — see open_file's opts.auto handling and auto_open_first below.
+select_file = function(token, group_i, file_i, opts)
+  local entry = sessions[token]
+  if entry then
+    entry.user_selected = true
+  end
+  open_file(token, group_i, file_i, opts)
+end
+
+--- Auto-open the first file of the first group, when auto_open is enabled
+--- and the user hasn't made a selection of their own yet. Two call sites:
+--- the flat "All changes" model rendered while classification is still
+--- running, and the real grouped model once it completes (see
+--- classify_and_render). No-op — leaving whatever placeholder is on screen —
+--- when there is nothing to open yet (no groups, or an (impossible in
+--- practice, but guarded) group with no files).
+auto_open_first = function(token)
+  local cfg = require("intentdiff.config").options
+  if not cfg.auto_open then
+    return
+  end
+  local entry = sessions[token]
+  if not entry or entry.user_selected then
+    return
+  end
+  local group = entry.model and entry.model.groups and entry.model.groups[1]
+  local file_entry = group and group.files and group.files[1]
+  if not file_entry then
+    return
+  end
+  open_file(token, 1, 1, { auto = true })
+end
+
+--- When classification completes and the user already has a file open
+--- (manual or ]c/[c-driven selection), don't yank their view — but that
+--- file's folds were computed against the flat "All changes" group (which
+--- shows the WHOLE file, no folding), so if it also appears in the real
+--- grouped model its folds are now wrong. Re-apply the correct group's fold
+--- filter in place, without touching what's displayed or where focus is.
+--- Whole-file statuses (??/A/D) have no folds to begin with; a shown file
+--- that the new grouping doesn't mention at all (shouldn't happen given
+--- reconcile's completeness invariant, but guarded per spec) is left alone
+--- rather than guessed at.
+refold_shown_file = function(token)
+  local cfg = require("intentdiff.config").options
+  if not cfg.auto_open then
+    return
+  end
+  local entry = sessions[token]
+  if not entry then
+    return
+  end
+  local tabpage = entry.sess.tabpage
+  if not (tabpage and vim.api.nvim_tabpage_is_valid(tabpage)) then
+    return
+  end
+  local view = require("intentdiff.view")
+  local shown = view._last_shown[tabpage]
+  if not shown then
+    return
+  end
+  local status = shown.file_entry.status
+  if status == "??" or status == "A" or status == "D" then
+    return -- whole-file panes have no group folds
+  end
+  local path = shown.file_entry.path
+  for _, g in ipairs(entry.model.groups or {}) do
+    for _, f in ipairs(g.files or {}) do
+      if f.path == path then
+        view.apply_group_folds(tabpage, f.hunks)
+        return
+      end
+    end
+  end
 end
 
 --- Drop a session's bookkeeping WITHOUT touching windows/tabs. Shared by the

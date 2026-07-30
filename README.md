@@ -118,6 +118,16 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   -- Width (columns) of the sidebar split.
   sidebar_width = 36,
 
+  -- Auto-open the first file worth looking at instead of leaving codediff's
+  -- diff panes empty until you press <CR>: the first file of the flat "All
+  -- changes" list while classification is still running, then the first
+  -- file of the first real group once it completes. A manual selection (or
+  -- ]c/[c navigation) always wins — auto-open never overrides it, it just
+  -- keeps folds in sync with the group your open file ends up in. Focus
+  -- stays in (or returns to) the sidebar so you can keep navigating rows.
+  -- Set to false to keep the sidebar-only-until-<CR> behavior.
+  auto_open = true,
+
   -- Above this diff size (bytes), the prompt sends per-hunk summaries only
   -- (file + the hunk's first 4 lines, then "… (N more lines)") instead of the
   -- full diff text.

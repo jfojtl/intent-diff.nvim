@@ -24,6 +24,13 @@ M.defaults = {
   },
   context_lines = nil, -- nil = follow codediff's diff.compact_context_lines
   sidebar_width = 36,
+  -- Auto-open the first file worth looking at, instead of leaving codediff's
+  -- empty placeholder panes until the user presses <CR>: the first file of
+  -- the flat "All changes" group while classification is still running, then
+  -- the first file of the first real group once it completes — but only if
+  -- the user hasn't already selected (or navigated to) a file of their own.
+  -- Set to false to keep the sidebar-only-until-<CR> behavior.
+  auto_open = true,
   max_full_diff_bytes = 100 * 1024, -- above this, prompt gets per-hunk summaries only
   max_hunks = 400, -- above this, skip classification with a notice
   cache_dir = vim.fn.stdpath("cache") .. "/intentdiff",
