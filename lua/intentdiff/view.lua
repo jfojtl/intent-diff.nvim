@@ -522,12 +522,21 @@ function M.show_file(sess, file_entry, opts)
 
   -- Whole-file statuses render a single pane. Added and untracked files are
   -- split into sub-hunks (hunks.split_added), so a group may own only part of
-  -- one — fold the rest away exactly as for modified files. Deleted files and
-  -- unsplit additions have a single hunk spanning everything, making this a
-  -- no-op for them.
+  -- one — fold the rest away exactly as for modified files. "D" is excluded:
+  -- pane_entries (above) always resolves the "modified" side's window/buffer
+  -- in inline layout, but a deleted file's real content lives on the
+  -- "original" side (inline_view.show_single_file sets session.single_side =
+  -- "original" and leaves modified_bufnr a 1-line empty scratch buffer — see
+  -- codediff/ui/view/inline_view.lua ~587-599). A deleted hunk's `modified`
+  -- range is also a zero-width anchor at line 1 (hunks.lua), so
+  -- compute_visible_lines(..., "modified", line_count=1, ...) would mark only
+  -- line 1 "visible" — and that foldexpr lands on the window that's actually
+  -- showing the deleted file, collapsing it entirely. Deleted files always
+  -- have a single hunk spanning everything anyway, so skipping the fold is a
+  -- no-op in side-by-side layout and avoids this inline-layout bug.
   if file_entry.status == "??" or file_entry.status == "A" or file_entry.status == "D" then
     show_whole_file_in_layout(tabpage, sess, file_entry, abs_path, "side-by-side", function()
-      if file_entry.hunks then
+      if file_entry.status ~= "D" and file_entry.hunks then
         M.apply_group_folds(tabpage, file_entry.hunks, { context = 0 })
       end
       if opts.on_ready then
@@ -628,7 +637,8 @@ function M.toggle_layout(tabpage)
       local abs_path = shown.sess.git_root .. "/" .. shown.file_entry.path
       show_whole_file_in_layout(tabpage, shown.sess, shown.file_entry, abs_path, target_layout,
         function()
-          if shown.file_entry.hunks then
+          -- Skip "D": see the comment on the equivalent branch in M.show_file.
+          if shown.file_entry.status ~= "D" and shown.file_entry.hunks then
             M.apply_group_folds(tabpage, shown.file_entry.hunks, { context = 0 })
           end
         end)

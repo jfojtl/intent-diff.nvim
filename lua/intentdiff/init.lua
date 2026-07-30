@@ -445,13 +445,20 @@ end
 --- When classification completes and the user already has a file open
 --- (manual or ]c/[c-driven selection), don't yank their view — but that
 --- file's folds were computed against the flat "All changes" group (which
---- shows the WHOLE file, no folding), so if it also appears in the real
---- grouped model its folds are now wrong. Re-apply the correct group's fold
---- filter in place, without touching what's displayed or where focus is.
---- Whole-file statuses (??/A/D) have no folds to begin with; a shown file
---- that the new grouping doesn't mention at all (shouldn't happen given
---- reconcile's completeness invariant, but guarded per spec) is left alone
---- rather than guessed at.
+--- shows the WHOLE file — for added/untracked files, every sub-hunk from
+--- hunks.split_added — with no group filtering), so if it also appears in
+--- the real grouped model its folds are now wrong. Re-apply the correct
+--- group's fold filter in place, without touching what's displayed or where
+--- focus is — for "??"/"A" with `context = 0`, matching M.show_file's
+--- whole-file branch (hunks.split_added's sub-hunks are adjacent partitions
+--- of one continuous addition, so the usual context padding would leak the
+--- next, unowned sub-hunk into view). "D" is excluded: it always carries a
+--- single hunk spanning the whole file (nothing to fold), and applying group
+--- folds to it can collapse the pane to line 1 in inline layout — see the
+--- comment on the equivalent "D" skip in M.show_file. A shown file that the
+--- new grouping doesn't mention at all (shouldn't happen given reconcile's
+--- completeness invariant, but guarded per spec) is left alone rather than
+--- guessed at.
 refold_shown_file = function(token)
   local cfg = require("intentdiff.config").options
   if not cfg.auto_open then
@@ -471,14 +478,15 @@ refold_shown_file = function(token)
     return
   end
   local status = shown.file_entry.status
-  if status == "??" or status == "A" or status == "D" then
-    return -- whole-file panes have no group folds
+  if status == "D" then
+    return -- see comment above: never fold a deleted whole-file pane
   end
+  local fold_opts = (status == "??" or status == "A") and { context = 0 } or nil
   local path = shown.file_entry.path
   for _, g in ipairs(entry.model.groups or {}) do
     for _, f in ipairs(g.files or {}) do
       if f.path == path then
-        view.apply_group_folds(tabpage, f.hunks)
+        view.apply_group_folds(tabpage, f.hunks, fold_opts)
         return
       end
     end

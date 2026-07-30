@@ -954,6 +954,92 @@ describe(":IntentDiff end-to-end", function()
       "auto-open stole the user's manual selection: " .. final_name)
   end)
 
+  it("re-folds a manually-selected added file once classification narrows it to one sub-hunk", function()
+    -- 3 blank-line-delimited 30-line blocks (90 lines total) is above
+    -- added_file_split's default min_lines=60, so hunks.collect splits
+    -- added.lua into >1 sub-hunk (see hunks.split_added / task 2).
+    local r = helpers.make_repo({ ["base.lua"] = "x" })
+    local src = {}
+    for block = 1, 3 do
+      for i = 1, 29 do src[#src + 1] = ("block%d line%d"):format(block, i) end
+      src[#src + 1] = ""
+    end
+    helpers.write_file(r, "added.lua", table.concat(src, "\n"))
+    vim.cmd("cd " .. r)
+
+    local deferred_cb
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = function(_, cb)
+        deferred_cb = cb
+        return { cancel = function() end }
+      end,
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local session = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.inventory and s or nil
+    end, 10000)
+    assert.truthy(session, "session never created")
+
+    local added_hunks = vim.tbl_filter(
+      function(h) return h.file == "added.lua" end, session.inventory.hunks)
+    assert.is_true(#added_hunks > 1, "fixture did not split added.lua into sub-hunks")
+
+    -- Manually select added.lua while classification is still "loading": the
+    -- flat "All changes" group owns every sub-hunk, so the whole file is
+    -- shown with nothing folded away yet.
+    assert.truthy(wait_content_pane(tab), "no auto-opened content before manual selection")
+    local line = sidebar_line(session.sidebar, "file", 1, nil)
+    focus_row(session, line)
+    press(session.sidebar.winid, "<CR>")
+
+    local view = require("intentdiff.view")
+    local win = helpers.wait_for(function()
+      local cd_session = view.get_session(tab)
+      local w = cd_session and cd_session.modified_win
+      if not (w and vim.api.nvim_win_is_valid(w)) then
+        return nil
+      end
+      local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w))
+      return name:find("added.lua", 1, true) and w or nil
+    end, 10000)
+    assert.truthy(win, "manual selection of added.lua never rendered")
+    -- Sanity: nothing folded yet — the flat group owns both sub-hunks.
+    assert.equals(-1, fold_state(win, added_hunks[1].modified.start_line))
+    assert.equals(-1, fold_state(win, added_hunks[#added_hunks].modified.start_line))
+
+    assert.truthy(deferred_cb, "provider never invoked")
+    -- Real grouping: sub-hunk 1 in its own group, the rest elsewhere — the
+    -- shown file (still added.lua, per the user's manual selection) now
+    -- belongs to a group that owns only PART of it.
+    local rest_ids = {}
+    for i = 2, #added_hunks do
+      rest_ids[#rest_ids + 1] = added_hunks[i].id
+    end
+    deferred_cb({ groups = {
+      { title = "First chunk", hunk_ids = { added_hunks[1].id } },
+      { title = "Rest", hunk_ids = rest_ids },
+    } })
+    local done = helpers.wait_for(function()
+      local cur = require("intentdiff")._session(tab)
+      return cur and cur.model.state == "ready" and cur or nil
+    end, 10000)
+    assert.truthy(done, "classification never completed")
+
+    -- refold_shown_file must narrow the still-open added.lua pane to the
+    -- group it now belongs to: sub-hunk 1 visible, the rest folded away —
+    -- without moving the user off their manual selection.
+    helpers.wait_for(function()
+      return fold_state(win, added_hunks[#added_hunks].modified.start_line) > 0
+    end, 10000)
+    assert.equals(-1, fold_state(win, added_hunks[1].modified.start_line))
+    assert.is_true(fold_state(win, added_hunks[#added_hunks].modified.start_line) > 0)
+    local final_name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
+    assert.truthy(final_name:find("added.lua", 1, true))
+  end)
+
   it("auto_open = false leaves the placeholder panes until a manual selection", function()
     make_two_group_repo()
     require("intentdiff").setup({

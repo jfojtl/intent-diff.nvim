@@ -94,6 +94,14 @@ describe("view: added files", function()
   it("still uses the virtual-file path for a two-revision target", function()
     local repo = repo_with_added(20)
     helpers.git(repo, "commit", "-q", "-m", "add file")
+    -- Diverge disk from the committed (HEAD) content: repo_with_added leaves
+    -- disk and HEAD identical, so before this mutation the assertions below
+    -- passed whether show_whole_file took the disk path or the virtual
+    -- (`git show HEAD:path`) path — the disk path is wrong for a
+    -- two-revision target and this test wouldn't have caught it. Only the
+    -- virtual-file path can still produce the 20 "added line N" lines
+    -- asserted below; the disk path would show this mutated text instead.
+    helpers.write_file(repo, "added.lua", "MUTATED ON DISK, NOT COMMITTED")
     local sess = { tabpage = view.open_tab(), git_root = repo,
       base_revision = "HEAD~1", target_revision = "HEAD" }
     local ready = false
@@ -105,5 +113,6 @@ describe("view: added files", function()
     local lines = vim.api.nvim_buf_get_lines(session.modified_bufnr, 0, -1, false)
     assert.equals(20, #lines)
     assert.equals("added line 1", lines[1])
+    assert.equals("added line 20", lines[20])
   end)
 end)

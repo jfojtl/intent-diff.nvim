@@ -94,6 +94,62 @@ describe("view adapter", function()
     view.close_tab(sess)
   end)
 
+  it("toggling a deleted file to inline layout never collapses it to line 1", function()
+    assert.is_true(view.load())
+    require("intentdiff.config").setup({})
+    local repo = helpers.make_repo({ ["gone.txt"] = "alpha\nbeta\ngamma" })
+    helpers.git(repo, "rm", "-q", "gone.txt")
+
+    local inv
+    require("intentdiff.hunks").collect({ git_root = repo }, function(i) inv = i end)
+    helpers.wait_for(function() return inv end)
+    local deleted = vim.tbl_filter(function(h) return h.file == "gone.txt" end, inv.hunks)
+
+    local git = require("codediff.core.git")
+    local base
+    git.resolve_revision("HEAD", repo, function(_, hash) base = hash end)
+    helpers.wait_for(function() return base end)
+
+    local sess = { tabpage = view.open_tab(), git_root = repo, base_revision = base }
+    local ready = false
+    view.show_file(sess, { path = "gone.txt", status = "D", hunks = deleted },
+      { on_ready = function() ready = true end })
+    helpers.wait_for(function() return ready end, 10000)
+
+    -- Side-by-side: original_win holds the real content, modified_win is
+    -- unpopulated (nil) — nothing to fold. Toggle to inline, where codediff's
+    -- show_single_file collapses both sides onto ONE shared window
+    -- (session.modified_win == session.original_win) and — per
+    -- inline_view.show_single_file — sets session.modified_bufnr to a 1-line
+    -- empty scratch buffer while the shared window actually displays the real
+    -- content via session.original_bufnr. Before the fix, apply_group_folds
+    -- still ran for "D" and computed visible lines from that empty
+    -- modified_bufnr (line_count = 1), then applied the resulting
+    -- {[1]=true} foldexpr to the shared window that was actually showing the
+    -- real 3-line file — collapsing lines 2-3 into a closed fold.
+    assert.is_true(view.toggle_layout(sess.tabpage))
+    local session = view.get_session(sess.tabpage)
+    helpers.wait_for(function()
+      return session.layout == "inline"
+        and vim.api.nvim_buf_is_valid(session.modified_win and vim.api.nvim_win_get_buf(session.modified_win) or -1)
+        and table.concat(
+              vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(session.modified_win), 0, -1, false), "\n"
+            ) == "alpha\nbeta\ngamma"
+    end, 10000)
+
+    local win = session.modified_win
+    assert.truthy(win)
+    -- Not filtered to a group fold at all: "D" is excluded from
+    -- apply_group_folds, so no expr-foldmethod, no collapse.
+    assert.are_not.equal("expr", vim.wo[win].foldmethod)
+    assert.equals(-1, vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(1) end))
+    assert.equals(-1, vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(3) end))
+    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false)
+    assert.same({ "alpha", "beta", "gamma" }, lines)
+
+    view.close_tab(sess)
+  end)
+
   it("re-applies group folds after codediff's compact.refresh clobbers them on TabEnter", function()
     assert.is_true(view.load())
     -- 60-line file with two edits far apart → two hunks
