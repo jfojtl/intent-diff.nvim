@@ -291,6 +291,16 @@ end
 -- see below), so it has to exist before open_file is defined.
 local select_file
 
+--- group_i/file_i lookup shared by open_file (which needs a fresh one on
+--- every call — entry.model may have moved on by the time it runs) and
+--- auto_open_first (which needs one just to decide whether there's anything
+--- to open, and whether it already matches what's on screen).
+local function group_file(model, group_i, file_i)
+  local group = model and model.groups and model.groups[group_i]
+  local file_entry = group and group.files and group.files[file_i]
+  return group, file_entry
+end
+
 --- Show `file_entry` (group_i/file_i in the CURRENT model) in the diff panes
 --- and wire up navigation ctx. Shared by manual/navigation-driven selection
 --- (select_file, below — which also marks entry.user_selected) and auto-open
@@ -310,8 +320,7 @@ local function open_file(token, group_i, file_i, opts)
   if not entry then
     return
   end
-  local group = entry.model.groups[group_i]
-  local file_entry = group and group.files[file_i]
+  local _, file_entry = group_file(entry.model, group_i, file_i)
   if not file_entry then
     return
   end
@@ -362,6 +371,31 @@ select_file = function(token, group_i, file_i, opts)
   open_file(token, group_i, file_i, opts)
 end
 
+--- True when `file_entry`'s hunks are exactly (same objects, same order)
+--- what's already displayed for `tabpage` (view._last_shown, set
+--- synchronously at the START of show_file — see view.lua — so this is
+--- reliable even while that earlier show_file()'s own diff/render is still
+--- asynchronously in flight). Hunks are shared objects between the flat and
+--- grouped models (both ultimately index the same inventory.hunks — see
+--- flat_model and classify.reconcile), so comparing by identity is exact,
+--- not a content/heuristic match.
+local function same_as_shown(tabpage, file_entry)
+  local shown = require("intentdiff.view")._last_shown[tabpage]
+  if not shown or shown.file_entry.path ~= file_entry.path then
+    return false
+  end
+  local a, b = shown.file_entry.hunks, file_entry.hunks
+  if #a ~= #b then
+    return false
+  end
+  for i, h in ipairs(a) do
+    if h ~= b[i] then
+      return false
+    end
+  end
+  return true
+end
+
 --- Auto-open the first file of the first group, when auto_open is enabled
 --- and the user hasn't made a selection of their own yet. Two call sites:
 --- the flat "All changes" model rendered while classification is still
@@ -369,6 +403,24 @@ end
 --- classify_and_render). No-op — leaving whatever placeholder is on screen —
 --- when there is nothing to open yet (no groups, or an (impossible in
 --- practice, but guarded) group with no files).
+---
+--- De-dupe against an already-in-flight (or already-finished) render of the
+--- SAME file with the SAME hunks — the mainstream case where the flat "All
+--- changes" group's first file IS the first real group's first file (always
+--- true for a single-file diff, and for any file whose hunks all land in one
+--- group). Without this, the ready-phase call here would invoke open_file
+--- again and trigger a second, wasted cd.view.update()/diff recompute
+--- (codediff/ui/view/side_by_side.lua) on top of the loading-phase's
+--- still-in-flight one — and which of the two fold applications "won" would
+--- depend on poll-scheduling order, not on anything guaranteed. Because the
+--- hunk sets are identical here, the fix doesn't need to out-race that
+--- in-flight render at all: applying the SAME hunks directly is correct
+--- regardless of whether the pending render has finished yet (a harmless
+--- no-op if the diff isn't ready — session.stored_diff_result missing — or a
+--- redundant-but-correct confirmation if it is), and if it's still pending,
+--- that render's own on_ready reads entry.model fresh (see open_file above),
+--- so it ends up wiring the correct (already-updated) grouped ctx on its
+--- own. The result is invariant to poll ordering rather than depending on it.
 auto_open_first = function(token)
   local cfg = require("intentdiff.config").options
   if not cfg.auto_open then
@@ -378,9 +430,13 @@ auto_open_first = function(token)
   if not entry or entry.user_selected then
     return
   end
-  local group = entry.model and entry.model.groups and entry.model.groups[1]
-  local file_entry = group and group.files and group.files[1]
+  local _, file_entry = group_file(entry.model, 1, 1)
   if not file_entry then
+    return
+  end
+  local tabpage = entry.sess.tabpage
+  if same_as_shown(tabpage, file_entry) then
+    require("intentdiff.view").apply_group_folds(tabpage, file_entry.hunks)
     return
   end
   open_file(token, 1, 1, { auto = true })

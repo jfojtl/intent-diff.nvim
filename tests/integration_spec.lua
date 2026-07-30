@@ -802,6 +802,62 @@ describe(":IntentDiff end-to-end", function()
     assert.truthy(focused, "focus did not return to the sidebar after auto-open")
   end)
 
+  it("de-dupes the loading-phase and ready-phase auto-opens when they target the same file+hunks", function()
+    -- Single file, single hunk: whatever the provider does with that one
+    -- hunk, the flat "All changes" group's first file and the real first
+    -- group's first file are necessarily the exact same file with the exact
+    -- same (one-hunk) hunk set — the mainstream double-render case the
+    -- de-dupe guard exists for. Without it, view.show_file() would fire
+    -- twice for this file (a wasted second cd.view.update()/diff recompute).
+    local repo = helpers.make_repo({ ["only.lua"] = table.concat(vim.fn.range(1, 20), "\n") })
+    local lines = vim.fn.range(1, 20)
+    lines[10] = "CHANGED"
+    helpers.write_file(repo, "only.lua", table.concat(lines, "\n"))
+    vim.cmd("cd " .. repo)
+
+    local view = require("intentdiff.view")
+    local orig_show_file = view.show_file
+    local call_count = 0
+    view.show_file = function(...)
+      call_count = call_count + 1
+      return orig_show_file(...)
+    end
+
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = fake_provider({
+        { title = "Only group", hunk_ids = { "only.lua:1" } },
+      }),
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local session = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model.state == "ready" and s or nil
+    end, 10000)
+    assert.truthy(session, "session never reached ready")
+
+    local rendered = helpers.wait_for(function()
+      local cd_session = view.get_session(tab)
+      local w = cd_session and cd_session.modified_win
+      if not (w and vim.api.nvim_win_is_valid(w)) then
+        return nil
+      end
+      local buf = vim.api.nvim_win_get_buf(w)
+      local name = vim.api.nvim_buf_get_name(buf)
+      if not name:find("only.lua", 1, true) or vim.api.nvim_buf_line_count(buf) <= 1 then
+        return nil
+      end
+      return w
+    end, 10000)
+    view.show_file = orig_show_file -- restore before any assertion can fail
+    assert.truthy(rendered, "only.lua never auto-opened with content")
+
+    assert.equals(1, call_count,
+      "expected exactly one show_file() render when loading-phase and ready-phase targets coincide, got "
+        .. call_count)
+  end)
+
   it("auto-opens a file from the flat 'All changes' group while classification is still loading", function()
     make_two_group_repo()
     local deferred_cb
