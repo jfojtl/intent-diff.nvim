@@ -129,6 +129,15 @@ function M.new(opts)
         stderr = data or {}
       end,
       on_exit = function(_, code)
+        -- jobstop() is asynchronous: it signals the process and returns, but
+        -- on_exit only fires once the process actually dies. If the timeout
+        -- branch or cancel() already finished this invocation (and, for the
+        -- timeout, already logged its own entry), a slow-to-die process
+        -- landing here later must NOT log a second, contradictory entry —
+        -- exactly the corruption the diagnostics log exists to avoid.
+        if finished then
+          return
+        end
         if code ~= 0 then
           record({ exit_code = code, parse_outcome = "exit_nonzero" })
           return finish(nil, ("provider exited with code %d"):format(code))

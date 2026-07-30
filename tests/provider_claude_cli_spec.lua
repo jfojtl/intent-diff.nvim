@@ -159,4 +159,72 @@ echo '{"groups":[{"title":"Fake","hunk_ids":["a.lua:1"]}]}']])
     assert.truthy(entry:find("elapsed_ms=", 1, true))
     assert.truthy(entry:find("parse_outcome=ok", 1, true))
   end)
+
+  --- Count how many `provider_invocation` lines are in the log — the bug
+  --- these two regression tests guard against is on_exit landing AFTER the
+  --- timeout/cancel path already recorded (or, for cancel, decided not to
+  --- record) an entry, logging a second, contradictory one.
+  local function invocation_entry_count()
+    local n = 0
+    for _, line in ipairs(log.read()) do
+      if line:find("provider_invocation", 1, true) then
+        n = n + 1
+      end
+    end
+    return n
+  end
+
+  it("logs exactly one entry when on_exit lands late, after the timeout already fired", function()
+    local log_file = vim.fn.tempname()
+    config.setup({ log_file = log_file })
+    -- Ignores SIGTERM so jobstop() (sent when the timeout fires) can't kill
+    -- it immediately: on_exit only lands once nvim escalates to SIGKILL,
+    -- well after finish()/record() already ran for the timeout.
+    local restore = helpers.fake_bin("claude", [[
+cat > /dev/null
+trap '' TERM
+sleep 5]])
+    local err
+    claude_cli.new({ timeout_ms = 300 })(REQUEST, function(_, e) err = e end)
+    helpers.wait_for(function() return err end, 5000)
+    assert.truthy(err and err:find("timed out"))
+
+    -- Give the late on_exit (post SIGKILL-escalation) a chance to fire and,
+    -- if the bug regressed, log its own second entry.
+    vim.wait(4000, function() return false end, 100)
+    restore()
+
+    local lines = log.read()
+    assert.equals(1, invocation_entry_count(),
+      "expected exactly one provider_invocation entry, got:\n" .. table.concat(lines, "\n"))
+    assert.truthy(lines[#lines]:find("parse_outcome=timeout", 1, true),
+      "the surviving entry must be the diagnostically useful timeout one: " .. lines[#lines])
+  end)
+
+  it("cancel() logs no provider_invocation entry, even once the process dies", function()
+    -- Design decision: a cancelled invocation (session closed / superseded
+    -- mid-classification) never produced a provider outcome worth
+    -- diagnosing, so cancel() logs nothing — zero entries, not a
+    -- "cancelled" one.
+    local log_file = vim.fn.tempname()
+    config.setup({ log_file = log_file })
+    local restore = helpers.fake_bin("claude", [[
+cat > /dev/null
+trap '' TERM
+sleep 5]])
+    local called = false
+    local handle = claude_cli.new({ timeout_ms = 10000 })(REQUEST, function() called = true end)
+    vim.wait(200, function() return false end, 50) -- let the process actually start
+    handle.cancel()
+
+    -- Give the late on_exit (post SIGKILL-escalation) a chance to fire and,
+    -- if the bug regressed, log a stray entry.
+    vim.wait(4000, function() return false end, 100)
+    restore()
+
+    assert.is_false(called)
+    local lines = log.read()
+    assert.equals(0, invocation_entry_count(),
+      "cancel() must not log a provider_invocation entry, got:\n" .. table.concat(lines, "\n"))
+  end)
 end)

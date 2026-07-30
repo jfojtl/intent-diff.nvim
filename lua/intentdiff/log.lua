@@ -52,8 +52,16 @@ function M.format(event)
 end
 
 --- Truncate `path` in place to at most `max_bytes`, keeping the tail (the
---- most recent entries) and cutting on a line boundary.
+--- most recent entries) and cutting on a line boundary. Cheap no-op when the
+--- file is comfortably under the cap: a full read+rewrite on every single
+--- append (up to 3x per provider invocation — one append each for
+--- provider_invocation, classification, and reconcile) is wasted work while
+--- the file is still small, which is the common case.
 local function truncate_to(path, max_bytes)
+  local size = vim.fn.getfsize(path)
+  if size >= 0 and size <= max_bytes then
+    return
+  end
   local f = io.open(path, "rb")
   if not f then
     return
