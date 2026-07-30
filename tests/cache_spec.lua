@@ -28,6 +28,23 @@ describe("cache", function()
     assert.is_nil(cache.load("k"))
   end)
 
+  it("remembers the last classified diff hash per scope", function()
+    assert.is_nil(cache.get_last_hash("/repo|"))
+    cache.set_last_hash("/repo|", "hash-a")
+    cache.set_last_hash("/repo|main...", "hash-b")
+    assert.equals("hash-a", cache.get_last_hash("/repo|"))
+    assert.equals("hash-b", cache.get_last_hash("/repo|main..."))
+    -- Overwriting one scope leaves the others intact.
+    cache.set_last_hash("/repo|", "hash-c")
+    assert.equals("hash-c", cache.get_last_hash("/repo|"))
+    assert.equals("hash-b", cache.get_last_hash("/repo|main..."))
+    -- Survives a corrupt index file instead of erroring.
+    vim.fn.writefile({ "{not json" }, config.options.cache_dir .. "/last_hashes.json")
+    assert.is_nil(cache.get_last_hash("/repo|"))
+    cache.set_last_hash("/repo|", "hash-d")
+    assert.equals("hash-d", cache.get_last_hash("/repo|"))
+  end)
+
   it("rematch keeps content-identical hunks, counts the rest stale", function()
     local entry = {
       groups = {

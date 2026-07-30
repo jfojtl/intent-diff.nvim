@@ -25,6 +25,50 @@ function M.delete(diff_hash)
   vim.fn.delete(path_for(diff_hash))
 end
 
+-- ------------------------------------------------------- last-hash index ----
+--
+-- Entries are keyed by diff hash, so a diff that changed by a single keystroke
+-- misses the cache entirely. M.rematch exists to recover the previous
+-- classification in that case, but it needs the PREVIOUS diff's hash, which
+-- nothing in the process remembers across `:IntentDiff` invocations (let alone
+-- across Neovim restarts). This tiny side index — scope key → the diff hash we
+-- last classified for that scope — is what makes classify.run's
+-- `opts.previous_hash` branch (and therefore the sidebar's
+-- "stale — N unclassified" footer) reachable at all.
+--
+-- Scope key is caller-chosen; init.lua uses git_root .. "|" .. argline, so
+-- `:IntentDiff` and `:IntentDiff main...` keep independent histories.
+
+local function index_path()
+  return require("intentdiff.config").options.cache_dir .. "/last_hashes.json"
+end
+
+local function read_index()
+  local file = index_path()
+  if vim.fn.filereadable(file) == 0 then
+    return {}
+  end
+  local ok, decoded = pcall(vim.json.decode, table.concat(vim.fn.readfile(file), "\n"))
+  return (ok and type(decoded) == "table") and decoded or {}
+end
+
+--- The diff hash last classified for `scope_key`, or nil.
+function M.get_last_hash(scope_key)
+  local hash = read_index()[scope_key]
+  return type(hash) == "string" and hash or nil
+end
+
+--- Remember `hash` as the last classified diff for `scope_key`.
+function M.set_last_hash(scope_key, hash)
+  local index = read_index()
+  if index[scope_key] == hash then
+    return
+  end
+  index[scope_key] = hash
+  vim.fn.mkdir(require("intentdiff.config").options.cache_dir, "p")
+  vim.fn.writefile({ vim.json.encode(index) }, index_path())
+end
+
 --- Re-match a cached classification against a changed inventory. Hunks whose
 --- content hash still exists keep their group (by new id); everything else is
 --- left unassigned for reconcile() to sweep into Ungrouped.
