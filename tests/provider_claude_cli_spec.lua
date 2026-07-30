@@ -5,13 +5,19 @@ local config = require("intentdiff.config")
 
 local REQUEST = {
   diff_text = "diff --git a/a.lua b/a.lua\n@@ -1,1 +1,1 @@\n-x\n+y\n",
-  hunks = { { id = "a.lua:1", file = "a.lua", summary_lines = { "@@ -1,1 +1,1 @@", "-x", "+y" } } },
+  hunks = { { id = "a.lua:1", n = 1, file = "a.lua", summary_lines = { "@@ -1,1 +1,1 @@", "-x", "+y" } } },
 }
 
+local REQUEST_WITH_REPO = vim.tbl_extend("force", REQUEST, {
+  repo = { git_root = "/tmp/some-repo", base_revision = "abc1234", target_revision = "WORKING" },
+})
+
 describe("claude_cli.build_prompt", function()
-  it("includes ids, the JSON contract, and the diff", function()
+  it("includes a compact numbered entry (number, file, hunk header), the ids output contract, and the diff", function()
     local prompt = claude_cli.build_prompt(REQUEST)
-    assert.truthy(prompt:find("a.lua:1", 1, true))
+    -- The compact numbered entry: "- <n>  <file>  <header>" per the contract.
+    assert.truthy(prompt:find("- 1  a.lua  @@ -1,1 +1,1 @@", 1, true))
+    assert.truthy(prompt:find('"ids"', 1, true))
     assert.truthy(prompt:find('"groups"', 1, true))
     assert.truthy(prompt:find("Full diff:", 1, true))
   end)
@@ -19,6 +25,23 @@ describe("claude_cli.build_prompt", function()
   it("omits diff body when diff_text is nil (summary mode)", function()
     local prompt = claude_cli.build_prompt({ diff_text = nil, hunks = REQUEST.hunks })
     assert.is_nil(prompt:find("Full diff:", 1, true))
+  end)
+
+  it("includes the agentic-lookup instruction, naming the revision range, when request.repo is set and agentic isn't disabled", function()
+    local prompt = claude_cli.build_prompt(REQUEST_WITH_REPO)
+    assert.truthy(prompt:find("read%-only"))
+    assert.truthy(prompt:find("abc1234", 1, true))
+    assert.truthy(prompt:find("WORKING", 1, true))
+  end)
+
+  it("omits the agentic-lookup instruction when opts.agentic is false", function()
+    local prompt = claude_cli.build_prompt(REQUEST_WITH_REPO, { agentic = false })
+    assert.is_nil(prompt:find("read%-only"))
+  end)
+
+  it("omits the agentic-lookup instruction when request carries no repo info, even with agentic enabled", function()
+    local prompt = claude_cli.build_prompt(REQUEST, { agentic = true })
+    assert.is_nil(prompt:find("read%-only"))
   end)
 end)
 
@@ -226,5 +249,120 @@ sleep 5]])
     local lines = log.read()
     assert.equals(0, invocation_entry_count(),
       "cancel() must not log a provider_invocation entry, got:\n" .. table.concat(lines, "\n"))
+  end)
+end)
+
+describe("claude_cli provider: tool allowlist argv", function()
+  --- Fake `claude` that captures its own argv (via "$@") to `argv_file` before
+  --- replying with an empty grouping.
+  local function fake_bin_capturing_argv(argv_file)
+    return helpers.fake_bin("claude", ([[
+cat > /dev/null
+echo "$@" > %s
+echo '{"groups":[]}']]):format(argv_file))
+  end
+
+  it("passes --allowedTools and --disallowedTools with the configured defaults", function()
+    local argv_file = vim.fn.tempname()
+    local restore = fake_bin_capturing_argv(argv_file)
+    local result
+    claude_cli.new({
+      timeout_ms = 5000,
+      allowed_tools = { "Bash(git diff:*)", "Bash(git log:*)", "Read", "Grep", "Glob" },
+      disallowed_tools = { "Edit", "Write", "NotebookEdit" },
+    })(REQUEST, function(r) result = r end)
+    helpers.wait_for(function() return result end)
+    restore()
+
+    local argv = table.concat(vim.fn.readfile(argv_file), " ")
+    assert.truthy(argv:find("--allowedTools Bash(git diff:*),Bash(git log:*),Read,Grep,Glob", 1, true),
+      "argv missing --allowedTools: " .. argv)
+    assert.truthy(argv:find("--disallowedTools Edit,Write,NotebookEdit", 1, true),
+      "argv missing --disallowedTools: " .. argv)
+  end)
+
+  it("omits --allowedTools and --disallowedTools entirely when configured empty", function()
+    local argv_file = vim.fn.tempname()
+    local restore = fake_bin_capturing_argv(argv_file)
+    local result
+    claude_cli.new({ timeout_ms = 5000, allowed_tools = {}, disallowed_tools = {} })(REQUEST,
+      function(r) result = r end)
+    helpers.wait_for(function() return result end)
+    restore()
+
+    local argv = table.concat(vim.fn.readfile(argv_file), " ")
+    assert.is_nil(argv:find("--allowedTools", 1, true), "expected no --allowedTools flag: " .. argv)
+    assert.is_nil(argv:find("--disallowedTools", 1, true), "expected no --disallowedTools flag: " .. argv)
+  end)
+
+  it("omits --allowedTools and --disallowedTools when unset (nil, not just empty)", function()
+    local argv_file = vim.fn.tempname()
+    local restore = fake_bin_capturing_argv(argv_file)
+    local result
+    claude_cli.new({ timeout_ms = 5000 })(REQUEST, function(r) result = r end)
+    helpers.wait_for(function() return result end)
+    restore()
+
+    local argv = table.concat(vim.fn.readfile(argv_file), " ")
+    assert.is_nil(argv:find("--allowedTools", 1, true), "expected no --allowedTools flag: " .. argv)
+    assert.is_nil(argv:find("--disallowedTools", 1, true), "expected no --disallowedTools flag: " .. argv)
+  end)
+
+  it("the config.lua defaults round-trip into argv via M.new(config.options.provider_opts)", function()
+    -- Prove the wiring end to end: the actual defaults shipped in
+    -- config.lua's provider_opts, unmodified, produce the expected flags.
+    local defaults = require("intentdiff.config").defaults.provider_opts
+    local argv_file = vim.fn.tempname()
+    local restore = fake_bin_capturing_argv(argv_file)
+    local result
+    claude_cli.new(vim.tbl_extend("force", vim.deepcopy(defaults), { timeout_ms = 5000 }))(REQUEST,
+      function(r) result = r end)
+    helpers.wait_for(function() return result end)
+    restore()
+
+    local argv = table.concat(vim.fn.readfile(argv_file), " ")
+    assert.truthy(argv:find("--allowedTools " .. table.concat(defaults.allowed_tools, ","), 1, true), argv)
+    assert.truthy(argv:find("--disallowedTools " .. table.concat(defaults.disallowed_tools, ","), 1, true), argv)
+  end)
+end)
+
+describe("claude_cli provider: agentic lookup channel cwd", function()
+  it("sets the job's cwd to request.repo.git_root", function()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    local pwd_file = vim.fn.tempname()
+    local restore = helpers.fake_bin("claude", ([[
+cat > /dev/null
+pwd > %s
+echo '{"groups":[]}']]):format(pwd_file))
+    local result
+    claude_cli.new({ timeout_ms = 5000 })(vim.tbl_extend("force", REQUEST, {
+      repo = { git_root = dir },
+    }), function(r) result = r end)
+    helpers.wait_for(function() return result end)
+    restore()
+
+    local captured = vim.trim(table.concat(vim.fn.readfile(pwd_file), "\n"))
+    -- Resolve both sides: /tmp is a symlink to /private/tmp on macOS, and
+    -- `pwd` reports the physical (resolved) path.
+    assert.equals(vim.uv.fs_realpath(dir), vim.uv.fs_realpath(captured))
+  end)
+
+  it("leaves cwd unset (today's behavior) when the request carries no repo", function()
+    local pwd_file = vim.fn.tempname()
+    local restore = helpers.fake_bin("claude", ([[
+cat > /dev/null
+pwd > %s
+echo '{"groups":[]}']]):format(pwd_file))
+    local result
+    claude_cli.new({ timeout_ms = 5000 })(REQUEST, function(r) result = r end)
+    helpers.wait_for(function() return result end)
+    restore()
+
+    local captured = vim.trim(table.concat(vim.fn.readfile(pwd_file), "\n"))
+    -- Whatever nvim's own cwd was — just prove it's non-empty and did not
+    -- error, i.e. jobstart happily ran with cwd omitted.
+    assert.truthy(#captured > 0)
+    assert.equals(vim.uv.fs_realpath(vim.fn.getcwd()), vim.uv.fs_realpath(captured))
   end)
 end)

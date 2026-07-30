@@ -236,6 +236,15 @@ local function classify_and_render(token, opts)
     -- second concurrent :IntentDiff (or a reclassify in another tab) could
     -- supersede — and thus silently drop — this session's in-flight result.
     session_key = token,
+    -- The inventory alone doesn't carry the repo location: thread it from
+    -- the session so build_request can put it on request.repo, letting a
+    -- provider's agentic lookup channel (see providers/claude_cli.lua) cwd
+    -- into the right worktree and name the right revision range.
+    repo = {
+      git_root = entry.sess.git_root,
+      base_revision = entry.sess.base_revision,
+      target_revision = entry.sess.target_revision,
+    },
   }, function(groups, err, info)
     local current = sessions[token]
     if not current or current.inventory ~= inventory then

@@ -1,18 +1,31 @@
 local M = {}
 
-function M.build_prompt(request)
+--- @param opts { agentic: boolean|nil } opts.agentic defaults to true (see
+---   config.lua's provider_opts.agentic) when opts itself is omitted, so a
+---   caller that only ever passed `request` (as every pre-existing test and
+---   custom-provider example does) still gets the fully self-contained
+---   prompt whenever request.repo isn't set, and gets the agentic
+---   instruction once it is.
+function M.build_prompt(request, opts)
+  opts = opts or {}
+  local agentic = opts.agentic
+  if agentic == nil then
+    agentic = true
+  end
   local lines = {
     "You are grouping the hunks of a git diff by the REASON the change was made.",
     "Return ONLY JSON, no prose, exactly matching:",
-    '{"groups":[{"title":"<short imperative reason>","hunk_ids":["<id>"]}]}',
-    "Rules: every hunk id appears in exactly one group; prefer 2-8 groups;",
+    '{"groups":[{"title":"<short reason>","ids":"<compact list>"}]}',
+    ('ids is a STRING of integers with ranges, e.g. "1-4,7,12-15"; every number'),
+    ("1-%d must appear in exactly one group; prefer 3-8 groups;"):format(#request.hunks),
     "titles describe WHY (intent), not which files changed;",
-    "use only the hunk ids listed below.",
+    "use only the numbers listed below — they are NOT line numbers.",
     "",
     "Hunks:",
   }
   for _, h in ipairs(request.hunks) do
-    lines[#lines + 1] = ("- %s"):format(h.id)
+    local header = h.summary_lines[1] or ""
+    lines[#lines + 1] = ("- %d  %s  %s"):format(h.n or 0, h.file, header)
     for _, s in ipairs(h.summary_lines) do
       lines[#lines + 1] = "    " .. s
     end
@@ -21,6 +34,14 @@ function M.build_prompt(request)
     lines[#lines + 1] = ""
     lines[#lines + 1] = "Full diff:"
     lines[#lines + 1] = request.diff_text
+  end
+  if agentic and request.repo and request.repo.git_root then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = ("You MAY run read-only commands (e.g. git diff, git log, git show, "
+      .. "git blame, git status) and read files in this repo to understand WHY these changes "
+      .. "were made, comparing %s to %s. You MUST NOT modify anything. Your answer must still "
+      .. "use only the numbers given above, not file paths or line numbers."):format(
+        request.repo.base_revision or "the base revision", request.repo.target_revision or "the working tree")
   end
   return table.concat(lines, "\n")
 end
@@ -98,7 +119,20 @@ function M.new(opts)
     end
     local cmd = opts.cmd or "claude"
     local argv = { cmd, "-p", "--model", opts.model or "haiku" }
-    local prompt = M.build_prompt(request)
+    -- Read-only by default: this process runs pointed at the user's
+    -- (possibly uncommitted) working tree, so it must not be able to touch
+    -- it. `claude --help` documents --allowedTools/--disallowedTools (long
+    -- form --allowed-tools/--disallowed-tools also work) taking a comma-or-
+    -- space-separated list; an empty/nil config list omits the flag
+    -- entirely rather than passing an empty value (which claude would
+    -- otherwise have to interpret).
+    if opts.allowed_tools and #opts.allowed_tools > 0 then
+      vim.list_extend(argv, { "--allowedTools", table.concat(opts.allowed_tools, ",") })
+    end
+    if opts.disallowed_tools and #opts.disallowed_tools > 0 then
+      vim.list_extend(argv, { "--disallowedTools", table.concat(opts.disallowed_tools, ",") })
+    end
+    local prompt = M.build_prompt(request, opts)
     local start_ns = vim.uv.hrtime()
     local stdout, stderr = {}, {}
 
@@ -120,6 +154,12 @@ function M.new(opts)
     end
 
     local job = vim.fn.jobstart(argv, {
+      -- Without this, git commands the model runs via the agentic lookup
+      -- channel (or any other tool call it makes) would execute against
+      -- Neovim's own cwd, not the repo being reviewed — wrong repo entirely
+      -- whenever nvim wasn't launched from git_root. Left unset (nil) when
+      -- request carries no repo, matching today's behavior exactly.
+      cwd = request.repo and request.repo.git_root or nil,
       stdout_buffered = true,
       stderr_buffered = true,
       on_stdout = function(_, data)

@@ -6,6 +6,21 @@ M.defaults = {
     cmd = "claude",
     model = "haiku",
     timeout_ms = 180000,
+    -- Tool restrictions passed to `claude -p` as --disallowedTools /
+    -- --allowedTools: the process runs pointed at the user's (possibly
+    -- uncommitted) working tree, so it must not be able to edit it. An
+    -- empty/nil list omits the corresponding flag entirely rather than
+    -- passing an empty value.
+    disallowed_tools = { "Edit", "Write", "NotebookEdit" },
+    allowed_tools = {
+      "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+      "Bash(git blame:*)", "Bash(git status:*)", "Read", "Grep", "Glob",
+    },
+    -- Let the model run read-only git commands / read files in the repo
+    -- (cwd is set to git_root) to understand WHY a change was made, instead
+    -- of us pre-stuffing commit messages/log output into the prompt. Set to
+    -- false to keep the prompt fully self-contained.
+    agentic = true,
   },
   context_lines = nil, -- nil = follow codediff's diff.compact_context_lines
   sidebar_width = 36,
