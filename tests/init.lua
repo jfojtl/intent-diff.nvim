@@ -1,5 +1,11 @@
 vim.opt.shadafile = "NONE"
 vim.opt.swapfile = false
+-- Sandbox stdpath("cache") for the whole test run so intentdiff's
+-- stdpath-derived defaults (cache_dir, log_file) never touch the real
+-- machine's cache directory for specs that don't explicitly override them
+-- (this must run before anything requires intentdiff.config, which computes
+-- these defaults once at require-time).
+vim.env.XDG_CACHE_HOME = vim.fn.tempname()
 local cwd = vim.fn.getcwd()
 vim.opt.rtp:prepend(cwd)
 package.path = package.path .. ";" .. cwd .. "/lua/?.lua;" .. cwd .. "/lua/?/init.lua"

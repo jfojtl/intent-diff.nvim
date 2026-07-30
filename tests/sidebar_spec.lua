@@ -60,6 +60,16 @@ describe("sidebar.layout", function()
     assert.equals("info", meta[1].kind)
   end)
 
+  it("shows loading state with an elapsed seconds counter when elapsed_s is a number", function()
+    local lines = sidebar.layout({ state = "loading", groups = {}, elapsed_s = 7 })
+    assert.equals("⟳ classifying… 7s", lines[1])
+  end)
+
+  it("shows the plain loading line when elapsed_s is absent", function()
+    local lines = sidebar.layout({ state = "loading", groups = {} })
+    assert.equals("⟳ classifying…", lines[1])
+  end)
+
   it("shows footer with hunk accounting and provider", function()
     local lines = sidebar.layout(mk_model())
     local footer = lines[#lines]

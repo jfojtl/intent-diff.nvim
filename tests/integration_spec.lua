@@ -85,6 +85,42 @@ describe(":IntentDiff end-to-end", function()
     assert.is_nil(text:find("?", 1, true), "footer prints a bogus provider label: " .. text)
   end)
 
+  it("shows a live elapsed counter while classifying, and clears the timer after completion", function()
+    local deferred_cb
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = function(_, cb)
+        deferred_cb = cb
+        return { cancel = function() end }
+      end,
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+
+    local session = helpers.wait_for(function()
+      return require("intentdiff")._session(tab)
+    end, 10000)
+    assert.truthy(session, "session never created")
+
+    -- The timer ticks roughly once per second; give it real wall-clock time.
+    local ticked = helpers.wait_for(function()
+      local text = table.concat(vim.api.nvim_buf_get_lines(session.sidebar.bufnr, 0, -1, false), "\n")
+      return text:find("classifying… %d+s") and text or nil
+    end, 5000)
+    assert.truthy(ticked, "sidebar never showed an elapsed seconds count while classifying")
+
+    assert.truthy(deferred_cb, "provider never invoked")
+    deferred_cb({ groups = { { title = "Done", hunk_ids = { "a.lua:1" } } } })
+
+    local done = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model.state == "ready" and s or nil
+    end, 10000)
+    assert.truthy(done, "classification never completed")
+    assert.is_nil(require("intentdiff")._session(tab).elapsed_timer,
+      "elapsed timer still armed after classification completed")
+  end)
+
   -- ------------------------------------------------------------------------
   -- Selecting files: the flow that was completely untested (and completely
   -- broken: the first <CR> closed the placeholder tab the sidebar lived in).

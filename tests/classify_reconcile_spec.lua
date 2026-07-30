@@ -81,4 +81,54 @@ describe("classify.reconcile", function()
     assert.equals(50, files[1].hunks[2].modified.start_line)
     assert.equals("b.lua", files[2].path)
   end)
+
+  it("an existing-style call that ignores the second return still behaves identically", function()
+    -- Same call shape as every test above: only the first return is
+    -- captured. This must keep working unchanged now that reconcile()
+    -- additionally returns a stats table.
+    local groups = classify.reconcile(mk_inventory(), {
+      { title = "Feature", hunk_ids = { "a.lua:1", "b.lua:1" } },
+    })
+    assert.equals(2, #groups)
+    assert.equals("Feature", groups[1].title)
+    assert.equals("Ungrouped", groups[2].title)
+  end)
+
+  describe("stats (second return value)", function()
+    it("counts hallucinated ids as unrecognized and cross-group repeats as duplicates", function()
+      local _, stats = classify.reconcile(mk_inventory(), {
+        { title = "G1", hunk_ids = { "a.lua:1", "ghost.lua:9" } },
+        { title = "G2", hunk_ids = { "a.lua:1", "a.lua:2", "b.lua:1" } },
+      })
+      assert.equals(3, stats.total_hunks)
+      assert.equals(1, stats.unrecognized) -- ghost.lua:9
+      assert.equals(1, stats.duplicates) -- a.lua:1 re-claimed by G2
+      assert.equals(0, stats.ungrouped) -- every real hunk landed somewhere
+      assert.equals(3, stats.assigned) -- a.lua:1 (G1), a.lua:2, b.lua:1 (G2)
+    end)
+
+    it("counts hunks that fall through to Ungrouped", function()
+      local _, stats = classify.reconcile(mk_inventory(), {
+        { title = "Feature", hunk_ids = { "a.lua:1", "b.lua:1" } },
+      })
+      assert.equals(3, stats.total_hunks)
+      assert.equals(2, stats.assigned)
+      assert.equals(0, stats.unrecognized)
+      assert.equals(0, stats.duplicates)
+      assert.equals(1, stats.ungrouped) -- a.lua:2
+    end)
+
+    it("totals stay consistent: assigned + ungrouped == total_hunks", function()
+      local inv = mk_inventory()
+      local cases = {
+        {},
+        { { title = "T", hunk_ids = {} } },
+        { { title = "A", hunk_ids = { "b.lua:1" } }, { title = "B", hunk_ids = { "b.lua:1", "zz:1" } } },
+      }
+      for _, raw in ipairs(cases) do
+        local _, stats = classify.reconcile(inv, raw)
+        assert.equals(stats.total_hunks, stats.assigned + stats.ungrouped)
+      end
+    end)
+  end)
 end)

@@ -10,7 +10,11 @@ function M.layout(model)
     meta[#lines] = m
   end
   if model.state == "loading" then
-    add("⟳ classifying…", { kind = "info" })
+    if type(model.elapsed_s) == "number" then
+      add(("⟳ classifying… %ds"):format(model.elapsed_s), { kind = "info" })
+    else
+      add("⟳ classifying…", { kind = "info" })
+    end
   end
   if model.message then
     add("⚠ " .. model.message, { kind = "info" })

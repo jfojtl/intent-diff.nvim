@@ -20,18 +20,30 @@ end
 
 --- Reconcile provider output against the inventory. Enforces the completeness
 --- invariant: union of returned groups == inventory, exactly.
---- @return Group[]
+--- @return Group[], { total_hunks: integer, assigned: integer, unrecognized: integer, duplicates: integer, ungrouped: integer }
+---   The second return is additive (existing callers that only capture the
+---   first return, e.g. `local groups = M.reconcile(...)`, are unaffected):
+---   `unrecognized` counts hunk ids the provider returned that aren't in the
+---   inventory at all (hallucinated); `duplicates` counts ids that named a
+---   hunk already claimed by an earlier group; `ungrouped` is how many hunks
+---   fell through to the synthetic "Ungrouped" bucket.
 function M.reconcile(inventory, raw_groups)
   local by_id, assigned = {}, {}
   for _, h in ipairs(inventory.hunks) do
     by_id[h.id] = h
   end
   local groups = {}
+  local unrecognized, duplicates, assigned_count = 0, 0, 0
   for _, rg in ipairs(raw_groups or {}) do
     local hunks = {}
     for _, id in ipairs(rg.hunk_ids or {}) do
-      if by_id[id] and not assigned[id] then -- drops hallucinated ids + duplicates
+      if not by_id[id] then
+        unrecognized = unrecognized + 1 -- hallucinated: not in the inventory
+      elseif assigned[id] then
+        duplicates = duplicates + 1 -- already claimed by an earlier group
+      else
         assigned[id] = true
+        assigned_count = assigned_count + 1
         hunks[#hunks + 1] = by_id[id]
       end
     end
@@ -51,7 +63,14 @@ function M.reconcile(inventory, raw_groups)
   for _, g in ipairs(groups) do
     g.files = M.group_files(g.hunks, inventory.files)
   end
-  return groups
+  local stats = {
+    total_hunks = #inventory.hunks,
+    assigned = assigned_count,
+    unrecognized = unrecognized,
+    duplicates = duplicates,
+    ungrouped = #ungrouped,
+  }
+  return groups, stats
 end
 
 -- Latest in-flight run token PER session_key, not a single module-global
@@ -113,6 +132,7 @@ end
 function M.run(inventory, opts, callback)
   local cache = require("intentdiff.cache")
   local cfg = require("intentdiff.config").options
+  local log = require("intentdiff.log")
   local session_key = opts.session_key or DEFAULT_SESSION_KEY
   M.cancel(session_key) -- this run supersedes any provider still in flight
   run_tokens[session_key] = (run_tokens[session_key] or 0) + 1
@@ -124,24 +144,32 @@ function M.run(inventory, opts, callback)
       end
     end)
   end
+  local function reconcile_and_log(raw_groups)
+    local groups, stats = M.reconcile(inventory, raw_groups)
+    log.reconcile_stats(stats)
+    return groups
+  end
 
   if not opts.force then
     local entry = cache.load(inventory.diff_hash)
     if entry then
-      return deliver(M.reconcile(inventory, entry.groups), nil, { cached = true })
+      log.classification({ outcome = "cache_hit", diff_hash = inventory.diff_hash })
+      return deliver(reconcile_and_log(entry.groups), nil, { cached = true })
     end
     if opts.previous_hash then
       local prev = cache.load(opts.previous_hash)
       if prev then
         local raw, stale = cache.rematch(prev, inventory)
-        return deliver(M.reconcile(inventory, raw), nil, { cached = true, stale_count = stale })
+        log.classification({ outcome = "rematch", stale_count = stale, diff_hash = inventory.diff_hash })
+        return deliver(reconcile_and_log(raw), nil, { cached = true, stale_count = stale })
       end
     end
   end
 
   if #inventory.hunks > cfg.max_hunks then
-    return deliver(M.reconcile(inventory, {}), nil,
-      { skipped = ("diff too large (%d hunks > %d)"):format(#inventory.hunks, cfg.max_hunks) })
+    local reason = ("diff too large (%d hunks > %d)"):format(#inventory.hunks, cfg.max_hunks)
+    log.classification({ outcome = "skipped", reason = reason })
+    return deliver(reconcile_and_log({}), nil, { skipped = reason })
   end
 
   run_handles[session_key] = opts.provider(M.build_request(inventory), function(result, err)
@@ -151,14 +179,16 @@ function M.run(inventory, opts, callback)
       end
       run_handles[session_key] = nil -- this run is done; nothing to cancel
       if not result then
+        log.classification({ outcome = "provider_error", error = tostring(err or "provider failed") })
         return callback(nil, err or "provider failed", {})
       end
+      log.classification({ outcome = "provider_success" })
       local hunk_hashes = {}
       for _, h in ipairs(inventory.hunks) do
         hunk_hashes[h.id] = h.content_hash
       end
       cache.save(inventory.diff_hash, { groups = result.groups, hunk_hashes = hunk_hashes })
-      callback(M.reconcile(inventory, result.groups), nil, {})
+      callback(reconcile_and_log(result.groups), nil, {})
     end)
   end)
 end

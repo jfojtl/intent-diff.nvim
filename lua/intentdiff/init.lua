@@ -9,11 +9,52 @@ local M = {}
 --- would silently orphan the entry under its old key. Keying by a stable
 --- token — and looking up "the session for tabpage X" by scanning for
 --- entry.sess.tabpage == X — means lookups keep working regardless.
-local sessions = {} -- [token] = { sess, model, sidebar, inventory, scope_key }
+local sessions = {} -- [token] = { sess, model, sidebar, inventory, scope_key, elapsed_timer }
 local next_token = 0
 
 function M.setup(opts)
   require("intentdiff.config").setup(opts)
+end
+
+--- Stop and clear `entry.elapsed_timer` if one is armed. Shared by every path
+--- that can end a classification in flight (ready/error/skipped) or tear the
+--- session down (close_entry, the TabClosed cleanup path): a timer that
+--- outlives its session would keep firing vim.schedule_wrap callbacks against
+--- a sidebar buffer/window that may no longer be valid.
+local function stop_elapsed_timer(entry)
+  if entry and entry.elapsed_timer then
+    local timer = entry.elapsed_timer
+    entry.elapsed_timer = nil
+    pcall(function() timer:stop() end)
+    pcall(function() timer:close() end)
+  end
+end
+
+--- Start a ~1s repeating timer that bumps `sessions[token].model.elapsed_s`
+--- and re-renders the sidebar, for as long as a classification is in flight.
+--- Purely cosmetic (sidebar.layout stays pure — it just renders elapsed_s
+--- when present), so a missed tick or two is harmless; the guard below just
+--- makes sure a stale timer from a previous run/session never mutates a
+--- model or sidebar that has moved on.
+local function start_elapsed_timer(token)
+  local entry = sessions[token]
+  if not entry then
+    return
+  end
+  stop_elapsed_timer(entry)
+  entry.model.elapsed_s = 0
+  local timer = vim.uv.new_timer()
+  entry.elapsed_timer = timer
+  timer:start(1000, 1000, vim.schedule_wrap(function()
+    local current = sessions[token]
+    if not current or current.elapsed_timer ~= timer then
+      pcall(function() timer:stop() end)
+      pcall(function() timer:close() end)
+      return
+    end
+    current.model.elapsed_s = (current.model.elapsed_s or 0) + 1
+    current.sidebar.update(current.model)
+  end))
 end
 
 --- :IntentDiffLog — open the diagnostics log in a scratch buffer, cursor at
@@ -181,6 +222,7 @@ local function classify_and_render(token, opts)
   local provider, label = resolve_provider()
   entry.model = flat_model(inventory, "loading")
   entry.sidebar.update(entry.model)
+  start_elapsed_timer(token) -- live "⟳ classifying… Ns" counter while this run is in flight
   local previous_hash = require("intentdiff.cache").get_last_hash(entry.scope_key)
   classify.run(inventory, {
     provider = provider,
@@ -199,6 +241,7 @@ local function classify_and_render(token, opts)
     if not current or current.inventory ~= inventory then
       return -- session closed or dispatched again since this run started
     end
+    stop_elapsed_timer(current) -- classification finished (ready/error/skipped): counter stops
     if not groups then
       current.model = flat_model(current.inventory, "ready",
         "classification failed: " .. tostring(err) .. " — flat list; r to retry")
@@ -261,6 +304,7 @@ local function forget_entry(token)
     return nil
   end
   sessions[token] = nil
+  stop_elapsed_timer(entry) -- no timer may outlive its session
   require("intentdiff.classify").cancel(token) -- kill any in-flight provider
   require("intentdiff.navigation").detach(entry.sess.tabpage)
   return entry
