@@ -98,8 +98,9 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   -- Width (columns) of the sidebar split.
   sidebar_width = 36,
 
-  -- Above this diff size (bytes), the prompt sends per-hunk summaries
-  -- (file + hunk header + first/last lines) instead of the full diff text.
+  -- Above this diff size (bytes), the prompt sends per-hunk summaries only
+  -- (file + the hunk's first 4 lines, then "… (N more lines)") instead of the
+  -- full diff text.
   max_full_diff_bytes = 100 * 1024,
 
   -- Above this many hunks, classification is skipped entirely with a
@@ -117,7 +118,7 @@ A provider is a function that receives the hunk inventory and returns groups
 asynchronously:
 
 ```lua
---- @param request { diff_text: string, hunks: { id: string, file: string, summary_lines: string[] }[] }
+--- @param request { diff_text: string|nil, hunks: { id: string, file: string, summary_lines: string[] }[] }
 --- @param callback fun(result: { groups: { title: string, hunk_ids: string[] }[] }|nil, err: string|nil)
 local function my_provider(request, callback)
   -- e.g. call a different CLI, an HTTP API, or return a static grouping.
@@ -140,10 +141,21 @@ require("intentdiff").setup({
 })
 ```
 
+`request.diff_text` is the full unified diff **or `nil`** — it is dropped when
+the diff exceeds `max_full_diff_bytes`, so a custom provider must nil-check it
+and fall back to `request.hunks`. Each `hunks[i].summary_lines` holds the
+hunk's first 4 raw diff lines plus a `… (N more lines)` marker when it was
+longer, and is always present regardless of diff size.
+
 Providers never need to worry about completeness: `hunk_ids` you omit or
 mistype are reconciled by the plugin itself — missing hunks land in
 Ungrouped, hallucinated IDs are discarded, and duplicates keep only the first
 group. Run async and never block the UI.
+
+Return a cancel handle — `{ cancel = function() … end }` — if your provider can
+be aborted: intent-diff calls it when a newer classification supersedes yours
+(e.g. the user pressed `r`) or when the review tab is closed, so the abandoned
+request does not keep running.
 
 ## Keymaps
 
