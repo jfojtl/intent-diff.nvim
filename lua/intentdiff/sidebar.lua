@@ -2,13 +2,87 @@ local M = {}
 
 M.ns = vim.api.nvim_create_namespace("intentdiff_sidebar")
 
---- Pure layout: Model → buffer lines + per-line metadata.
+local tree = require("intentdiff.tree")
+local hl = require("intentdiff.highlight")
+
+--- Hard-wrap `text` to `width` display columns on word boundaries, hard-cutting
+--- a single word that is longer than the width. The sidebar window keeps
+--- `wrap = false` so tree alignment survives; wrapping happens here instead.
+local function wrap_text(text, width)
+  local out, line = {}, ""
+  for word in text:gmatch("%S+") do
+    local candidate = line == "" and word or (line .. " " .. word)
+    if vim.fn.strdisplaywidth(candidate) <= width then
+      line = candidate
+    else
+      if line ~= "" then
+        out[#out + 1] = line
+      end
+      while vim.fn.strdisplaywidth(word) > width do
+        local cut = word
+        while vim.fn.strdisplaywidth(cut) > width do
+          cut = cut:sub(1, #cut - 1)
+        end
+        out[#out + 1] = cut
+        word = word:sub(#cut + 1)
+      end
+      line = word
+    end
+  end
+  if line ~= "" then
+    out[#out + 1] = line
+  end
+  if #out == 0 then
+    out[1] = ""
+  end
+  return out
+end
+
+--- Devicon for `path`, or "" when nvim-web-devicons is absent or icons are off.
+--- Mirrors codediff's own pcall guard (ui/explorer/nodes.lua).
+local function file_icon(path)
+  if not require("intentdiff.config").options.icons then
+    return "", nil
+  end
+  local ok, devicons = pcall(require, "nvim-web-devicons")
+  if not ok then
+    return "", nil
+  end
+  local icon, icon_hl = devicons.get_icon(path, nil, { default = true })
+  return icon or "", icon_hl
+end
+
+local function stats_text(additions, deletions)
+  local parts = {}
+  if additions > 0 then
+    parts[#parts + 1] = "+" .. additions
+  end
+  if deletions > 0 then
+    parts[#parts + 1] = "-" .. deletions
+  end
+  return parts
+end
+
+--- Pure layout: Model → buffer lines, per-line metadata, highlight spans.
+--- @return string[] lines, table[] meta, table[] highlights
+---   highlight span: { line, col_start, col_end, hl } — 1-based line,
+---   0-based byte columns, col_end exclusive.
 function M.layout(model)
-  local lines, meta = {}, {}
+  local width = require("intentdiff.config").options.sidebar_width
+  local lines, meta, highlights = {}, {}, {}
+
   local function add(text, m)
     lines[#lines + 1] = text
     meta[#lines] = m
+    return #lines
   end
+  local function span(line, col_start, col_end, group)
+    if col_end > col_start then
+      highlights[#highlights + 1] =
+        { line = line, col_start = col_start, col_end = col_end, hl = group }
+    end
+  end
+
   if model.state == "loading" then
     if type(model.elapsed_s) == "number" then
       add(("⟳ classifying… %ds"):format(model.elapsed_s), { kind = "info" })
@@ -19,19 +93,79 @@ function M.layout(model)
   if model.message then
     add("⚠ " .. model.message, { kind = "info" })
   end
+
   for gi, g in ipairs(model.groups or {}) do
+    local group_meta = { kind = "group", group_i = gi }
     local marker = g.collapsed and "▸" or "▾"
-    add(("%s %s  (%d)"):format(marker, g.title, #g.hunks), { kind = "group", group_i = gi })
+    local title_lines = wrap_text(g.title, width - 2)
+    for i, text in ipairs(title_lines) do
+      local prefix = i == 1 and (marker .. " ") or "  "
+      local lnum = add(prefix .. text, group_meta)
+      span(lnum, #prefix, #prefix + #text, "IntentDiffGroupTitle")
+    end
+
+    local additions, deletions = 0, 0
+    for _, h in ipairs(g.hunks or {}) do
+      additions = additions + (h.additions or 0)
+      deletions = deletions + (h.deletions or 0)
+    end
+    local counts = ("  %d hunks · %d files"):format(#(g.hunks or {}), #(g.files or {}))
+    local stats_line = counts
+    local parts = stats_text(additions, deletions)
+    local lnum = add(stats_line .. (#parts > 0 and ("  " .. table.concat(parts, " ")) or ""),
+      group_meta)
+    span(lnum, 0, #counts, "IntentDiffGroupStats")
+    local col = #stats_line + 2
+    for _, part in ipairs(parts) do
+      span(lnum, col, col + #part,
+        part:sub(1, 1) == "+" and "IntentDiffAdd" or "IntentDiffDelete")
+      col = col + #part + 1
+    end
+
     if not g.collapsed then
-      for fi, f in ipairs(g.files) do
-        local branch = fi == #g.files and "└" or "├"
-        local name = f.path:match("([^/]+)$") or f.path
-        local dir = f.path:sub(1, #f.path - #name)
-        add(("  %s %s  %s%s"):format(branch, name, dir ~= "" and dir .. " " or "", f.status),
-          { kind = "file", group_i = gi, file_i = fi })
+      local rows = tree.flatten(tree.build(g.files or {}), g.collapsed_dirs or {})
+      for _, row in ipairs(rows) do
+        local status = row.kind == "file" and hl.status_char(row.status) or " "
+        local gutter = (" %-1s "):format(status)
+        local indent = string.rep("  ", row.depth)
+        local text, icon_hl
+        if row.kind == "dir" then
+          text = (row.collapsed and "▸ " or "▾ ") .. row.name
+        else
+          local icon
+          icon, icon_hl = file_icon(row.path)
+          text = "  " .. (icon ~= "" and (icon .. " ") or "") .. row.name
+        end
+        local body = gutter .. indent .. text
+        local row_parts = row.kind == "file" and stats_text(row.additions, row.deletions) or {}
+        local suffix = #row_parts > 0 and ("  " .. table.concat(row_parts, " ")) or ""
+        local row_meta = row.kind == "dir"
+            and { kind = "dir", group_i = gi, dir_path = row.path }
+          or { kind = "file", group_i = gi, file_i = row.file_i }
+        local rnum = add(body .. suffix, row_meta)
+
+        if row.kind == "file" then
+          span(rnum, 1, 1 + #status, hl.status_group(row.status))
+        end
+        if #indent > 0 then
+          span(rnum, #gutter, #gutter + #indent, "IntentDiffIndent")
+        end
+        if row.kind == "dir" then
+          span(rnum, #gutter + #indent, #body, "IntentDiffDirectory")
+        elseif icon_hl then
+          local icon_start = #gutter + #indent + 2
+          span(rnum, icon_start, icon_start + #text - 2 - #row.name, icon_hl)
+        end
+        local scol = #body + 2
+        for _, part in ipairs(row_parts) do
+          span(rnum, scol, scol + #part,
+            part:sub(1, 1) == "+" and "IntentDiffAdd" or "IntentDiffDelete")
+          scol = scol + #part + 1
+        end
       end
     end
   end
+
   if model.state == "ready" then
     local stale = (model.stale_count or 0) > 0
         and (" · stale — %d unclassified"):format(model.stale_count) or ""
@@ -42,11 +176,12 @@ function M.layout(model)
     add(("%d/%d hunks%s%s"):format(model.grouped_hunks, model.total_hunks, label, stale),
       { kind = "footer" })
   end
-  return lines, meta
+  return lines, meta, highlights
 end
 
 --- Open the sidebar split and wire keymaps. Returns a handle.
 function M.create(callbacks)
+  hl.ensure()
   local width = require("intentdiff.config").options.sidebar_width
   vim.cmd("topleft " .. width .. "vsplit")
   local winid = vim.api.nvim_get_current_win()
@@ -70,17 +205,21 @@ function M.create(callbacks)
     if not vim.api.nvim_buf_is_valid(bufnr) then
       return
     end
-    local lines, meta = M.layout(model)
+    local lines, meta, highlights = M.layout(model)
     handle.meta = meta
     vim.bo[bufnr].modifiable = true
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
     vim.bo[bufnr].modifiable = false
     vim.api.nvim_buf_clear_namespace(bufnr, M.ns, 0, -1)
     for i, m in ipairs(meta) do
-      local hl = ({ group = "Title", info = "WarningMsg", footer = "Comment" })[m.kind]
-      if hl then
-        vim.api.nvim_buf_set_extmark(bufnr, M.ns, i - 1, 0, { line_hl_group = hl })
+      local line_hl = ({ info = "WarningMsg", footer = "Comment" })[m.kind]
+      if line_hl then
+        vim.api.nvim_buf_set_extmark(bufnr, M.ns, i - 1, 0, { line_hl_group = line_hl })
       end
+    end
+    for _, s in ipairs(highlights) do
+      pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, s.line - 1, s.col_start,
+        { end_col = s.col_end, hl_group = s.hl })
     end
   end
 
@@ -94,6 +233,8 @@ function M.create(callbacks)
     local m = cursor_meta()
     if m.kind == "file" then
       callbacks.on_select(m.group_i, m.file_i)
+    elseif m.kind == "dir" then
+      callbacks.on_toggle_dir(m.group_i, m.dir_path)
     elseif m.kind == "group" then
       callbacks.on_toggle_group(m.group_i)
     end
@@ -101,7 +242,9 @@ function M.create(callbacks)
   for _, key in ipairs({ "za", "h", "l" }) do
     map(key, function()
       local m = cursor_meta()
-      if m.group_i then
+      if m.kind == "dir" then
+        callbacks.on_toggle_dir(m.group_i, m.dir_path)
+      elseif m.group_i then
         callbacks.on_toggle_group(m.group_i)
       end
     end)

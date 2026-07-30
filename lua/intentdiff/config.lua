@@ -23,7 +23,8 @@ M.defaults = {
     agentic = true,
   },
   context_lines = nil, -- nil = follow codediff's diff.compact_context_lines
-  sidebar_width = 36,
+  sidebar_width = 40,
+  icons = true, -- file icons from nvim-web-devicons when it is installed
   -- Auto-open the first file worth looking at, instead of leaving codediff's
   -- empty placeholder panes until the user presses <CR>: the first file of
   -- the flat "All changes" group while classification is still running, then

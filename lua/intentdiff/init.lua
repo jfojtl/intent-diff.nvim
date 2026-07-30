@@ -595,6 +595,15 @@ function M.open(argline)
         entry.sidebar.update(entry.model)
       end
     end,
+    on_toggle_dir = function(gi, dir_path)
+      local entry = sessions[token]
+      local g = entry and entry.model.groups[gi]
+      if g then
+        g.collapsed_dirs = g.collapsed_dirs or {}
+        g.collapsed_dirs[dir_path] = not g.collapsed_dirs[dir_path] or nil
+        entry.sidebar.update(entry.model)
+      end
+    end,
     on_reclassify = function()
       local entry = sessions[token]
       if entry and entry.inventory then
