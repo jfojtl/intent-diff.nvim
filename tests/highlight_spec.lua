@@ -27,7 +27,11 @@ describe("highlight", function()
     hl.ensure()
     local def = vim.api.nvim_get_hl(0, { name = "IntentDiffAdd" })
     assert.is_nil(def.link)
-    vim.api.nvim_set_hl(0, "IntentDiffAdd", {}) -- reset for later specs
+    -- Properly reset: use highlight clear then re-ensure to restore the link
+    vim.cmd("highlight clear IntentDiffAdd")
+    hl.ensure()
+    local restored = vim.api.nvim_get_hl(0, { name = "IntentDiffAdd" })
+    assert.equals("Added", restored.link, "IntentDiffAdd must be restored to Added after reset")
   end)
 
   it("is idempotent", function()
