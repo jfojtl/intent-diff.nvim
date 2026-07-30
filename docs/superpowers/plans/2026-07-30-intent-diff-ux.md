@@ -1301,10 +1301,18 @@ describe("sidebar.layout", function()
     assert.equals("group", meta[2].kind)
     assert.equals(1, meta[1].group_i)
     assert.equals(1, meta[2].group_i)
-    for _, line in ipairs(lines) do
-      assert.is_true(vim.fn.strdisplaywidth(line) <= 40,
-        ("line exceeds sidebar width: %q"):format(line))
+    -- the wrap guarantee covers title lines only. File and directory rows are
+    -- never wrapped — a long path just runs past the window edge, as in
+    -- diffview — so they are excluded here deliberately.
+    local title_lines = 0
+    for i, line in ipairs(lines) do
+      if meta[i].kind == "group" and not line:find("hunks", 1, true) then
+        title_lines = title_lines + 1
+        assert.is_true(vim.fn.strdisplaywidth(line) <= 40,
+          ("title line exceeds sidebar width: %q"):format(line))
+      end
     end
+    assert.is_true(title_lines >= 2, "long title must occupy more than one line")
   end)
 
   it("renders a stats line with hunk count, file count and +/- totals", function()
