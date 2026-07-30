@@ -51,9 +51,21 @@ function M.parse(diff_text)
         original = range(tonumber(os_), ol == "" and 1 or tonumber(ol)),
         modified = range(tonumber(ms), ml == "" and 1 or tonumber(ml)),
         text = line .. "\n",
+        additions = 0,
+        deletions = 0,
       }
     elseif current then
       current.text = current.text .. line .. "\n"
+      -- Body lines only: `diff --git`, `index`, `---` and `+++` all land here
+      -- with `current == nil` (flush() runs at `diff --git`), so the file
+      -- header can never be miscounted. "\ No newline at end of file" starts
+      -- with a backslash and counts as neither.
+      local kind = line:sub(1, 1)
+      if kind == "+" then
+        current.additions = current.additions + 1
+      elseif kind == "-" then
+        current.deletions = current.deletions + 1
+      end
     end
   end
   flush()
@@ -71,6 +83,8 @@ function M.untracked_hunk(path, lines)
     original = { start_line = 1, end_line = 1 },
     modified = { start_line = 1, end_line = math.max(1, #lines) + 1 },
     text = text,
+    additions = #lines,
+    deletions = 0,
     content_hash = vim.fn.sha256(text),
   }
 end

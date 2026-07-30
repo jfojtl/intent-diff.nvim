@@ -100,3 +100,64 @@ describe("hunks.parse", function()
     end
   end)
 end)
+
+describe("hunks.parse line statistics", function()
+  it("counts additions and deletions per hunk", function()
+    local diff = table.concat({
+      "diff --git a/a.lua b/a.lua",
+      "index 1111111..2222222 100644",
+      "--- a/a.lua",
+      "+++ b/a.lua",
+      "@@ -1,3 +1,4 @@",
+      " keep",
+      "-gone",
+      "-also gone",
+      "+new one",
+      "+new two",
+      "+new three",
+      "",
+    }, "\n")
+    local parsed = require("intentdiff.hunks").parse(diff)
+    assert.equals(1, #parsed)
+    assert.equals(3, parsed[1].additions)
+    assert.equals(2, parsed[1].deletions)
+  end)
+
+  it("does not count the --- / +++ file header lines", function()
+    -- These precede the first @@, so `current` is nil and they must be
+    -- skipped. A naive counter that runs before the @@ check would report
+    -- one extra addition and one extra deletion here.
+    local diff = table.concat({
+      "diff --git a/a.lua b/a.lua",
+      "--- a/a.lua",
+      "+++ b/a.lua",
+      "@@ -1,1 +1,1 @@",
+      "-old",
+      "+new",
+      "",
+    }, "\n")
+    local parsed = require("intentdiff.hunks").parse(diff)
+    assert.equals(1, parsed[1].additions)
+    assert.equals(1, parsed[1].deletions)
+  end)
+
+  it("does not count the no-newline marker", function()
+    local diff = table.concat({
+      "diff --git a/a.lua b/a.lua",
+      "@@ -1,1 +1,1 @@",
+      "-old",
+      "\\ No newline at end of file",
+      "+new",
+      "",
+    }, "\n")
+    local parsed = require("intentdiff.hunks").parse(diff)
+    assert.equals(1, parsed[1].additions)
+    assert.equals(1, parsed[1].deletions)
+  end)
+
+  it("counts every added line for an untracked file", function()
+    local h = require("intentdiff.hunks").untracked_hunk("new.lua", { "a", "b", "c" })
+    assert.equals(3, h.additions)
+    assert.equals(0, h.deletions)
+  end)
+end)
