@@ -334,5 +334,44 @@ describe("classify.run", function()
       assert.truthy(reconcile_line:find("id_mapping_failures=2", 1, true),
         "mapping-failure count missing from reconcile entry: " .. reconcile_line)
     end)
+
+    it("a cache entry written from a compact-ids response replays identically on a later cache hit", function()
+      -- classify.run only ever caches the CANONICAL hunk_ids form (see its
+      -- cache.save call: `raw_groups` there is normalize_raw_groups' output,
+      -- never the provider's raw `ids` string) — so a later cache hit must
+      -- reconcile to the exact same groups with no dependence on
+      -- request.numbering at all. Prove it by having the second run's
+      -- provider blow up if it's ever called (it shouldn't be), which also
+      -- means no numbering is ever built for that run.
+      local calls = 0
+      local groups1
+      classify.run(mk_multi_inventory("compact-cache-replay"), {
+        provider = function(request, cb)
+          calls = calls + 1
+          assert.truthy(request.numbering, "provider did not receive a numbering map")
+          vim.schedule(function()
+            cb({ groups = { { title = "First", ids = "1,3" } } }) -- a.lua:1, b.lua:1
+          end)
+          return { cancel = function() end }
+        end,
+      }, function(g) groups1 = g end)
+      helpers.wait_for(function() return groups1 end)
+      assert.equals(1, calls)
+      assert.equals(2, #groups1)
+      assert.equals("First", groups1[1].title)
+      assert.same({ "a.lua:1", "b.lua:1" },
+        vim.tbl_map(function(h) return h.id end, groups1[1].hunks))
+      assert.equals("Ungrouped", groups1[2].title)
+      assert.equals("a.lua:2", groups1[2].hunks[1].id)
+
+      local groups2, info2
+      classify.run(mk_multi_inventory("compact-cache-replay"), {
+        provider = function() error("provider must not be called on a cache hit") end,
+      }, function(g, _, i) groups2, info2 = g, i end)
+      helpers.wait_for(function() return groups2 end)
+      assert.equals(1, calls, "provider ran again instead of serving the cache")
+      assert.is_true(info2.cached)
+      assert.same(groups1, groups2)
+    end)
   end)
 end)
