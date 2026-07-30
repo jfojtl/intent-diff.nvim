@@ -88,7 +88,7 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   provider_opts = {
     cmd = "claude",        -- CLI binary to run
     model = "haiku",       -- --model passed to `claude -p`
-    timeout_ms = 60000,    -- kill the job and report failure after this long
+    timeout_ms = 180000,   -- kill the job and report failure after this long
   },
 
   -- Lines of context around each hunk when computing folds. nil = follow
@@ -109,6 +109,9 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
 
   -- Where classification results are cached, keyed by diff-text hash.
   cache_dir = vim.fn.stdpath("cache") .. "/intentdiff",
+
+  -- Diagnostics log used by :IntentDiffLog (see "Diagnostics" below).
+  log_file = vim.fn.stdpath("cache") .. "/intentdiff/intentdiff.log",
 }
 ```
 
@@ -175,6 +178,30 @@ they move only through the current group's hunks; at a file's last hunk in
 the group they roll over to the group's next file. codediff's inline↔side-by-side
 toggle keeps working; the fold filter re-applies after every toggle.
 
+## Diagnostics
+
+`:IntentDiffLog` opens the diagnostics log (`config.log_file`, default
+`vim.fn.stdpath("cache") .. "/intentdiff/intentdiff.log"`) in a scratch
+buffer, cursor at the end so the newest entry is visible. If nothing has
+been logged yet, it shows a one-line "no entries yet" buffer instead of
+erroring.
+
+Every classification appends timestamped entries covering:
+
+- **Provider invocations** — the command+args spawned, prompt size in
+  bytes, hunk count in the request, elapsed time, exit code, the first
+  ~400 bytes of stdout and stderr each, and how the response parsed.
+- **Classification outcomes** — cache hit, re-match against the previous
+  classification (with the stale count), skipped for exceeding
+  `max_hunks`, or provider success/error.
+- **Reconciliation stats** — total inventory hunks, how many the provider
+  assigned, how many ids were unrecognized (not in the inventory — i.e.
+  dropped as hallucinated), how many were duplicates, and how many landed
+  in Ungrouped.
+
+The log file is capped at roughly 200KB, truncating the oldest entries on
+write, so it can't grow unbounded across a long Neovim session.
+
 ## Manual smoke test (real LLM)
 
 1. In a repo with a multi-purpose dirty working tree, run `:IntentDiff`.
@@ -184,3 +211,11 @@ toggle keeps working; the fold filter re-applies after every toggle.
 5. `]c` at the last hunk of a file jumps to the group's next file.
 6. Toggle inline view (codediff's key) — folds still filter to the group.
 7. `r` re-classifies; a second `:IntentDiff` on the same diff is instant (cache).
+
+Large diffs take longer than the ~5s above — measured with `claude -p
+--model haiku`, a small prompt takes ~4s but a 95KB prompt takes ~106s, so
+expect classification to take 1-3 minutes on big diffs (the sidebar's
+`⟳ classifying… Ns` counter shows how long it's been running). If you hit
+"provider timed out", check `:IntentDiffLog` first, then either raise
+`provider_opts.timeout_ms` or lower `max_full_diff_bytes` (smaller prompts
+classify much faster).
