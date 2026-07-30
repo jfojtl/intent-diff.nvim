@@ -88,14 +88,18 @@ end
 --- Pair a hunk body into aligned original/modified rows. A context line emits
 --- on both sides; a run of deletions and the addition run that follows it emit
 --- max(#deletions, #additions) rows, paired by index, with a filler row on the
---- shorter side. `false` marks a filler.
+--- shorter side. `false` marks a filler. The third return value marks, per
+--- row, whether it came from a deletion/addition run (as opposed to context)
+--- — needed because an ordinary 1-for-1 replacement has real text on both
+--- sides and so can't be told apart from context by content alone.
 local function pair_body(body)
-  local original, modified = {}, {}
+  local original, modified, changed = {}, {}, {}
   local minus, plus = {}, {}
   local function flush()
     for i = 1, math.max(#minus, #plus) do
       original[#original + 1] = minus[i] or false
       modified[#modified + 1] = plus[i] or false
+      changed[#changed + 1] = true
     end
     minus, plus = {}, {}
   end
@@ -109,10 +113,11 @@ local function pair_body(body)
       flush()
       original[#original + 1] = line:sub(2)
       modified[#modified + 1] = line:sub(2)
+      changed[#changed + 1] = false
     end
   end
   flush()
-  return original, modified
+  return original, modified, changed
 end
 
 local function render_side_by_side(group)
@@ -124,12 +129,15 @@ local function render_side_by_side(group)
     for _, hunk in ipairs(file.hunks or {}) do
       original.add(hunk.header, "IntentDiffPreviewHunk")
       hunk_lines[#hunk_lines + 1] = modified.add(hunk.header, "IntentDiffPreviewHunk")
-      local left, right = pair_body(body_of(hunk))
+      local left, right, changed = pair_body(body_of(hunk))
       for i = 1, #left do
-        original.add(left[i] or "", left[i] == false and "IntentDiffFiller"
-          or (right[i] == false and "IntentDiffDelete" or nil))
-        modified.add(right[i] or "", right[i] == false and "IntentDiffFiller"
-          or (left[i] == false and "IntentDiffAdd" or nil))
+        local original_hl, modified_hl
+        if changed[i] then
+          original_hl = left[i] == false and "IntentDiffFiller" or "IntentDiffDelete"
+          modified_hl = right[i] == false and "IntentDiffFiller" or "IntentDiffAdd"
+        end
+        original.add(left[i] or "", original_hl)
+        modified.add(right[i] or "", modified_hl)
       end
     end
   end
@@ -138,24 +146,37 @@ end
 
 --- Drop everything past `max_lines`, replacing the last line with a stated
 --- count. Truncation is applied identically to every pane so the two sides stay
---- aligned; highlight spans pointing past the cut are dropped.
-local function truncate(panes, max_lines)
+--- aligned; highlight spans pointing past the cut are dropped. `max_lines`
+--- below 1 (0 or negative) is clamped to 1 rather than silently ignored, so
+--- the cap always does something and the buffer is left with just the
+--- summary line. Returns `hunk_lines` filtered to entries that still index a
+--- real line — a hunk_lines entry landing exactly on the cut would otherwise
+--- point at the summary line instead of a `@@` header.
+local function truncate(panes, max_lines, hunk_lines)
   local total = #panes[1].lines
-  if max_lines and max_lines > 1 and total > max_lines then
-    local omitted = total - max_lines + 1
-    for _, pane in ipairs(panes) do
-      for i = total, max_lines, -1 do
-        pane.lines[i] = nil
-      end
-      pane.lines[max_lines] = ("── %d more line%s not shown (preview.max_lines)")
-        :format(omitted, omitted == 1 and "" or "s")
-      pane.highlights = vim.tbl_filter(function(s)
-        return s.line < max_lines
-      end, pane.highlights)
-      pane.highlights[#pane.highlights + 1] =
-        { line = max_lines, col_start = 0, col_end = WHOLE_LINE, hl = "IntentDiffPreviewFile" }
-    end
+  if not max_lines then
+    return hunk_lines
   end
+  local limit = math.max(max_lines, 1)
+  if total <= limit then
+    return hunk_lines
+  end
+  local omitted = total - limit + 1
+  for _, pane in ipairs(panes) do
+    for i = total, limit, -1 do
+      pane.lines[i] = nil
+    end
+    pane.lines[limit] = ("── %d more line%s not shown (preview.max_lines)")
+      :format(omitted, omitted == 1 and "" or "s")
+    pane.highlights = vim.tbl_filter(function(s)
+      return s.line < limit
+    end, pane.highlights)
+    pane.highlights[#pane.highlights + 1] =
+      { line = limit, col_start = 0, col_end = WHOLE_LINE, hl = "IntentDiffPreviewFile" }
+  end
+  return vim.tbl_filter(function(lnum)
+    return lnum < limit
+  end, hunk_lines)
 end
 
 local function empty_pane()
@@ -177,14 +198,14 @@ function M.render(group, layout, opts)
     if not has_files then
       pane, hunk_lines = empty_pane(), {}
     end
-    truncate({ pane }, opts.max_lines)
+    hunk_lines = truncate({ pane }, opts.max_lines, hunk_lines)
     return { layout = "inline", modified = pane, hunk_lines = hunk_lines }
   end
   local original, modified, hunk_lines = render_side_by_side(group)
   if not has_files then
     original, modified, hunk_lines = empty_pane(), empty_pane(), {}
   end
-  truncate({ original, modified }, opts.max_lines)
+  hunk_lines = truncate({ original, modified }, opts.max_lines, hunk_lines)
   return {
     layout = "side-by-side",
     original = original,
