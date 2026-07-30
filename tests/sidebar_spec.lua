@@ -175,9 +175,8 @@ describe("sidebar.layout", function()
 
   it("terminates instead of hanging when sidebar_width is non-positive", function()
     -- A pathological config value (<= 0) must not wedge the editor: wrap_text
-    -- hard-wraps long words by shrinking `cut` one byte at a time until it
-    -- fits `width`, and a non-positive width can never be "fit", so the
-    -- word is never consumed unless width is clamped to at least 1.
+    -- clamps width to at least 1 before hard-wrapping, so a non-positive
+    -- config value can never leave the hard-cut loop with nothing to fit.
     local config = require("intentdiff.config")
     local saved = config.options.sidebar_width
     config.options.sidebar_width = 0
@@ -186,6 +185,85 @@ describe("sidebar.layout", function()
     local lines = sidebar.layout(model)
     config.options.sidebar_width = saved
     assert.is_true(#lines > 0, "layout produced no lines")
+  end)
+
+  --- No line contains a byte sequence Vim can't decode as UTF-8 (i.e. no
+  --- character was cut mid-byte-sequence).
+  local function assert_valid_utf8(lines)
+    for _, l in ipairs(lines) do
+      assert.is_true(pcall(vim.str_utfindex, l),
+        ("line is not valid UTF-8, a character was split: %q"):format(l))
+    end
+  end
+
+  it("terminates and never splits a character at width == 1 with a CJK title", function()
+    -- wrap_text's hard-cut path used to shrink candidates one BYTE at a
+    -- time. Slicing a multibyte character in half leaves an invalid UTF-8
+    -- prefix, which Vim renders as "<xx>" (display width 4) — that display
+    -- width is always > any width being fit, so the byte-wise cut degrades
+    -- all the way to "", `word` is never consumed, and the loop spins
+    -- forever. sidebar_width == 3 makes the title wrap width (sidebar_width
+    -- - 2) exactly 1, which is where this actually bit: an LLM-produced
+    -- group title with any CJK character or emoji would wedge the editor.
+    local config = require("intentdiff.config")
+    local saved = config.options.sidebar_width
+    config.options.sidebar_width = 3
+    local model = mk_model({ groups = { { title =
+      "这是一个很长的中文标题用来测试换行逻辑" } } })
+    local lines = sidebar.layout(model)
+    config.options.sidebar_width = saved
+    assert.is_true(#lines > 0, "layout produced no lines")
+    assert_valid_utf8(lines)
+  end)
+
+  it("terminates and never splits a character at width == 1 with an emoji title", function()
+    local config = require("intentdiff.config")
+    local saved = config.options.sidebar_width
+    config.options.sidebar_width = 3
+    local model = mk_model({ groups = { { title =
+      "🎉🎊🎈 celebration party time extravaganza 🥳🎁🎀" } } })
+    local lines = sidebar.layout(model)
+    config.options.sidebar_width = saved
+    assert.is_true(#lines > 0, "layout produced no lines")
+    assert_valid_utf8(lines)
+  end)
+
+  it("terminates on a single wide character narrower than the smallest fit "
+      .. "(one glyph wider than width == 1)", function()
+    local config = require("intentdiff.config")
+    local saved = config.options.sidebar_width
+    config.options.sidebar_width = 3
+    local model = mk_model({ groups = { { title = "中" } } })
+    local lines = sidebar.layout(model)
+    config.options.sidebar_width = saved
+    assert.is_true(#lines > 0, "layout produced no lines")
+    assert_valid_utf8(lines)
+    -- the one character is still emitted whole, not dropped
+    assert.truthy(lines[1]:find("中", 1, true))
+  end)
+
+  it("terminates on one very long multibyte word with no spaces to wrap on", function()
+    local config = require("intentdiff.config")
+    local saved = config.options.sidebar_width
+    config.options.sidebar_width = 3
+    local model = mk_model({ groups = { { title = string.rep("中", 50) } } })
+    local lines = sidebar.layout(model)
+    config.options.sidebar_width = saved
+    assert.is_true(#lines > 0, "layout produced no lines")
+    assert_valid_utf8(lines)
+  end)
+
+  it("terminates on combining characters at width == 1", function()
+    local config = require("intentdiff.config")
+    local saved = config.options.sidebar_width
+    config.options.sidebar_width = 3
+    -- "e" followed by 20 COMBINING ACUTE ACCENT (U+0301) codepoints.
+    local combining = "e" .. string.rep("\204\129", 20)
+    local model = mk_model({ groups = { { title = combining .. " " .. combining } } })
+    local lines = sidebar.layout(model)
+    config.options.sidebar_width = saved
+    assert.is_true(#lines > 0, "layout produced no lines")
+    assert_valid_utf8(lines)
   end)
 
   it("hides a collapsed directory's files", function()

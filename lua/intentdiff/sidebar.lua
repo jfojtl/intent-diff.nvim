@@ -8,10 +8,23 @@ local hl = require("intentdiff.highlight")
 --- Hard-wrap `text` to `width` display columns on word boundaries, hard-cutting
 --- a single word that is longer than the width. The sidebar window keeps
 --- `wrap = false` so tree alignment survives; wrapping happens here instead.
+---
+--- The hard-cut path works in whole Unicode characters (vim.fn.strchars /
+--- strcharpart), never bytes: shrinking a candidate substring one BYTE at a
+--- time (string:sub) can slice a multibyte character in half, and Vim
+--- renders an invalid UTF-8 prefix as "<xx>" — display width 4, always
+--- bigger than any width we're trying to fit. That byte-wise shrink can
+--- therefore degrade all the way to "", consuming zero bytes of `word` per
+--- outer iteration, and spin forever — this bit group titles (LLM output,
+--- so a CJK character or an emoji is unremarkable) at any sidebar_width <= 3
+--- (title wrap width = sidebar_width - 2). Character-wise cutting always
+--- removes at least one whole codepoint per outer iteration, so it always
+--- makes progress; if even a single character does not fit `width` (a
+--- degenerate width, or one very wide glyph), that one character is still
+--- emitted rather than nothing, and the loop moves past it.
 local function wrap_text(text, width)
-  -- A non-positive width would leave `cut` degrading to "" below, so `word`
-  -- is never consumed and the inner while loop spins forever. Clamp to 1: a
-  -- pathological config value shouldn't be able to wedge the editor.
+  -- A non-positive width would otherwise never let anything "fit". Clamp to
+  -- 1 so a pathological config value can't wedge the editor either.
   width = math.max(width, 1)
   local out, line = {}, ""
   for word in text:gmatch("%S+") do
@@ -23,12 +36,17 @@ local function wrap_text(text, width)
         out[#out + 1] = line
       end
       while vim.fn.strdisplaywidth(word) > width do
+        local n = vim.fn.strchars(word)
         local cut = word
-        while vim.fn.strdisplaywidth(cut) > width do
-          cut = cut:sub(1, #cut - 1)
+        -- Shrink by whole characters until it fits, but never below one
+        -- character — a single glyph wider than `width` is still emitted
+        -- whole rather than leaving nothing to consume from `word`.
+        while n > 1 and vim.fn.strdisplaywidth(cut) > width do
+          n = n - 1
+          cut = vim.fn.strcharpart(word, 0, n)
         end
         out[#out + 1] = cut
-        word = word:sub(#cut + 1)
+        word = vim.fn.strcharpart(word, n)
       end
       line = word
     end
