@@ -5,13 +5,14 @@ M.defaults = {
   provider_opts = {
     cmd = "claude",
     model = "haiku",
-    timeout_ms = 60000,
+    timeout_ms = 180000,
   },
   context_lines = nil, -- nil = follow codediff's diff.compact_context_lines
   sidebar_width = 36,
   max_full_diff_bytes = 100 * 1024, -- above this, prompt gets per-hunk summaries only
   max_hunks = 400, -- above this, skip classification with a notice
   cache_dir = vim.fn.stdpath("cache") .. "/intentdiff",
+  log_file = vim.fn.stdpath("cache") .. "/intentdiff/intentdiff.log", -- diagnostics log; see :IntentDiffLog
 }
 
 M.options = vim.deepcopy(M.defaults)

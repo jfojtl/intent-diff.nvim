@@ -16,6 +16,25 @@ function M.setup(opts)
   require("intentdiff.config").setup(opts)
 end
 
+--- :IntentDiffLog — open the diagnostics log in a scratch buffer, cursor at
+--- the end so the newest entry is visible. A friendly one-liner instead of an
+--- error when nothing has been logged yet.
+function M.show_log()
+  local lines = require("intentdiff.log").read()
+  if #lines == 0 then
+    lines = { "intent-diff: no log entries yet" }
+  end
+  vim.cmd("botright new")
+  local buf = vim.api.nvim_get_current_buf()
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = "intentdifflog"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  vim.api.nvim_win_set_cursor(0, { #lines, 0 })
+end
+
 --- Find the session whose *current* tabpage is `tabpage`. Safe to call at any
 --- point, including after view.show_file() has reconciled sess.tabpage away
 --- from the tab :IntentDiff originally opened.

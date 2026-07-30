@@ -1,5 +1,7 @@
 local claude_cli = require("intentdiff.providers.claude_cli")
 local helpers = require("tests.helpers")
+local log = require("intentdiff.log")
+local config = require("intentdiff.config")
 
 local REQUEST = {
   diff_text = "diff --git a/a.lua b/a.lua\n@@ -1,1 +1,1 @@\n-x\n+y\n",
@@ -111,5 +113,50 @@ echo '{"groups":[{"title":"Fake","hunk_ids":["a.lua:1"]}]}']])
     vim.wait(500, function() return false end, 50)
     restore()
     assert.is_false(called)
+  end)
+
+  it("captures stderr and logs it on a failing invocation", function()
+    local log_file = vim.fn.tempname()
+    config.setup({ log_file = log_file })
+    local restore = helpers.fake_bin("claude", [[
+cat > /dev/null
+echo 'boom: something went wrong' 1>&2
+exit 7]])
+    local err
+    claude_cli.new({ timeout_ms = 5000 })(REQUEST, function(_, e) err = e end)
+    helpers.wait_for(function() return err end)
+    restore()
+    assert.truthy(err:find("exited"))
+
+    local lines = log.read()
+    assert.is_true(#lines > 0, "expected a provider_invocation entry")
+    local entry = lines[#lines]
+    assert.truthy(entry:find("provider_invocation", 1, true))
+    assert.truthy(entry:find("exit_code=7", 1, true))
+    assert.truthy(entry:find("boom: something went wrong", 1, true),
+      "stderr not captured in log entry: " .. entry)
+  end)
+
+  it("logs elapsed time, prompt size, hunk count, and exit code on success", function()
+    local log_file = vim.fn.tempname()
+    config.setup({ log_file = log_file })
+    local restore = helpers.fake_bin("claude", [[
+cat > /dev/null
+echo '{"groups":[{"title":"Fake","hunk_ids":["a.lua:1"]}]}']])
+    local result, err
+    claude_cli.new({ timeout_ms = 5000 })(REQUEST, function(r, e) result, err = r, e end)
+    helpers.wait_for(function() return result or err end)
+    restore()
+    assert.is_nil(err)
+
+    local lines = log.read()
+    assert.is_true(#lines > 0, "expected a provider_invocation entry")
+    local entry = lines[#lines]
+    assert.truthy(entry:find("provider_invocation", 1, true))
+    assert.truthy(entry:find("exit_code=0", 1, true))
+    assert.truthy(entry:find("hunk_count=1", 1, true))
+    assert.truthy(entry:find(("prompt_bytes=%d"):format(#claude_cli.build_prompt(REQUEST)), 1, true))
+    assert.truthy(entry:find("elapsed_ms=", 1, true))
+    assert.truthy(entry:find("parse_outcome=ok", 1, true))
   end)
 end)

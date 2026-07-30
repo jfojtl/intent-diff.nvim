@@ -78,6 +78,13 @@ function M.parse_response(text)
   return nil, "provider returned unparseable output"
 end
 
+local SAMPLE_BYTES = 400
+
+local function truncate_sample(s)
+  s = s or ""
+  return #s > SAMPLE_BYTES and s:sub(1, SAMPLE_BYTES) or s
+end
+
 --- @return fun(request, callback): { cancel: function }
 function M.new(opts)
   opts = opts or {}
@@ -89,28 +96,59 @@ function M.new(opts)
         callback(result, err)
       end
     end
-    local stdout = {}
-    local job = vim.fn.jobstart({ opts.cmd or "claude", "-p", "--model", opts.model or "haiku" }, {
+    local cmd = opts.cmd or "claude"
+    local argv = { cmd, "-p", "--model", opts.model or "haiku" }
+    local prompt = M.build_prompt(request)
+    local start_ns = vim.uv.hrtime()
+    local stdout, stderr = {}, {}
+
+    -- Record this invocation to the diagnostics log (:IntentDiffLog). Never
+    -- lets a logging failure affect classification — see intentdiff.log.
+    local function record(fields)
+      local ok, log = pcall(require, "intentdiff.log")
+      if not ok then
+        return
+      end
+      log.provider_invocation(vim.tbl_extend("force", {
+        cmd = table.concat(argv, " "),
+        prompt_bytes = #prompt,
+        hunk_count = #(request.hunks or {}),
+        elapsed_ms = math.floor((vim.uv.hrtime() - start_ns) / 1e6),
+        stdout_sample = truncate_sample(table.concat(stdout, "\n")),
+        stderr_sample = truncate_sample(table.concat(stderr, "\n")),
+      }, fields))
+    end
+
+    local job = vim.fn.jobstart(argv, {
       stdout_buffered = true,
+      stderr_buffered = true,
       on_stdout = function(_, data)
         stdout = data or {}
       end,
+      on_stderr = function(_, data)
+        stderr = data or {}
+      end,
       on_exit = function(_, code)
         if code ~= 0 then
+          record({ exit_code = code, parse_outcome = "exit_nonzero" })
           return finish(nil, ("provider exited with code %d"):format(code))
         end
-        finish(M.parse_response(table.concat(stdout, "\n")))
+        local result, err = M.parse_response(table.concat(stdout, "\n"))
+        record({ exit_code = code, parse_outcome = result and "ok" or "unparseable" })
+        finish(result, err)
       end,
     })
     if job <= 0 then
-      finish(nil, "could not start provider command '" .. (opts.cmd or "claude") .. "'")
+      record({ parse_outcome = "spawn_failed" })
+      finish(nil, "could not start provider command '" .. cmd .. "'")
       return { cancel = function() end }
     end
-    vim.fn.chansend(job, M.build_prompt(request))
+    vim.fn.chansend(job, prompt)
     vim.fn.chanclose(job, "stdin")
     vim.defer_fn(function()
       if not finished then
         vim.fn.jobstop(job)
+        record({ parse_outcome = "timeout" })
         finish(nil, "provider timed out")
       end
     end, opts.timeout_ms or 60000)
