@@ -64,6 +64,11 @@ describe("view adapter", function()
     local repo = helpers.make_repo({ ["gone.txt"] = "alpha\nbeta\ngamma" })
     helpers.git(repo, "rm", "-q", "gone.txt")
 
+    local inv
+    require("intentdiff.hunks").collect({ git_root = repo }, function(i) inv = i end)
+    helpers.wait_for(function() return inv end)
+    local deleted = vim.tbl_filter(function(h) return h.file == "gone.txt" end, inv.hunks)
+
     local git = require("codediff.core.git")
     local base
     git.resolve_revision("HEAD", repo, function(_, hash) base = hash end)
@@ -72,7 +77,7 @@ describe("view adapter", function()
     local sess = { tabpage = view.open_tab(), git_root = repo, base_revision = base }
     local ready = false
     local captured
-    view.show_file(sess, { path = "gone.txt", status = "D" }, {
+    view.show_file(sess, { path = "gone.txt", status = "D", hunks = deleted }, {
       on_ready = function()
         ready = true
         -- Snapshot the buffer content at the exact moment on_ready fires —

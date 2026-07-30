@@ -51,9 +51,9 @@ end
 
 local visible_by_win = {}
 
---- Hunks currently applied per tabpage via M.apply_group_folds, so the
---- TabEnter handler below can re-assert them. Set on success in
---- apply_group_folds, cleared in M.close_tab.
+--- `{ hunks, context }` currently applied per tabpage via M.apply_group_folds,
+--- so the TabEnter handler below can re-assert them with the same context
+--- override. Set on success in apply_group_folds, cleared in M.close_tab.
 M._active_folds = {}
 
 --- Last { sess, file_entry } rendered per tabpage. Two uses:
@@ -91,8 +91,9 @@ local folds_augroup
 --- the tab silently downgraded ]c/[c to codediff's all-hunks navigation and
 --- `t` to codediff's explorer-only toggle. Re-assert both here.
 local function reassert(tab)
-  if M._active_folds[tab] then
-    M.apply_group_folds(tab, M._active_folds[tab])
+  local active = M._active_folds[tab]
+  if active then
+    M.apply_group_folds(tab, active.hunks, { context = active.context })
   end
   M.install_keymaps(tab)
   require("intentdiff.navigation").reattach_keymaps(tab)
@@ -157,7 +158,15 @@ local function pane_entries(session)
 end
 
 --- Fold everything except `hunks`' ranges (+context) in both panes.
-function M.apply_group_folds(tabpage, hunks)
+---
+--- opts.context overrides the usual context_lines() amount. Whole-file
+--- additions (see M.show_file) pass 0: their sub-hunks (hunks.split_added)
+--- are adjacent partitions of one continuous addition with no real code
+--- between them, so codediff's normal context-lines padding would bleed a
+--- few lines of the NEXT (unowned) sub-hunk into view — unlike modified-file
+--- hunks, where that padding is genuine surrounding code.
+function M.apply_group_folds(tabpage, hunks, opts)
+  opts = opts or {}
   ensure_folds_augroup()
   local session = cd.lifecycle.get_session(tabpage)
   if not session or not session.stored_diff_result then
@@ -167,7 +176,7 @@ function M.apply_group_folds(tabpage, hunks)
   for i, h in ipairs(hunks) do
     changes[i] = { original = h.original, modified = h.modified }
   end
-  local ctx = context_lines()
+  local ctx = opts.context or context_lines()
   -- Layout toggles close panes; drop their stale visible-line sets so
   -- foldexpr never answers for a recycled window id.
   for win in pairs(visible_by_win) do
@@ -188,7 +197,7 @@ function M.apply_group_folds(tabpage, hunks)
       vim.wo[pane.win].foldenable = true
     end
   end
-  M._active_folds[tabpage] = hunks
+  M._active_folds[tabpage] = { hunks = hunks, context = opts.context }
   return true
 end
 
@@ -304,6 +313,27 @@ function M.bootstrap(sess)
   return tab
 end
 
+--- True when this session's target side is the working tree rather than a
+--- named revision.
+---
+--- codediff loads an "A" pane through `git show <revision>:<path>`; the
+--- sentinel "WORKING" is not a revision, so that lookup always fails and
+--- codediff renders a single empty line (core/virtual_file.lua). codediff's own
+--- explorer sidesteps this the same way, taking the virtual-file branch only
+--- when target_revision ~= "WORKING" (ui/explorer/render.lua:273) and reading
+--- the file off disk otherwise.
+local function targets_worktree(sess)
+  return sess.target_revision == nil or sess.target_revision == "WORKING"
+end
+
+--- True when `file_entry`'s pane content comes from a real file on disk, which
+--- codediff loads synchronously — as opposed to a `codediff://` virtual file,
+--- whose content arrives asynchronously (see wait_for_virtual_file).
+local function loads_from_disk(sess, file_entry)
+  return file_entry.status == "??"
+    or (file_entry.status == "A" and targets_worktree(sess))
+end
+
 --- Render the whole-file pane for a "??"/"A"/"D" status in side-by-side
 --- layout. Requires an already-registered codediff session for `tabpage`
 --- (show_*_file no-ops otherwise) — see M.bootstrap. These helpers
@@ -313,11 +343,11 @@ end
 --- no separate normalize step is needed before calling them — unlike
 --- show_whole_file_inline below.
 local function show_whole_file(tabpage, sess, file_entry, abs_path)
-  if file_entry.status == "??" then
+  if loads_from_disk(sess, file_entry) then
     cd.side_by_side.show_untracked_file(tabpage, abs_path)
   elseif file_entry.status == "A" then
     cd.side_by_side.show_added_virtual_file(
-      tabpage, sess.git_root, file_entry.path, sess.target_revision or "WORKING")
+      tabpage, sess.git_root, file_entry.path, sess.target_revision)
   elseif file_entry.status == "D" then
     cd.side_by_side.show_deleted_virtual_file(tabpage, sess.git_root, file_entry.path, sess.base_revision)
   end
@@ -365,17 +395,16 @@ end
 --- show_single_file) rather than side_by_side's show_*_file helpers.
 local function show_whole_file_inline(tabpage, sess, file_entry, abs_path)
   normalize_for_inline(tabpage)
-  local status = file_entry.status
-  if status == "??" then
+  if loads_from_disk(sess, file_entry) then
     cd.inline_view.show_single_file(tabpage, abs_path, { side = "modified" })
-  elseif status == "A" then
+  elseif file_entry.status == "A" then
     cd.inline_view.show_single_file(tabpage, file_entry.path, {
-      revision = sess.target_revision or "WORKING",
+      revision = sess.target_revision,
       git_root = sess.git_root,
       rel_path = file_entry.path,
       side = "modified",
     })
-  elseif status == "D" then
+  elseif file_entry.status == "D" then
     cd.inline_view.show_single_file(tabpage, file_entry.path, {
       revision = sess.base_revision,
       git_root = sess.git_root,
@@ -470,7 +499,7 @@ local function show_whole_file_in_layout(tabpage, sess, file_entry, abs_path, ta
       on_ready()
     end
   end
-  if file_entry.status == "??" then
+  if loads_from_disk(sess, file_entry) then
     -- Real file, loaded synchronously by show_untracked_file /
     -- show_single_file.
     vim.schedule(ready)
@@ -491,9 +520,20 @@ function M.show_file(sess, file_entry, opts)
   local abs_path = sess.git_root .. "/" .. file_entry.path
   M._last_shown[tabpage] = { sess = sess, file_entry = file_entry }
 
-  -- Whole-file statuses: the entire file is the change — no folds needed.
+  -- Whole-file statuses render a single pane. Added and untracked files are
+  -- split into sub-hunks (hunks.split_added), so a group may own only part of
+  -- one — fold the rest away exactly as for modified files. Deleted files and
+  -- unsplit additions have a single hunk spanning everything, making this a
+  -- no-op for them.
   if file_entry.status == "??" or file_entry.status == "A" or file_entry.status == "D" then
-    show_whole_file_in_layout(tabpage, sess, file_entry, abs_path, "side-by-side", opts.on_ready)
+    show_whole_file_in_layout(tabpage, sess, file_entry, abs_path, "side-by-side", function()
+      if file_entry.hunks then
+        M.apply_group_folds(tabpage, file_entry.hunks, { context = 0 })
+      end
+      if opts.on_ready then
+        opts.on_ready()
+      end
+    end)
     return
   end
 
@@ -586,7 +626,12 @@ function M.toggle_layout(tabpage)
     if status == "??" or status == "A" or status == "D" then
       local target_layout = session.layout == "inline" and "side-by-side" or "inline"
       local abs_path = shown.sess.git_root .. "/" .. shown.file_entry.path
-      show_whole_file_in_layout(tabpage, shown.sess, shown.file_entry, abs_path, target_layout)
+      show_whole_file_in_layout(tabpage, shown.sess, shown.file_entry, abs_path, target_layout,
+        function()
+          if shown.file_entry.hunks then
+            M.apply_group_folds(tabpage, shown.file_entry.hunks, { context = 0 })
+          end
+        end)
       return true
     end
   end
