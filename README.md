@@ -295,9 +295,13 @@ write, so it can't grow unbounded across a long Neovim session.
 ## Manual smoke test (real LLM)
 
 1. In a repo with a multi-purpose dirty working tree, run `:IntentDiff`.
-2. Sidebar shows flat "All changes" + `⟳ classifying…`, then regroups within ~5s.
+2. Sidebar shows flat "All changes" + `⟳ classifying…`, then regroups once the
+   provider responds — seconds on a small diff, but expect well over a minute
+   on a large one (see the measured latency table below; not ~5s).
 3. Footer shows `N/N hunks` — total must equal the hunk count of `git diff HEAD` + untracked files.
-4. Open a file in a group: unrelated hunks are folded; `zo` peeks at them.
+4. The first file opens on its own (`auto_open`, default on) as soon as
+   there's something to show — no need to select anything: unrelated hunks
+   are folded; `zo` peeks at them.
 5. `]c` at the last hunk of a file jumps to the group's next file.
 6. Toggle inline view (codediff's key) — folds still filter to the group.
 7. `r` re-classifies; a second `:IntentDiff` on the same diff is instant (cache).
