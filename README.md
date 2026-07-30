@@ -89,6 +89,26 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
     cmd = "claude",        -- CLI binary to run
     model = "haiku",       -- --model passed to `claude -p`
     timeout_ms = 180000,   -- kill the job and report failure after this long
+
+    -- Tool restrictions passed to `claude -p` as --disallowedTools /
+    -- --allowedTools (comma-joined). This process runs pointed at the
+    -- user's own — possibly uncommitted — working tree, so by default it
+    -- can look but not touch: no edits, only read-only git/file access. An
+    -- empty list (`{}`) or `nil` omits the corresponding flag entirely
+    -- rather than passing an empty value.
+    disallowed_tools = { "Edit", "Write", "NotebookEdit" },
+    allowed_tools = {
+      "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+      "Bash(git blame:*)", "Bash(git status:*)", "Read", "Grep", "Glob",
+    },
+
+    -- Let the model run those read-only git commands and read files in the
+    -- repo on its own, to understand WHY a change was made, instead of
+    -- intent-diff pre-stuffing commit messages or `git log` output into the
+    -- prompt. The job's cwd is set to the repo root so its commands land in
+    -- the right place. Set to `false` to keep the prompt fully
+    -- self-contained (today's behavior).
+    agentic = true,
   },
 
   -- Lines of context around each hunk when computing folds. nil = follow
@@ -121,8 +141,13 @@ A provider is a function that receives the hunk inventory and returns groups
 asynchronously:
 
 ```lua
---- @param request { diff_text: string|nil, hunks: { id: string, file: string, summary_lines: string[] }[] }
---- @param callback fun(result: { groups: { title: string, hunk_ids: string[] }[] }|nil, err: string|nil)
+--- @param request {
+---   diff_text: string|nil,
+---   hunks: { id: string, n: integer, file: string, summary_lines: string[] }[],
+---   numbering: table<integer, string>,       -- n -> hunks[i].id
+---   repo: { git_root: string, base_revision: string?, target_revision: string? }|nil,
+--- }
+--- @param callback fun(result: { groups: { title: string, ids: string?, hunk_ids: string[]? }[] }|nil, err: string|nil)
 local function my_provider(request, callback)
   -- e.g. call a different CLI, an HTTP API, or return a static grouping.
   vim.system({ "codex", "exec", "--json" }, { text = true }, function(res)
@@ -150,15 +175,67 @@ and fall back to `request.hunks`. Each `hunks[i].summary_lines` holds the
 hunk's first 4 raw diff lines plus a `… (N more lines)` marker when it was
 longer, and is always present regardless of diff size.
 
-Providers never need to worry about completeness: `hunk_ids` you omit or
-mistype are reconciled by the plugin itself — missing hunks land in
-Ungrouped, hallucinated IDs are discarded, and duplicates keep only the first
-group. Run async and never block the UI.
+Each hunk also carries a compact integer `n` (1..N, inventory order), and
+`request.numbering` is the `n -> id` map — this is what makes the compact
+response format below possible. `request.repo`, when present, names the repo
+root and revision range being reviewed; a provider can use it to run its own
+read-only lookups (see "Read-only tool allowlist" and "Agentic lookup
+channel" below) instead of relying solely on `request.diff_text`/`hunks`.
+
+### Group response shape
+
+Each returned group may identify its hunks either way — **both are accepted,
+and may even appear in the same response**:
+
+- **Compact (preferred; what claude_cli asks the model for):**
+  `{ title = "...", ids = "1-4,7,12-15" }` — `ids` is a string of integers
+  with ranges, referring to `hunks[i].n` / `request.numbering`, not the
+  hunks' `id` strings. It's also tolerant of a JSON array of numbers
+  (`{1,2,3}`) or a bare number.
+- **Legacy:** `{ title = "...", hunk_ids = { "src/a.lua:1", ... } }` — the
+  original array-of-inventory-id-strings shape. Still fully supported; a
+  provider that only ever emits this keeps working identically.
+
+Providers never need to worry about completeness: ids/hunk_ids you omit,
+mistype, or that fail to map back to a real hunk are reconciled by the plugin
+itself — missing hunks land in Ungrouped, hallucinated or unmappable ids are
+discarded, and duplicates keep only the first group. Run async and never
+block the UI.
 
 Return a cancel handle — `{ cancel = function() … end }` — if your provider can
 be aborted: intent-diff calls it when a newer classification supersedes yours
 (e.g. the user pressed `r`) or when the review tab is closed, so the abandoned
 request does not keep running.
+
+## Read-only tool allowlist
+
+`claude_cli` runs pointed at the repo being reviewed — including any
+uncommitted changes in the working tree — so by default it's restricted to
+read-only tools: `provider_opts.disallowed_tools` (`--disallowedTools`)
+blocks `Edit`/`Write`/`NotebookEdit`, and `provider_opts.allowed_tools`
+(`--allowedTools`) scopes it to read-only git subcommands plus
+`Read`/`Grep`/`Glob`. Both are plain string lists, comma-joined onto the
+flag; set either to `{}` (or `nil`) to omit that flag entirely and fall back
+to `claude`'s own defaults. This is a safety measure, not a correctness one —
+the grouping itself is validated independently (see "completeness" above);
+the allowlist exists so a misbehaving or adversarially-prompted model can't
+edit the diff it's supposed to be describing.
+
+## Agentic lookup channel
+
+By default (`provider_opts.agentic = true`) claude_cli tells the model it may
+run read-only git commands and read files in the repo — comparing the exact
+base/target revisions being reviewed — to understand *why* a change was made,
+rather than intent-diff guessing at that by stuffing commit messages or `git
+log` output into the prompt itself (it deliberately doesn't). The job's
+working directory is set to the repo root so those commands land in the right
+place. The model still must answer using the hunk numbers given in the
+prompt, not file paths or line numbers, and still must not modify anything
+(enforced by the tool allowlist above, not by the prompt instruction alone).
+
+Set `provider_opts.agentic = false` to turn this off and go back to a fully
+self-contained prompt (today's original behavior, and useful if you'd rather
+not have the model spend time/tokens shelling out).
 
 ## Keymaps
 
@@ -196,8 +273,11 @@ Every classification appends timestamped entries covering:
   `max_hunks`, or provider success/error.
 - **Reconciliation stats** — total inventory hunks, how many the provider
   assigned, how many ids were unrecognized (not in the inventory — i.e.
-  dropped as hallucinated), how many were duplicates, and how many landed
-  in Ungrouped.
+  dropped as hallucinated), how many were duplicates, how many landed in
+  Ungrouped, and (for compact `ids` responses) `id_mapping_failures` — how
+  many numbers in the response's `ids` string/array/number couldn't be
+  mapped back to a hunk (out of range, non-numeric, or a nonsensical
+  range) and were dropped before reconciliation even ran.
 
 The log file is capped at roughly 200KB, truncating the oldest entries on
 write, so it can't grow unbounded across a long Neovim session.
@@ -212,10 +292,30 @@ write, so it can't grow unbounded across a long Neovim session.
 6. Toggle inline view (codediff's key) — folds still filter to the group.
 7. `r` re-classifies; a second `:IntentDiff` on the same diff is instant (cache).
 
-Large diffs take longer than the ~5s above — measured with `claude -p
---model haiku`, a small prompt takes ~4s but a 95KB prompt takes ~106s, so
-expect classification to take 1-3 minutes on big diffs (the sidebar's
-`⟳ classifying… Ns` counter shows how long it's been running). If you hit
-"provider timed out", check `:IntentDiffLog` first, then either raise
-`provider_opts.timeout_ms` or lower `max_full_diff_bytes` (smaller prompts
-classify much faster).
+Large diffs take longer than the ~5s above. Measured with `claude -p --model
+haiku` on a 99-hunk / 28-file diff:
+
+| Prompt                              | Output size | Wall time |
+|--------------------------------------|-------------|-----------|
+| Full diff + verbose (path:n) ids     | 4.0KB       | 1:46      |
+| Manifest only + verbose ids          | 4.0KB       | 1:49      |
+| Manifest + compact ids, range output | 641B        | 1:01      |
+
+**Prompt size is not the bottleneck — output size is.** Sending the full diff
+text instead of just the manifest (file + hunk header + a few summary lines
+per hunk, `max_full_diff_bytes`) barely moved the needle: 95KB of prompt vs.
+24KB cost about the same ~1:45-1:50. What actually dominates decode time is
+how much the model has to *write back* — echoing a verbose `"src/a/b.lua:1"`
+style id per hunk produces several KB of output; the compact integer `ids`
+format with range compression (`"1-4,7,12-15"`) cut that to well under 1KB and
+very roughly halved wall-clock time in this measurement. In other words: if
+classification feels slow, lowering `max_full_diff_bytes` will barely help —
+what you actually want is fewer, more compressible groups (which the
+"prefer 3-8 groups" instruction in the prompt already pushes for) or a
+smaller/faster model.
+
+Expect classification to still take up to a minute or two on genuinely large
+diffs (the sidebar's `⟳ classifying… Ns` counter shows how long it's been
+running). If you hit "provider timed out", check `:IntentDiffLog` first —
+look at `id_mapping_failures` and `parse_outcome` before assuming it's purely
+a speed problem — then raise `provider_opts.timeout_ms` if it's genuine.
