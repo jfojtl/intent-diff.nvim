@@ -64,6 +64,26 @@ describe("sidebar.layout", function()
     assert.is_true(title_lines >= 2, "long title must occupy more than one line")
   end)
 
+  it("flags only the first title line as group_head, for <Tab>/<S-Tab> navigation", function()
+    -- kind == "group" covers every wrapped title line AND the stats line (so
+    -- hover/toggle treat the whole header block as one row), but group-to-
+    -- group navigation must land on exactly one line per group. Only the
+    -- first title line may carry group_head = true.
+    local model = mk_model({ groups = { { title =
+      "Extract the integration catalog into a shared provider registry" } } })
+    local _, meta = sidebar.layout(model)
+    local group_head_lines = 0
+    for i, m in ipairs(meta) do
+      if m.kind == "group" and m.group_i == 1 then
+        if m.group_head then
+          group_head_lines = group_head_lines + 1
+          assert.equals(1, i, "group_head must be the group's first line")
+        end
+      end
+    end
+    assert.equals(1, group_head_lines, "exactly one line per group may be group_head")
+  end)
+
   it("renders a stats line with hunk count, file count and +/- totals", function()
     local model = mk_model()
     model.groups[1].hunks = {
@@ -153,6 +173,21 @@ describe("sidebar.layout", function()
     assert.is_nil(stats:find("-0", 1, true))
   end)
 
+  it("terminates instead of hanging when sidebar_width is non-positive", function()
+    -- A pathological config value (<= 0) must not wedge the editor: wrap_text
+    -- hard-wraps long words by shrinking `cut` one byte at a time until it
+    -- fits `width`, and a non-positive width can never be "fit", so the
+    -- word is never consumed unless width is clamped to at least 1.
+    local config = require("intentdiff.config")
+    local saved = config.options.sidebar_width
+    config.options.sidebar_width = 0
+    local model = mk_model({ groups = { { title =
+      "a title long enough that it must be wrapped at any sidebar width" } } })
+    local lines = sidebar.layout(model)
+    config.options.sidebar_width = saved
+    assert.is_true(#lines > 0, "layout produced no lines")
+  end)
+
   it("hides a collapsed directory's files", function()
     local model = mk_model()
     model.groups[1].collapsed_dirs = { ["src/http"] = true }
@@ -163,10 +198,46 @@ describe("sidebar.layout", function()
     end
   end)
 
-  it("still renders the loading and footer rows", function()
-    local lines, meta = sidebar.layout(mk_model({ state = "loading", elapsed_s = 7 }))
-    assert.truthy(lines[1]:find("classifying"))
+  it("collapses a group: hides its file and dir rows and shows the ▸ marker", function()
+    local model = mk_model({ groups = { [1] = { collapsed = true } } })
+    local lines, meta = sidebar.layout(model)
+    assert.truthy(lines[1]:find("▸ Add retry", 1, true))
+    for _, m in ipairs(meta) do
+      assert.is_false((m.kind == "file" or m.kind == "dir") and m.group_i == 1,
+        "a collapsed group must hide both its file and directory rows")
+    end
+    -- the other group is unaffected
+    local group2_file = false
+    for _, m in ipairs(meta) do
+      if m.kind == "file" and m.group_i == 2 then group2_file = true end
+    end
+    assert.is_true(group2_file, "an unrelated group's files must still render")
+  end)
+
+  it("shows a warning message line when present", function()
+    local lines, meta = sidebar.layout(mk_model({ message = "classification failed: boom" }))
+    assert.truthy(lines[1]:find("classification failed: boom", 1, true))
     assert.equals("info", meta[1].kind)
+  end)
+
+  it("shows the plain loading line when elapsed_s is absent", function()
+    local lines, meta = sidebar.layout({ state = "loading", groups = {} })
+    assert.equals("⟳ classifying…", lines[1])
+    assert.equals("info", meta[1].kind)
+  end)
+
+  it("shows loading state with an elapsed seconds counter when elapsed_s is a number", function()
+    local lines, meta = sidebar.layout({ state = "loading", groups = {}, elapsed_s = 7 })
+    assert.equals("⟳ classifying… 7s", lines[1])
+    assert.equals("info", meta[1].kind)
+  end)
+
+  it("renders the footer with hunk accounting and the provider label", function()
+    local lines, meta = sidebar.layout(mk_model())
+    local footer = lines[#lines]
+    assert.truthy(footer:find("3/3 hunks", 1, true))
+    assert.truthy(footer:find("claude:haiku", 1, true))
+    assert.equals("footer", meta[#lines].kind)
   end)
 end)
 
@@ -184,18 +255,22 @@ describe("sidebar.create", function()
     assert.is_true(vim.api.nvim_win_is_valid(handle.winid))
     vim.api.nvim_set_current_win(handle.winid)
     -- line 1: title, line 2: stats, line 3: "src/http" dir row (compressed
-    -- single-child chain), line 4+: files sorted alphabetically within the dir
-    -- (backoff.lua, file_i = 2, before client.lua, file_i = 1)
-    local file_lnum, file_i
+    -- single-child chain), line 4+: files sorted alphabetically within the
+    -- dir — backoff.lua (file_i = 2) sorts before client.lua (file_i = 1), so
+    -- the first file row selected is group 1 / file_i 2. The line number is
+    -- looked up dynamically (layout structure isn't this test's concern),
+    -- but the expected (group_i, file_i) pair is the literal fixture value
+    -- so a wrong index would actually fail this assertion.
+    local file_lnum
     for i, m in ipairs(handle.meta) do
       if m.kind == "file" then
-        file_lnum, file_i = i, m.file_i
+        file_lnum = i
         break
       end
     end
     vim.api.nvim_win_set_cursor(handle.winid, { file_lnum, 0 })
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "x", false)
-    assert.same({ 1, file_i }, selected)
+    assert.same({ 1, 2 }, selected)
     vim.api.nvim_win_close(handle.winid, true)
   end)
 end)

@@ -618,7 +618,7 @@ function M.open(argline)
         -- jump cursor to next group header line
         local cur = vim.api.nvim_win_get_cursor(entry.sidebar.winid)[1]
         for l = cur + 1, vim.api.nvim_buf_line_count(entry.sidebar.bufnr) do
-          if (entry.sidebar.meta_at(l) or {}).kind == "group" then
+          if (entry.sidebar.meta_at(l) or {}).group_head then
             vim.api.nvim_win_set_cursor(entry.sidebar.winid, { l, 0 })
             break
           end
@@ -630,7 +630,7 @@ function M.open(argline)
       if entry then
         local cur = vim.api.nvim_win_get_cursor(entry.sidebar.winid)[1]
         for l = cur - 1, 1, -1 do
-          if (entry.sidebar.meta_at(l) or {}).kind == "group" then
+          if (entry.sidebar.meta_at(l) or {}).group_head then
             vim.api.nvim_win_set_cursor(entry.sidebar.winid, { l, 0 })
             break
           end

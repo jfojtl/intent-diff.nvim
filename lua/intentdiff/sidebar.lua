@@ -9,6 +9,10 @@ local hl = require("intentdiff.highlight")
 --- a single word that is longer than the width. The sidebar window keeps
 --- `wrap = false` so tree alignment survives; wrapping happens here instead.
 local function wrap_text(text, width)
+  -- A non-positive width would leave `cut` degrading to "" below, so `word`
+  -- is never consumed and the inner while loop spins forever. Clamp to 1: a
+  -- pathological config value shouldn't be able to wedge the editor.
+  width = math.max(width, 1)
   local out, line = {}, ""
   for word in text:gmatch("%S+") do
     local candidate = line == "" and word or (line .. " " .. word)
@@ -95,12 +99,20 @@ function M.layout(model)
   end
 
   for gi, g in ipairs(model.groups or {}) do
+    -- Hover/toggle treat every title line and the stats line as one row
+    -- (kind == "group" on all of them, sharing group_i). But group-to-group
+    -- navigation (<Tab>/<S-Tab>) needs to land on exactly one line per
+    -- group, not re-visit every wrapped title line — so the first title
+    -- line alone also carries group_head = true, in its own table (title
+    -- lines 2+ and the stats line share `group_meta`, so group_head must
+    -- NOT be set on that shared table, or every line would report it).
     local group_meta = { kind = "group", group_i = gi }
+    local group_head_meta = { kind = "group", group_i = gi, group_head = true }
     local marker = g.collapsed and "▸" or "▾"
     local title_lines = wrap_text(g.title, width - 2)
     for i, text in ipairs(title_lines) do
       local prefix = i == 1 and (marker .. " ") or "  "
-      local lnum = add(prefix .. text, group_meta)
+      local lnum = add(prefix .. text, i == 1 and group_head_meta or group_meta)
       span(lnum, #prefix, #prefix + #text, "IntentDiffGroupTitle")
     end
 
@@ -128,11 +140,10 @@ function M.layout(model)
         local status = row.kind == "file" and hl.status_char(row.status) or " "
         local gutter = (" %-1s "):format(status)
         local indent = string.rep("  ", row.depth)
-        local text, icon_hl
+        local text, icon_hl, icon
         if row.kind == "dir" then
           text = (row.collapsed and "▸ " or "▾ ") .. row.name
         else
-          local icon
           icon, icon_hl = file_icon(row.path)
           text = "  " .. (icon ~= "" and (icon .. " ") or "") .. row.name
         end
@@ -154,7 +165,7 @@ function M.layout(model)
           span(rnum, #gutter + #indent, #body, "IntentDiffDirectory")
         elseif icon_hl then
           local icon_start = #gutter + #indent + 2
-          span(rnum, icon_start, icon_start + #text - 2 - #row.name, icon_hl)
+          span(rnum, icon_start, icon_start + #icon, icon_hl)
         end
         local scol = #body + 2
         for _, part in ipairs(row_parts) do

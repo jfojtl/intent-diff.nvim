@@ -295,6 +295,50 @@ describe(":IntentDiff end-to-end", function()
     assert.is_true(require("intentdiff")._session(tab).model.groups[1].collapsed)
   end)
 
+  it("<Tab> jumps straight to the next group's head line, even when the current "
+      .. "group's title wraps across multiple sidebar lines", function()
+    make_two_group_repo()
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = fake_provider({
+        -- Deliberately long enough to wrap past the default 40-col sidebar.
+        { title = "This group title is deliberately long so that it must wrap "
+            .. "across more than one line in the sidebar", hunk_ids = { "a.lua:1" } },
+        { title = "Group two", hunk_ids = { "a.lua:2", "b.lua:1" } },
+      }),
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local session = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model.state == "ready" and #s.model.groups == 2 and s or nil
+    end, 10000)
+    assert.truthy(session, "session never reached ready with 2 groups")
+
+    -- Sanity check the fixture: group 1 must actually occupy more than a
+    -- title line + a stats line, or this test would not exercise the bug
+    -- (wrapped titles used to add extra "kind == group" lines that <Tab>
+    -- mistook for additional groups).
+    local group1_rows = 0
+    for l = 1, vim.api.nvim_buf_line_count(session.sidebar.bufnr) do
+      local m = session.sidebar.meta_at(l)
+      if m and m.kind == "group" and m.group_i == 1 then
+        group1_rows = group1_rows + 1
+      end
+    end
+    assert.is_true(group1_rows >= 3,
+      "fixture title did not wrap; test would not catch the regression")
+
+    focus_row(session, 1)
+    press(session.sidebar.winid, "<Tab>")
+
+    local cur = vim.api.nvim_win_get_cursor(session.sidebar.winid)[1]
+    local m = session.sidebar.meta_at(cur)
+    assert.truthy(m, "cursor landed on a line with no metadata")
+    assert.equals(2, m.group_i, "<Tab> did not land on group 2")
+    assert.is_true(m.group_head, "<Tab> did not land on group 2's head line")
+  end)
+
   it("codediff's layout toggle key re-renders and re-applies the group folds", function()
     make_two_group_repo()
     local session, tab = open_two_groups()
