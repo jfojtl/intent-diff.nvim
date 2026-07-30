@@ -329,6 +329,222 @@ describe(":IntentDiff end-to-end", function()
     assert.is_true(vim.api.nvim_win_is_valid(session.sidebar.winid), "sidebar lost across toggles")
   end)
 
+  -- ------------------------------------------------------------------------
+  -- Whole-file statuses ("??"/"A"/"D") toggled with `t`: view.lua's
+  -- M.toggle_layout used to unconditionally call codediff's own
+  -- cd.view.toggle_layout, whose standalone rerender rebuilds a two-sided
+  -- SessionConfig from session.original/session.modified — one of which is
+  -- always path.empty() for these statuses (show_untracked_file /
+  -- show_added_virtual_file / show_deleted_virtual_file only ever populate
+  -- ONE side). codediff resolves that empty Path to Neovim's shared buffer
+  -- #1, asynchronously for "A"/"D", so the 2nd press left the pane bound to
+  -- buffer #1 with session.layout stuck, and the 3rd press left a permanent
+  -- phantom window. Drive the real sidebar-select → toggle flow and assert
+  -- after EVERY press that none of that happened.
+  -- ------------------------------------------------------------------------
+
+  --- The single window currently showing a whole-file pane's content,
+  --- regardless of which session field codediff parked it on: modified_win
+  --- for "??"/"A" and for anything in inline layout (inline always uses a
+  --- single window aliased to both original_win/modified_win); original_win
+  --- for "D" in side-by-side layout (show_deleted_virtual_file keeps only the
+  --- original pane and leaves modified_win nil).
+  local function whole_file_win(cd_session)
+    local m, o = cd_session.modified_win, cd_session.original_win
+    if m and vim.api.nvim_win_is_valid(m) then
+      return m
+    end
+    if o and vim.api.nvim_win_is_valid(o) then
+      return o
+    end
+  end
+
+  --- Select a whole-file entry from the sidebar via the real <CR> keymap and
+  --- wait until its pane shows real content (not buffer #1) containing
+  --- `expect_text` AND our `t` override has actually landed (M.install_keymaps
+  --- runs asynchronously — see M.show_file). Without waiting on ours_bound
+  --- here, a synchronous next keypress can race codediff's own un-patched `t`
+  --- (which still calls cd.view.toggle_layout directly), reproducing the very
+  --- corruption this test exists to catch as a false failure. Returns the
+  --- content window.
+  local function select_whole_file_and_wait(session, tab, group_i, file_i, path, expect_text)
+    local line = sidebar_line(session.sidebar, "file", group_i, file_i)
+    assert.truthy(line, ("no sidebar row for group %d file %d"):format(group_i, file_i))
+    focus_row(session, line)
+    press(session.sidebar.winid, "<CR>")
+    local view = require("intentdiff.view")
+    local win = helpers.wait_for(function()
+      local cd_session = view.get_session(tab)
+      local w = cd_session and whole_file_win(cd_session)
+      if not w then
+        return nil
+      end
+      local buf = vim.api.nvim_win_get_buf(w)
+      if buf == 1 then
+        return nil
+      end
+      if not vim.api.nvim_buf_get_name(buf):find(path, 1, true) then
+        return nil
+      end
+      local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+      if not text:find(expect_text, 1, true) then
+        return nil
+      end
+      if not ours_bound(buf) then
+        return nil
+      end
+      return w
+    end, 10000)
+    assert.truthy(win, ("whole-file pane never rendered %s"):format(path))
+    return win
+  end
+
+  --- Press codediff's layout-toggle key on a whole-file pane up to `times`
+  --- times, asserting after EVERY press: the pane is not bound to buffer #1
+  --- and still shows `expect_text`, the tab's window count never grows past
+  --- what it was right after selection (no phantom windows), the sidebar
+  --- window+buffer are still valid, and session.layout actually alternated.
+  --- Each press waits for ours_bound on the new buffer before returning —
+  --- same reasoning as select_whole_file_and_wait: the NEXT press must not
+  --- race codediff's own un-patched `t`.
+  local function toggle_whole_file_and_assert(session, tab, path, expect_text, times)
+    local view = require("intentdiff.view")
+    local toggle_key = require("codediff.config").options.keymaps.view.toggle_layout
+    local cd_session = view.get_session(tab)
+    local win = whole_file_win(cd_session)
+    assert.truthy(win, "no whole-file pane before toggling")
+    local baseline_wins = #vim.api.nvim_tabpage_list_wins(tab)
+    local prev_layout = cd_session.layout
+
+    for i = 1, times do
+      press(win, toggle_key)
+      local ok = helpers.wait_for(function()
+        local s = view.get_session(tab)
+        if not s or s.layout == prev_layout then
+          return nil -- hasn't actually flipped (yet)
+        end
+        local w = whole_file_win(s)
+        if not w then
+          return nil
+        end
+        local buf = vim.api.nvim_win_get_buf(w)
+        if buf == 1 then
+          return nil
+        end
+        local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+        if not text:find(expect_text, 1, true) then
+          return nil
+        end
+        if not ours_bound(buf) then
+          return nil
+        end
+        return w
+      end, 10000)
+      assert.truthy(ok, ("press %d: %s never re-rendered with real content after toggling layout"):format(i, path))
+      win = ok
+
+      local s = view.get_session(tab)
+      assert.is_true(s.layout ~= prev_layout,
+        ("press %d: session.layout did not alternate for %s"):format(i, path))
+      assert.is_true(#vim.api.nvim_tabpage_list_wins(tab) <= baseline_wins,
+        ("press %d: tab window count grew (phantom window) for %s"):format(i, path))
+      assert.is_true(vim.api.nvim_win_is_valid(session.sidebar.winid),
+        ("press %d: sidebar window lost for %s"):format(i, path))
+      assert.is_true(vim.api.nvim_buf_is_valid(session.sidebar.bufnr),
+        ("press %d: sidebar buffer lost for %s"):format(i, path))
+
+      prev_layout = s.layout
+    end
+  end
+
+  it("toggling layout on an untracked (??) whole-file pane never corrupts it", function()
+    local repo = helpers.make_repo({ ["tracked.lua"] = "x" })
+    helpers.write_file(repo, "new_file.txt", "UNTRACKED LINE ONE\nUNTRACKED LINE TWO")
+    vim.cmd("cd " .. repo)
+
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = fake_provider({
+        { title = "New file", hunk_ids = { "new_file.txt:1" } },
+      }),
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local session = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model.state == "ready" and s or nil
+    end, 10000)
+    assert.truthy(session, "session never reached ready")
+
+    select_whole_file_and_wait(session, tab, 1, 1, "new_file.txt", "UNTRACKED LINE ONE")
+    toggle_whole_file_and_assert(session, tab, "new_file.txt", "UNTRACKED LINE ONE", 3)
+  end)
+
+  it("toggling layout on an added (A) whole-file pane never corrupts it", function()
+    local repo = helpers.make_repo({ ["base.lua"] = "x" })
+    local git = require("codediff.core.git")
+    local base_hash
+    git.resolve_revision("HEAD", repo, function(_, hash) base_hash = hash end)
+    helpers.wait_for(function() return base_hash end)
+
+    helpers.write_file(repo, "added.txt", "ADDED LINE ONE\nADDED LINE TWO")
+    helpers.git(repo, "add", "-A")
+    helpers.git(repo, "commit", "-q", "-m", "add file")
+    local target_hash
+    git.resolve_revision("HEAD", repo, function(_, hash) target_hash = hash end)
+    helpers.wait_for(function() return target_hash end)
+
+    vim.cmd("cd " .. repo)
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = fake_provider({
+        { title = "Add file", hunk_ids = { "added.txt:1" } },
+      }),
+    })
+    require("intentdiff").open(base_hash .. " " .. target_hash)
+    local tab = vim.api.nvim_get_current_tabpage()
+    local session = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model.state == "ready" and s or nil
+    end, 10000)
+    assert.truthy(session, "session never reached ready")
+
+    select_whole_file_and_wait(session, tab, 1, 1, "added.txt", "ADDED LINE ONE")
+    toggle_whole_file_and_assert(session, tab, "added.txt", "ADDED LINE ONE", 3)
+  end)
+
+  it("toggling layout on a deleted (D) whole-file pane never corrupts it", function()
+    local repo = helpers.make_repo({ ["gone.txt"] = "GONE LINE ONE\nGONE LINE TWO" })
+    local git = require("codediff.core.git")
+    local base_hash
+    git.resolve_revision("HEAD", repo, function(_, hash) base_hash = hash end)
+    helpers.wait_for(function() return base_hash end)
+
+    helpers.git(repo, "rm", "-q", "gone.txt")
+    helpers.git(repo, "commit", "-q", "-m", "remove file")
+    local target_hash
+    git.resolve_revision("HEAD", repo, function(_, hash) target_hash = hash end)
+    helpers.wait_for(function() return target_hash end)
+
+    vim.cmd("cd " .. repo)
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = fake_provider({
+        { title = "Remove file", hunk_ids = { "gone.txt:1" } },
+      }),
+    })
+    require("intentdiff").open(base_hash .. " " .. target_hash)
+    local tab = vim.api.nvim_get_current_tabpage()
+    local session = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model.state == "ready" and s or nil
+    end, 10000)
+    assert.truthy(session, "session never reached ready")
+
+    select_whole_file_and_wait(session, tab, 1, 1, "gone.txt", "GONE LINE ONE")
+    toggle_whole_file_and_assert(session, tab, "gone.txt", "GONE LINE ONE", 3)
+  end)
+
   it("keeps ]c group-scoped after leaving and re-entering the review tab", function()
     make_two_group_repo()
     local session, tab = open_two_groups()

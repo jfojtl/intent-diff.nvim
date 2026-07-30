@@ -18,6 +18,7 @@ function M.load()
   cd.git = try("codediff.core.git")
   cd.path = try("codediff.core.path")
   cd.side_by_side = try("codediff.ui.view.side_by_side")
+  cd.inline_view = try("codediff.ui.view.inline_view")
   M.available = cd.view ~= nil
     and type(cd.view.create) == "function"
     and type(cd.view.update) == "function"
@@ -34,6 +35,8 @@ function M.load()
     and type(cd.side_by_side.show_untracked_file) == "function"
     and type(cd.side_by_side.show_added_virtual_file) == "function"
     and type(cd.side_by_side.show_deleted_virtual_file) == "function"
+    and cd.inline_view ~= nil
+    and type(cd.inline_view.show_single_file) == "function"
   if not M.available then
     vim.notify("intent-diff: codediff API mismatch — grouped view disabled", vim.log.levels.ERROR)
   end
@@ -301,9 +304,14 @@ function M.bootstrap(sess)
   return tab
 end
 
---- Render the whole-file pane for a "??"/"A"/"D" status. Requires an
---- already-registered codediff session for `tabpage` (show_single_file
---- no-ops otherwise) — see M.bootstrap.
+--- Render the whole-file pane for a "??"/"A"/"D" status in side-by-side
+--- layout. Requires an already-registered codediff session for `tabpage`
+--- (show_*_file no-ops otherwise) — see M.bootstrap. These helpers
+--- self-normalize windows from ANY prior window configuration (inline's
+--- single shared window, or side-by-side with only one side populated) by
+--- reading lifecycle.get_windows and closing whichever pane isn't kept, so
+--- no separate normalize step is needed before calling them — unlike
+--- show_whole_file_inline below.
 local function show_whole_file(tabpage, sess, file_entry, abs_path)
   if file_entry.status == "??" then
     cd.side_by_side.show_untracked_file(tabpage, abs_path)
@@ -312,6 +320,68 @@ local function show_whole_file(tabpage, sess, file_entry, abs_path)
       tabpage, sess.git_root, file_entry.path, sess.target_revision or "WORKING")
   elseif file_entry.status == "D" then
     cd.side_by_side.show_deleted_virtual_file(tabpage, sess.git_root, file_entry.path, sess.base_revision)
+  end
+end
+
+--- Point session.modified_win at whichever single-file pane window is
+--- currently valid (closing the other one if both happen to exist).
+---
+--- Mirrors codediff's ui/view/toggle.lua `normalize_inline_layout`, which we
+--- cannot call directly (it's local to that module and bundled together with
+--- the two-sided `rerender_current_file` step that corrupts whole-file
+--- panes — see M.toggle_layout). Needed ONLY before
+--- cd.inline_view.show_single_file: unlike the side_by_side show_*_file
+--- helpers, it unconditionally reads session.modified_win rather than
+--- self-normalizing, and for a "D" pane coming from side-by-side layout
+--- (where only session.original_win is populated — see
+--- side_by_side.show_deleted_virtual_file) that field is nil.
+local function normalize_for_inline(tabpage)
+  local session = cd.lifecycle.get_session(tabpage)
+  if not session then
+    return false
+  end
+  local original_win = session.original_win
+  local modified_win = session.modified_win
+  local keep_win = (modified_win and vim.api.nvim_win_is_valid(modified_win) and modified_win)
+    or (original_win and vim.api.nvim_win_is_valid(original_win) and original_win)
+  if not keep_win then
+    return false
+  end
+  local close_win = nil
+  if original_win and modified_win and original_win ~= modified_win then
+    close_win = keep_win == modified_win and original_win or modified_win
+  end
+  session.original_win = keep_win
+  session.modified_win = keep_win
+  if close_win and vim.api.nvim_win_is_valid(close_win) then
+    vim.api.nvim_set_current_win(keep_win)
+    pcall(vim.api.nvim_win_close, close_win, true)
+  end
+  return true
+end
+
+--- Render the whole-file pane for a "??"/"A"/"D" status in inline layout, via
+--- codediff's single-file inline entry point (ui/view/inline_view.lua
+--- show_single_file) rather than side_by_side's show_*_file helpers.
+local function show_whole_file_inline(tabpage, sess, file_entry, abs_path)
+  normalize_for_inline(tabpage)
+  local status = file_entry.status
+  if status == "??" then
+    cd.inline_view.show_single_file(tabpage, abs_path, { side = "modified" })
+  elseif status == "A" then
+    cd.inline_view.show_single_file(tabpage, file_entry.path, {
+      revision = sess.target_revision or "WORKING",
+      git_root = sess.git_root,
+      rel_path = file_entry.path,
+      side = "modified",
+    })
+  elseif status == "D" then
+    cd.inline_view.show_single_file(tabpage, file_entry.path, {
+      revision = sess.base_revision,
+      git_root = sess.git_root,
+      rel_path = file_entry.path,
+      side = "original",
+    })
   end
 end
 
@@ -380,6 +450,36 @@ local function wait_for_virtual_file(tabpage, status, on_ready)
   end, 50)
 end
 
+--- Render `file_entry`'s whole-file ("??"/"A"/"D") pane in `target_layout`
+--- ("side-by-side" or "inline"), then call `on_ready` once content has
+--- actually loaded — synchronously for untracked files, after codediff's
+--- async virtual-file fetch completes for "A"/"D" (wait_for_virtual_file
+--- above). Shared by M.show_file (always side-by-side, matching the
+--- pre-existing behavior of a fresh sidebar selection) and M.toggle_layout
+--- (whichever layout the user just toggled to) so the status dispatch and
+--- the async-ready wait live in exactly one place.
+local function show_whole_file_in_layout(tabpage, sess, file_entry, abs_path, target_layout, on_ready)
+  if target_layout == "inline" then
+    show_whole_file_inline(tabpage, sess, file_entry, abs_path)
+  else
+    show_whole_file(tabpage, sess, file_entry, abs_path)
+  end
+  local function ready()
+    M.install_keymaps(tabpage)
+    if on_ready then
+      on_ready()
+    end
+  end
+  if file_entry.status == "??" then
+    -- Real file, loaded synchronously by show_untracked_file /
+    -- show_single_file.
+    vim.schedule(ready)
+  else
+    -- "A"/"D": virtual file, content arrives asynchronously.
+    wait_for_virtual_file(tabpage, file_entry.status, ready)
+  end
+end
+
 --- Render file_entry's diff and fold to its hunks.
 --- sess = { tabpage, git_root, base_revision, target_revision, view_created }
 function M.show_file(sess, file_entry, opts)
@@ -393,20 +493,7 @@ function M.show_file(sess, file_entry, opts)
 
   -- Whole-file statuses: the entire file is the change — no folds needed.
   if file_entry.status == "??" or file_entry.status == "A" or file_entry.status == "D" then
-    show_whole_file(tabpage, sess, file_entry, abs_path)
-    local function ready()
-      M.install_keymaps(tabpage)
-      if opts.on_ready then
-        opts.on_ready()
-      end
-    end
-    if file_entry.status == "??" then
-      -- Real file, loaded synchronously by show_untracked_file.
-      vim.schedule(ready)
-    else
-      -- "A"/"D": virtual file, content arrives asynchronously.
-      wait_for_virtual_file(tabpage, file_entry.status, ready)
-    end
+    show_whole_file_in_layout(tabpage, sess, file_entry, abs_path, "side-by-side", opts.on_ready)
     return
   end
 
@@ -471,17 +558,39 @@ end
 --- codediff's own toggle does the window normalization, the compact-mode
 --- save/restore AND (thanks to mode="standalone") the re-render of the current
 --- file; all it cannot do is re-apply our group folds, which is what the
---- when_diff_ready hook below is for. Whole-file statuses (??/A/D) are
---- re-rendered through show_file instead: they are single-pane views produced
---- by codediff's show_*_file helpers, not by a diff of two revisions, so
---- codediff's re-render from session paths would turn them back into a diff.
+--- when_diff_ready hook below is for.
+---
+--- Whole-file statuses (??/A/D) bypass cd.view.toggle_layout entirely: its
+--- standalone rerender path (ui/view/toggle.lua rerender_current_file)
+--- rebuilds a two-sided SessionConfig from session.original/session.modified
+--- — but show_untracked_file/show_added_virtual_file/show_deleted_virtual_file
+--- only ever populate ONE side, leaving the other path.empty(). codediff's
+--- rerender resolves that empty Path via bufnr_exact("") — which matches
+--- Neovim's shared buffer #1 — and does so ASYNCHRONOUSLY for "A"/"D"
+--- (git.get_file_content), so it binds the pane's window to buffer #1 instead
+--- of whatever show_file's earlier fix-up rendered. Flip session.layout and
+--- re-render directly through show_whole_file_in_layout instead, which calls
+--- the same single-file codediff entry points show_file uses (just picking
+--- the one matching the NEW layout) — never codediff's two-sided rerender.
 --- @return boolean whether a toggle was performed
 function M.toggle_layout(tabpage)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local shown = M._last_shown[tabpage]
-  if not cd.lifecycle.get_session(tabpage) then
+  local session = cd.lifecycle.get_session(tabpage)
+  if not session then
     return false
   end
+
+  if shown then
+    local status = shown.file_entry.status
+    if status == "??" or status == "A" or status == "D" then
+      local target_layout = session.layout == "inline" and "side-by-side" or "inline"
+      local abs_path = shown.sess.git_root .. "/" .. shown.file_entry.path
+      show_whole_file_in_layout(tabpage, shown.sess, shown.file_entry, abs_path, target_layout)
+      return true
+    end
+  end
+
   if not cd.view.toggle_layout(tabpage) then
     return false
   end
@@ -489,11 +598,6 @@ function M.toggle_layout(tabpage)
     return true
   end
   local file_entry = shown.file_entry
-  local status = file_entry.status
-  if status == "??" or status == "A" or status == "D" then
-    M.show_file(shown.sess, file_entry)
-    return true
-  end
   local abs_path = shown.sess.git_root .. "/" .. file_entry.path
   when_diff_ready(tabpage, abs_path, function()
     M.apply_group_folds(tabpage, file_entry.hunks)
