@@ -31,8 +31,12 @@ function M.layout(model)
   if model.state == "ready" then
     local stale = (model.stale_count or 0) > 0
         and (" · stale — %d unclassified"):format(model.stale_count) or ""
-    add(("%d/%d hunks · %s%s"):format(model.grouped_hunks, model.total_hunks,
-      model.provider_label or "?", stale), { kind = "footer" })
+    -- No provider label ⇒ no provider produced this grouping (flat fallback
+    -- after a provider failure). Omit the field entirely; a literal "?" read
+    -- like a broken provider name.
+    local label = model.provider_label and (" · " .. model.provider_label) or ""
+    add(("%d/%d hunks%s%s"):format(model.grouped_hunks, model.total_hunks, label, stale),
+      { kind = "footer" })
   end
   return lines, meta
 end

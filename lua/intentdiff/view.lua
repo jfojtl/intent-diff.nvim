@@ -53,6 +53,15 @@ local visible_by_win = {}
 --- apply_group_folds, cleared in M.close_tab.
 M._active_folds = {}
 
+--- Last { sess, file_entry } rendered per tabpage. Two uses:
+---   * M.toggle_layout needs to know WHICH file to re-render after codediff
+---     has flipped the layout (codediff's own rerender path is explorer-only
+---     and we deliberately register no explorer — see M.toggle_layout);
+---   * the TabEnter re-assert below uses it as the "this is an intent-diff
+---     tab" marker, so it also fires for whole-file statuses that never
+---     applied group folds.
+M._last_shown = {}
+
 local folds_augroup
 
 --- codediff's own session TabEnter autocmd (codediff/ui/lifecycle/session.lua)
@@ -68,6 +77,24 @@ local folds_augroup
 --- vim.schedule callback always lands on the first tick after TabEnter fires,
 --- so scheduling ours from within a first-tick callback guarantees ours runs
 --- on a later tick, deterministically after.
+---
+--- The same TabEnter tick is also where our buffer-local keymaps have to be
+--- reinstalled: codediff's TabLeave handler runs
+--- `lifecycle.clear_tab_keymaps` (ui/lifecycle/accessors.lua), which deletes
+--- EVERY buffer-local mapping whose lhs appears in codediff's
+--- `keymaps.view` table from the pane buffers — including the group-scoped
+--- ]c/[c that intentdiff.navigation installed and our `t` override — and its
+--- TabEnter handler then reinstalls codediff's own versions. So re-entering
+--- the tab silently downgraded ]c/[c to codediff's all-hunks navigation and
+--- `t` to codediff's explorer-only toggle. Re-assert both here.
+local function reassert(tab)
+  if M._active_folds[tab] then
+    M.apply_group_folds(tab, M._active_folds[tab])
+  end
+  M.install_keymaps(tab)
+  require("intentdiff.navigation").reattach_keymaps(tab)
+end
+
 local function ensure_folds_augroup()
   if folds_augroup then
     return
@@ -77,13 +104,14 @@ local function ensure_folds_augroup()
     group = folds_augroup,
     callback = function()
       local tab = vim.api.nvim_get_current_tabpage()
-      if not M._active_folds[tab] then
-        return -- inert for tabs without active group folds
+      if not (M._active_folds[tab] or M._last_shown[tab]) then
+        return -- inert for tabs intent-diff never rendered into
       end
       vim.schedule(function()
         vim.schedule(function()
-          if vim.api.nvim_get_current_tabpage() == tab and M._active_folds[tab] then
-            M.apply_group_folds(tab, M._active_folds[tab])
+          if vim.api.nvim_get_current_tabpage() == tab
+              and (M._active_folds[tab] or M._last_shown[tab]) then
+            reassert(tab)
           end
         end)
       end)
@@ -108,6 +136,23 @@ local function context_lines()
   return cd_config and cd_config.options.diff.compact_context_lines or 3
 end
 
+--- The panes group folds apply to. Mirrors codediff's own
+--- ui/view/compact.lua `pane_entries`: in inline layout there is a single
+--- window showing the MODIFIED buffer (deleted lines are virtual lines, so
+--- real buffer line numbers are modified-side line numbers), and
+--- session.original_win == session.modified_win. Folding it twice — once with
+--- original-side ranges, once with modified-side — would leave whichever ran
+--- last in `visible_by_win`; be explicit instead.
+local function pane_entries(session)
+  if session.layout == "inline" or session.original_win == session.modified_win then
+    return { { win = session.modified_win, buf = session.modified_bufnr, side = "modified" } }
+  end
+  return {
+    { win = session.original_win, buf = session.original_bufnr, side = "original" },
+    { win = session.modified_win, buf = session.modified_bufnr, side = "modified" },
+  }
+end
+
 --- Fold everything except `hunks`' ranges (+context) in both panes.
 function M.apply_group_folds(tabpage, hunks)
   ensure_folds_augroup()
@@ -120,11 +165,14 @@ function M.apply_group_folds(tabpage, hunks)
     changes[i] = { original = h.original, modified = h.modified }
   end
   local ctx = context_lines()
-  local panes = {
-    { win = session.original_win, buf = session.original_bufnr, side = "original" },
-    { win = session.modified_win, buf = session.modified_bufnr, side = "modified" },
-  }
-  for _, pane in ipairs(panes) do
+  -- Layout toggles close panes; drop their stale visible-line sets so
+  -- foldexpr never answers for a recycled window id.
+  for win in pairs(visible_by_win) do
+    if not vim.api.nvim_win_is_valid(win) then
+      visible_by_win[win] = nil
+    end
+  end
+  for _, pane in ipairs(pane_entries(session)) do
     if pane.win and vim.api.nvim_win_is_valid(pane.win)
         and pane.buf and vim.api.nvim_buf_is_valid(pane.buf) then
       local line_count = vim.api.nvim_buf_line_count(pane.buf)
@@ -165,10 +213,30 @@ function M.open_tab()
   return vim.api.nvim_get_current_tabpage()
 end
 
+--- Forget every piece of per-tab state we keep for `tabpage`. Called from
+--- M.close_tab and from init.lua's TabClosed handler (a tab closed behind our
+--- back, e.g. `:tabclose` in the review tab).
+function M.cleanup_tab_state(tabpage)
+  M._active_folds[tabpage] = nil
+  M._last_shown[tabpage] = nil
+  for win in pairs(visible_by_win) do
+    if not vim.api.nvim_win_is_valid(win) then
+      visible_by_win[win] = nil
+    end
+  end
+end
+
 function M.close_tab(sess)
-  M._active_folds[sess.tabpage] = nil
+  M.cleanup_tab_state(sess.tabpage)
   for _, tab in ipairs(vim.api.nvim_list_tabpages()) do
     if tab == sess.tabpage then
+      -- `tabclose` on the last tab is an error ("cannot close last tab
+      -- page") — the session tab would stay open with a half-torn-down
+      -- session. Open a scratch tab to land on first, exactly like
+      -- codediff's own ui/lifecycle/cleanup.lua close() does.
+      if #vim.api.nvim_list_tabpages() == 1 then
+        vim.cmd("tabnew")
+      end
       vim.api.nvim_set_current_tabpage(tab)
       vim.cmd("tabclose")
       return
@@ -176,26 +244,66 @@ function M.close_tab(sess)
   end
 end
 
+--- Create the codediff session for `sess` and adopt the tab codediff opened.
+---
 --- codediff.ui.view.create() always opens its own tab (`tabnew`) rather than
---- rendering into the current one, so any placeholder tab we pre-opened (e.g.
---- via M.open_tab()) is left behind as an empty stray. Run `fn` (expected to
---- call cd.view.create and land on the tab it created), then fold the
---- placeholder away and report the tab codediff actually used.
-local function create_reconciling_tab(placeholder_tab, fn)
-  fn()
-  local actual_tab = vim.api.nvim_get_current_tabpage()
-  if placeholder_tab and placeholder_tab ~= actual_tab
-      and vim.api.nvim_tabpage_is_valid(placeholder_tab) then
-    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(placeholder_tab)) do
+--- rendering into the current one. Bootstrapping the session FIRST — with the
+--- empty-Path explorer placeholder config codediff's own :CodeDiff explorer
+--- entry point uses (commands.lua) — means the real review tab exists before
+--- anything else is put in it, so the sidebar can be created INSIDE it and
+--- every later file selection is a plain cd.view.update() into an existing
+--- session. The alternative (create the view lazily on the first file
+--- selection) had to close the pre-opened placeholder tab, which destroyed
+--- the sidebar living in it.
+---
+--- If `sess.tabpage` is already set (a placeholder from M.open_tab), its
+--- windows are closed once codediff's tab is up.
+--- @return integer|nil tabpage the codediff session lives in
+function M.bootstrap(sess)
+  local placeholder = sess.tabpage
+  cd.view.create({
+    mode = "explorer", -- empty Paths ⇒ codediff's explorer placeholder branch
+    git_root = sess.git_root,
+    original = cd.path.empty(),
+    modified = cd.path.empty(),
+  }, "", nil)
+  local tab = vim.api.nvim_get_current_tabpage()
+  local session = cd.lifecycle.get_session(tab)
+  if not session then
+    return nil -- codediff failed to register a session; caller degrades
+  end
+  -- The session had to be CREATED as mode="explorer" (that is the branch that
+  -- accepts empty Paths and builds placeholder panes), but from here on it
+  -- behaves like a standalone session that keeps being pointed at new files —
+  -- there is no codediff explorer in this tab, ours is a different panel that
+  -- codediff knows nothing about. Saying so matters for exactly one codediff
+  -- code path: ui/view/toggle.lua's re-render step dispatches on session.mode,
+  -- and its "explorer" branch requires a registered explorer object
+  -- (lifecycle.get_explorer) that we deliberately do not fake — a stub would
+  -- also have to satisfy ]f/[f, <leader>b/<leader>e and the staging actions,
+  -- all of which reach into explorer.tree/split. With mode="explorer" and no
+  -- explorer, codediff's `t` normalized the windows and then silently failed
+  -- to re-render: the pane showed the plain file and toggling back lost the
+  -- other pane entirely. As "standalone" it re-renders from the session's own
+  -- path/revision fields, which is exactly the current file. Everything else
+  -- keyed off mode outside ui/explorer/ is the `is_explorer_mode` flag for
+  -- explorer-only keymaps (`-` staging) and keymap_help's listing — both
+  -- correctly OFF for us.
+  session.mode = "standalone"
+  sess.tabpage = tab
+  sess.view_created = true
+  if placeholder and placeholder ~= tab and vim.api.nvim_tabpage_is_valid(placeholder) then
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(placeholder)) do
       pcall(vim.api.nvim_win_close, win, true)
     end
   end
-  return actual_tab
+  ensure_folds_augroup()
+  return tab
 end
 
 --- Render the whole-file pane for a "??"/"A"/"D" status. Requires an
 --- already-registered codediff session for `tabpage` (show_single_file
---- no-ops otherwise) — see the placeholder bootstrap in M.show_file.
+--- no-ops otherwise) — see M.bootstrap.
 local function show_whole_file(tabpage, sess, file_entry, abs_path)
   if file_entry.status == "??" then
     cd.side_by_side.show_untracked_file(tabpage, abs_path)
@@ -276,70 +384,122 @@ end
 --- sess = { tabpage, git_root, base_revision, target_revision, view_created }
 function M.show_file(sess, file_entry, opts)
   opts = opts or {}
+  if not sess.view_created and not M.bootstrap(sess) then
+    return
+  end
   local tabpage = sess.tabpage
   local abs_path = sess.git_root .. "/" .. file_entry.path
+  M._last_shown[tabpage] = { sess = sess, file_entry = file_entry }
 
   -- Whole-file statuses: the entire file is the change — no folds needed.
   if file_entry.status == "??" or file_entry.status == "A" or file_entry.status == "D" then
-    if not sess.view_created then
-      sess.view_created = true
-      -- codediff's show_*_file helpers require an existing session (they
-      -- no-op otherwise); mirror codediff's own explorer bootstrap by
-      -- creating an empty-path placeholder session first (synchronous),
-      -- then converting it to the single-pane view.
-      sess.tabpage = create_reconciling_tab(tabpage, function()
-        cd.view.create({
-          mode = "explorer",
-          git_root = sess.git_root,
-          original = cd.path.empty(),
-          modified = cd.path.empty(),
-        }, nil, nil)
-        show_whole_file(vim.api.nvim_get_current_tabpage(), sess, file_entry, abs_path)
-      end)
-    else
-      show_whole_file(sess.tabpage, sess, file_entry, abs_path)
+    show_whole_file(tabpage, sess, file_entry, abs_path)
+    local function ready()
+      M.install_keymaps(tabpage)
+      if opts.on_ready then
+        opts.on_ready()
+      end
     end
     if file_entry.status == "??" then
       -- Real file, loaded synchronously by show_untracked_file.
-      if opts.on_ready then vim.schedule(opts.on_ready) end
+      vim.schedule(ready)
     else
       -- "A"/"D": virtual file, content arrives asynchronously.
-      wait_for_virtual_file(sess.tabpage, file_entry.status, opts.on_ready)
+      wait_for_virtual_file(tabpage, file_entry.status, ready)
     end
     return
   end
 
   ---@type table SessionConfig (codediff)
   local session_config = {
-    mode = "explorer",
+    mode = "standalone", -- see M.bootstrap on why our sessions are standalone
     git_root = sess.git_root,
     original = cd.path.make_ref(file_entry.old_path or file_entry.path, sess.git_root),
     modified = cd.path.make_ref(file_entry.path, sess.git_root),
     original_revision = sess.base_revision,
     modified_revision = sess.target_revision or "WORKING",
   }
-  if not sess.view_created then
-    sess.view_created = true
-    sess.tabpage = create_reconciling_tab(tabpage, function()
-      cd.view.create(session_config, nil, nil)
-    end)
-  else
-    cd.view.update(sess.tabpage, session_config, false)
-  end
-  when_diff_ready(sess.tabpage, abs_path, function()
-    M.apply_group_folds(sess.tabpage, file_entry.hunks)
+  cd.view.update(tabpage, session_config, false)
+  when_diff_ready(tabpage, abs_path, function()
+    M.apply_group_folds(tabpage, file_entry.hunks)
+    M.install_keymaps(tabpage)
     if opts.on_ready then
       opts.on_ready()
     end
   end)
 end
 
---- Toggle inline/side-by-side, then re-apply the group filter.
-function M.toggle_layout(sess, current_hunks)
-  cd.view.toggle_layout(sess.tabpage)
-  vim.defer_fn(function()
-    M.apply_group_folds(sess.tabpage, current_hunks or {})
-  end, 100)
+--- Install our buffer-local overrides on the diff panes of `tabpage`.
+---
+--- Currently just codediff's layout-toggle key (`t` by default). codediff
+--- binds it to codediff.ui.view.toggle_layout, which — now that our sessions
+--- report mode="standalone" (see M.bootstrap) — re-renders correctly on its
+--- own but knows nothing about our group folds: the pane it re-creates when
+--- toggling back to side-by-side is a fresh window with no foldexpr. Point the
+--- key at M.toggle_layout, which does the same toggle and then re-applies the
+--- filter.
+---
+--- Re-run after every render: codediff's setup_all_keymaps reinstalls its own
+--- version at the end of each create/update, and its TabLeave/TabEnter pair
+--- deletes and reinstalls them too (see `reassert`). If codediff's version
+--- ever wins that race, pressing `t` still yields a coherent diff (that is
+--- what mode="standalone" buys us) — just with the group filter dropped until
+--- the next selection or TabEnter re-assert.
+function M.install_keymaps(tabpage)
+  local session = cd.lifecycle.get_session(tabpage)
+  if not session then
+    return
+  end
+  local cd_config = try("codediff.config")
+  local keys = cd_config and cd_config.options and cd_config.options.keymaps
+  local key = keys and keys.view and keys.view.toggle_layout
+  if not key then
+    return -- user disabled codediff's toggle key; don't invent one
+  end
+  for _, buf in ipairs({ session.original_bufnr, session.modified_bufnr }) do
+    if buf and vim.api.nvim_buf_is_valid(buf) then
+      pcall(vim.keymap.set, "n", key, function()
+        M.toggle_layout(tabpage)
+      end, { buffer = buf, nowait = true, desc = "intent-diff: toggle layout (keeps group folds)" })
+    end
+  end
+end
+
+--- Toggle inline ↔ side-by-side for an intent-diff tab, then re-apply the
+--- group filter to whatever panes the new layout ended up with.
+---
+--- codediff's own toggle does the window normalization, the compact-mode
+--- save/restore AND (thanks to mode="standalone") the re-render of the current
+--- file; all it cannot do is re-apply our group folds, which is what the
+--- when_diff_ready hook below is for. Whole-file statuses (??/A/D) are
+--- re-rendered through show_file instead: they are single-pane views produced
+--- by codediff's show_*_file helpers, not by a diff of two revisions, so
+--- codediff's re-render from session paths would turn them back into a diff.
+--- @return boolean whether a toggle was performed
+function M.toggle_layout(tabpage)
+  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+  local shown = M._last_shown[tabpage]
+  if not cd.lifecycle.get_session(tabpage) then
+    return false
+  end
+  if not cd.view.toggle_layout(tabpage) then
+    return false
+  end
+  if not shown then
+    return true
+  end
+  local file_entry = shown.file_entry
+  local status = file_entry.status
+  if status == "??" or status == "A" or status == "D" then
+    M.show_file(shown.sess, file_entry)
+    return true
+  end
+  local abs_path = shown.sess.git_root .. "/" .. file_entry.path
+  when_diff_ready(tabpage, abs_path, function()
+    M.apply_group_folds(tabpage, file_entry.hunks)
+    M.install_keymaps(tabpage)
+  end)
+  return true
 end
 
 --- Windows of the current diff panes (for keymap installation).

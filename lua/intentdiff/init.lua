@@ -2,16 +2,14 @@ local M = {}
 
 --- Sessions are keyed by an internal token, NOT by tabpage.
 ---
---- view.show_file() mutates its `sess.tabpage` field in place the first time
---- it materializes a codediff view for a session: codediff.ui.view.create()
---- always opens its own tab (`tabnew`) rather than rendering into the current
---- one, so show_file writes the tab codediff actually created back into
---- sess.tabpage. If we keyed `sessions` by tabpage directly, that mutation
---- would silently orphan the entry under its old (now-wrong) key. Keying by a
---- stable token — and looking up "the session for tabpage X" by scanning for
---- entry.sess.tabpage == X — means lookups keep working no matter how many
---- times sess.tabpage gets rewritten underneath us.
-local sessions = {} -- [token] = { sess, model, sidebar, inventory }
+--- codediff.ui.view.create() always opens its own tab (`tabnew`) rather than
+--- rendering into the current one, so `sess.tabpage` is whatever tab codediff
+--- decided to use — written by view.bootstrap(). If we keyed `sessions` by
+--- tabpage directly, any future change to when/how that tab is (re)acquired
+--- would silently orphan the entry under its old key. Keying by a stable
+--- token — and looking up "the session for tabpage X" by scanning for
+--- entry.sess.tabpage == X — means lookups keep working regardless.
+local sessions = {} -- [token] = { sess, model, sidebar, inventory, scope_key }
 local next_token = 0
 
 function M.setup(opts)
@@ -41,6 +39,15 @@ local function resolve_provider()
 end
 
 --- Flat single-group model used while loading and on provider failure.
+---
+--- grouped_hunks == total_hunks, NOT 0: the footer's "N/M hunks" is a
+--- data-loss check ("is every hunk in the inventory reachable from the
+--- sidebar?"), and the single "All changes" group holds all of them. The
+--- provider-failure path renders with state="ready", so hardcoding 0 made the
+--- footer read "0/3 hunks · ?" — as if the failure had dropped the diff,
+--- while in fact nothing was lost. provider_label is left nil (the sidebar
+--- footer omits the label rather than printing "?") because no provider
+--- produced this grouping.
 local function flat_model(inventory, state, message)
   local classify = require("intentdiff.classify")
   local groups = {}
@@ -55,7 +62,7 @@ local function flat_model(inventory, state, message)
     state = state,
     groups = groups,
     total_hunks = #inventory.hunks,
-    grouped_hunks = 0,
+    grouped_hunks = #inventory.hunks,
     message = message,
   }
 end
@@ -127,6 +134,24 @@ end
 --- back (loading → grouped/flat/error). Guards against the session having
 --- been closed, or re-dispatched with a fresh inventory, while the (async)
 --- classify.run() call was in flight.
+--- Remember `inventory.diff_hash` as the last classified diff for this
+--- session's scope, so the NEXT `:IntentDiff` on the same scope can re-match a
+--- slightly-changed diff against it (classify.run's `previous_hash` branch)
+--- instead of paying for a full reclassification.
+---
+--- Only for classifications that actually left a cache entry behind under this
+--- diff hash: the rematch path (info.stale_count) and the too-large skip
+--- (info.skipped) do not save one, so pointing the index at their hash would
+--- break the chain — the next run would find no entry to re-match against and
+--- lose the grouping entirely. Leaving the index on the older hash keeps
+--- re-matching from the last real classification.
+local function persist_last_hash(entry, info)
+  if info and (info.stale_count or info.skipped) then
+    return
+  end
+  require("intentdiff.cache").set_last_hash(entry.scope_key, entry.inventory.diff_hash)
+end
+
 local function classify_and_render(token, opts)
   local classify = require("intentdiff.classify")
   local entry = sessions[token]
@@ -137,9 +162,14 @@ local function classify_and_render(token, opts)
   local provider, label = resolve_provider()
   entry.model = flat_model(inventory, "loading")
   entry.sidebar.update(entry.model)
+  local previous_hash = require("intentdiff.cache").get_last_hash(entry.scope_key)
   classify.run(inventory, {
     provider = provider,
     force = opts and opts.force,
+    -- nil when this is the first classification for the scope, or when the
+    -- diff is byte-identical to the last one (the plain cache hit handles
+    -- that case).
+    previous_hash = previous_hash ~= inventory.diff_hash and previous_hash or nil,
     -- Scope run-supersession to THIS session: without a per-session key,
     -- classify.run's single module-global "latest run wins" counter meant a
     -- second concurrent :IntentDiff (or a reclassify in another tab) could
@@ -155,6 +185,7 @@ local function classify_and_render(token, opts)
         "classification failed: " .. tostring(err) .. " — flat list; r to retry")
     else
       current.model = grouped_model(current.inventory, groups, info, label)
+      persist_last_hash(current, info)
     end
     current.sidebar.update(current.model)
     -- Resync any attached navigation ctx to the new model — otherwise ]c/[c
@@ -203,13 +234,24 @@ local function select_file(token, group_i, file_i, opts)
   })
 end
 
-close_entry = function(token)
+--- Drop a session's bookkeeping WITHOUT touching windows/tabs. Shared by the
+--- explicit close path and the TabClosed path (where the tab is already gone).
+local function forget_entry(token)
   local entry = sessions[token]
+  if not entry then
+    return nil
+  end
+  sessions[token] = nil
+  require("intentdiff.classify").cancel(token) -- kill any in-flight provider
+  require("intentdiff.navigation").detach(entry.sess.tabpage)
+  return entry
+end
+
+close_entry = function(token)
+  local entry = forget_entry(token)
   if not entry then
     return
   end
-  sessions[token] = nil
-  require("intentdiff.navigation").detach(entry.sess.tabpage)
   require("intentdiff.view").close_tab(entry.sess)
 end
 
@@ -219,6 +261,32 @@ function M.close(tabpage)
       return close_entry(token)
     end
   end
+end
+
+--- Sessions whose tab was closed behind our back (`:tabclose`, `:q` of the
+--- last window in the tab, codediff's own `q` keymap) used to linger in
+--- `sessions` forever: the entry kept the (dead) model, navigation kept its
+--- per-tab ctx, and view kept _active_folds/_last_shown for the tab, so a
+--- recycled tab id could inherit stale fold state. TabClosed fires after the
+--- tab is gone and only reports its NUMBER, so match by validity instead.
+local tab_augroup
+local function ensure_tab_augroup()
+  if tab_augroup then
+    return
+  end
+  tab_augroup = vim.api.nvim_create_augroup("IntentDiffTabs", { clear = true })
+  vim.api.nvim_create_autocmd("TabClosed", {
+    group = tab_augroup,
+    callback = function()
+      for token, entry in pairs(sessions) do
+        local tabpage = entry.sess.tabpage
+        if not vim.api.nvim_tabpage_is_valid(tabpage) then
+          forget_entry(token)
+          require("intentdiff.view").cleanup_tab_state(tabpage)
+        end
+      end
+    end,
+  })
 end
 
 function M.open(argline)
@@ -232,19 +300,30 @@ function M.open(argline)
     return vim.notify("intent-diff: not inside a git repository", vim.log.levels.ERROR)
   end
 
-  -- Open the tab and sidebar synchronously, before any of the async work
-  -- below (git diff collection, revision resolution, classification). The
-  -- rest of this function is entirely async (vim.system, provider calls),
-  -- so deferring tab creation until the first async step completed would
-  -- mean nvim_get_current_tabpage() called right after M.open() returns
-  -- (which callers — including tests — legitimately do) would observe the
-  -- PREVIOUS tab, not this session's. Opening eagerly and rendering the
-  -- sidebar with a loading state keeps that call synchronous while the
-  -- actual diff data streams in behind it.
-  local tabpage = view.open_tab()
-  local sess = { tabpage = tabpage, git_root = git_root }
+  -- Bootstrap the codediff session and the sidebar synchronously, before any
+  -- of the async work below (git diff collection, revision resolution,
+  -- classification). Two reasons:
+  --
+  --  * the rest of this function is entirely async (vim.system, provider
+  --    calls), so deferring tab creation until the first async step completed
+  --    would mean nvim_get_current_tabpage() called right after M.open()
+  --    returns (which callers — including tests — legitimately do) would
+  --    observe the PREVIOUS tab, not this session's;
+  --  * the codediff session must exist BEFORE the sidebar, because
+  --    codediff.ui.view.create() opens its own tab. Creating the sidebar
+  --    first (in a placeholder tab) meant the first file selection had to
+  --    close that tab — wiping the sidebar's window and (bufhidden=wipe)
+  --    buffer, after which handle.update() silently no-op'd and no further
+  --    file or group could be selected. Now the sidebar is a plain
+  --    `topleft vsplit` INSIDE codediff's tab and survives every selection.
+  local sess = { git_root = git_root }
+  if not view.bootstrap(sess) then
+    return vim.notify("intent-diff: codediff failed to open a diff view", vim.log.levels.ERROR)
+  end
+  local tabpage = sess.tabpage
   next_token = next_token + 1
   local token = next_token
+  ensure_tab_augroup()
 
   local sidebar = require("intentdiff.sidebar").create({
     on_select = function(gi, fi) select_file(token, gi, fi) end,
@@ -302,10 +381,18 @@ function M.open(argline)
     end,
   })
 
-  sessions[token] = { sess = sess, sidebar = sidebar, inventory = nil }
+  sessions[token] = {
+    sess = sess,
+    sidebar = sidebar,
+    inventory = nil,
+    -- Scope for the cache's last-hash index: same repo + same revision args ⇒
+    -- same review scope, so `:IntentDiff` and `:IntentDiff main...` keep
+    -- independent re-match chains.
+    scope_key = git_root .. "|" .. vim.trim(argline or ""),
+  }
   sessions[token].model = flat_model({ hunks = {} }, "loading")
   sidebar.update(sessions[token].model)
-  vim.cmd("wincmd l") -- focus the (future) diff area right of the sidebar
+  vim.cmd("wincmd l") -- focus codediff's panes, right of the sidebar
 
   resolve_args(argline, git_root, token, function(collect_opts, base_rev, target_rev)
     require("intentdiff.hunks").collect(collect_opts, function(inventory, err)

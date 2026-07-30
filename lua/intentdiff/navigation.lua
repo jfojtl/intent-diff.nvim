@@ -81,14 +81,36 @@ function M.prev_hunk(tabpage)
   move(tabpage or vim.api.nvim_get_current_tabpage(), -1)
 end
 
+local function install_keymaps(tabpage)
+  for _, win in ipairs(require("intentdiff.view").diff_wins(tabpage)) do
+    local buf = vim.api.nvim_win_get_buf(win)
+    vim.keymap.set("n", "]c", function() M.next_hunk(tabpage) end,
+      { buffer = buf, nowait = true, desc = "intent-diff: next hunk in group" })
+    vim.keymap.set("n", "[c", function() M.prev_hunk(tabpage) end,
+      { buffer = buf, nowait = true, desc = "intent-diff: previous hunk in group" })
+  end
+end
+
 --- Install per-tabpage state and buffer-local ]c/[c on the diff pane buffers.
 function M.attach(tabpage, ctx)
   state[tabpage] = ctx
-  for _, win in ipairs(require("intentdiff.view").diff_wins(tabpage)) do
-    local buf = vim.api.nvim_win_get_buf(win)
-    vim.keymap.set("n", "]c", function() M.next_hunk(tabpage) end, { buffer = buf, nowait = true })
-    vim.keymap.set("n", "[c", function() M.prev_hunk(tabpage) end, { buffer = buf, nowait = true })
+  install_keymaps(tabpage)
+end
+
+--- Reinstall ]c/[c for an already-attached tabpage, keeping its stored ctx.
+---
+--- codediff deletes the group-scoped maps from the pane buffers on TabLeave
+--- (ui/lifecycle/accessors.lua clear_tab_keymaps deletes every lhs in its
+--- keymaps.view table, whoever set it) and reinstalls its own all-hunks
+--- versions on TabEnter. intentdiff.view's TabEnter re-assert calls this so
+--- ]c/[c stay group-scoped across tab switches. Inert when the tabpage has no
+--- attached state.
+function M.reattach_keymaps(tabpage)
+  if not state[tabpage] then
+    return false
   end
+  install_keymaps(tabpage)
+  return true
 end
 
 function M.detach(tabpage)
