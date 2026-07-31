@@ -87,6 +87,10 @@ return {
 `:CodeDiff` — no args (working tree), a single revision, `revision...` for
 merge-base-relative, or `base target`.
 
+`:IntentDiffToggleAll` and `:IntentDiffSidebar` are the command-line
+equivalents of the `zA` and `<leader>gVt` keys described under "Keymaps"
+below — collapsing/expanding every intent, and showing/hiding the sidebar.
+
 ## Configuration
 
 Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
@@ -172,14 +176,33 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   -- Diagnostics log used by :IntentDiffLog (see "Diagnostics" below).
   log_file = vim.fn.stdpath("cache") .. "/intentdiff/intentdiff.log",
 
-  -- Whole-intent preview: resting the cursor on a group or directory row in
-  -- the sidebar shows that intent's complete diff in the diff panes, with a
-  -- separator per file (see "Previewing an intent" below).
+  -- Cursor-driven navigation: moving the sidebar cursor onto a group or
+  -- directory row shows that intent's complete diff in the diff panes, with
+  -- a separator per file; moving it onto a file row renders that file's own
+  -- diff (see "Previewing an intent" below).
   preview = {
     enabled = true,
-    debounce_ms = 120,  -- cursor settle time before the preview renders, so
-                         -- scrolling past rows doesn't thrash the panes
-    max_lines = 20000,  -- cap on preview length; the omitted count is stated
+    debounce_ms = 120,  -- cursor settle time before rendering, so scrolling
+                         -- past rows doesn't thrash the panes
+    max_lines = 20000,  -- cap on a group/directory preview's length; the
+                         -- omitted count is stated
+    hover_opens_files = true, -- moving the cursor onto a file row renders
+                               -- its diff too; false requires <CR> instead
+                               -- and just restores the last-opened file
+  },
+
+  -- Buffer-local keys the plugin installs inside a review tab. Set either to
+  -- `false` to install nothing, exactly as the plugin already handles
+  -- codediff's own toggle_layout key being disabled.
+  keymaps = {
+    -- Show/hide the sidebar. Installed on the sidebar AND on the diff panes,
+    -- since a sidebar-only key is unreachable once the sidebar is hidden —
+    -- and it works even when codediff's own layout-toggle key is disabled.
+    toggle_sidebar = "<leader>gVt",
+    -- Collapse every intent if any is currently expanded, otherwise expand
+    -- every intent (per-directory collapse state inside each one is
+    -- preserved either way). Sidebar only.
+    toggle_all = "zA",
   },
 }
 ```
@@ -309,15 +332,18 @@ row they toggle that directory; on any other row in the group — a title
 line, the stats line, or even one of its file rows — they toggle the
 *enclosing group* instead, so standing on a file row and pressing `za`
 collapses the whole group it belongs to. `<CR>` behaves the same way on a
-group or directory row (toggles it) but additionally *selects* a file row,
-driving that file's diff into the panes.
+group or directory row (toggles it); on a file row it renders that file's
+diff if the cursor hasn't already done so (see "Previewing an intent"
+below), then moves focus into the diff pane so you can scroll and search it.
+If the cursor already rendered that exact file, `<CR>` is a pure focus
+change — nothing is re-rendered.
 
 ## Previewing an intent
 
-With `preview.enabled = true` (the default), simply moving the cursor onto a
-sidebar row — no key press needed — drives a preview into the diff panes
-after `preview.debounce_ms` of the cursor sitting still, so scrolling past
-several rows doesn't thrash the panes:
+With `preview.enabled = true` (the default), the sidebar cursor drives the
+diff panes on its own — no key press needed — after `preview.debounce_ms` of
+the cursor sitting still, so scrolling past several rows doesn't thrash the
+panes. What lands in the panes depends on the kind of row the cursor is on:
 
 - **A group row** (any of its title lines or its stats line) previews that
   group's whole diff: every file it touches, each preceded by a
@@ -325,13 +351,16 @@ several rows doesn't thrash the panes:
   `status`), in file-tree order.
 - **A directory row** previews just that subtree — the same rendering,
   restricted to the files under that directory.
-- **A file row does *not* open that file.** Hovering it restores the panes to
-  whatever file was last *selected* (`<CR>`) — rendering a full diff for
-  every row the cursor happens to scroll past would be wasteful and
-  distracting. Press `<CR>` on a file row to actually open it.
+- **A file row renders that file's own diff** — folded to whichever group it
+  belongs to, exactly like `<CR>` would show — while leaving focus in the
+  sidebar so you can keep browsing with `j`/`k`. This is
+  `preview.hover_opens_files`, on by default; set it to `false` to go back to
+  the older behavior, where hovering a file row just restores the panes to
+  whatever file was last opened via `<CR>`, and only `<CR>` renders it.
 
-The preview is capped at `preview.max_lines`; a truncated preview's last line
-states how many more lines were omitted rather than silently cutting off.
+The group/directory preview is capped at `preview.max_lines`; a truncated
+preview's last line states how many more lines were omitted rather than
+silently cutting off.
 
 This is the real output of `preview.render()` (inline layout) for the same
 "Rename UserService to AccountService" group shown above:
@@ -434,22 +463,27 @@ worked (and does, until the theme changes) rather than failing loudly.
 
 | Key | Action |
 |---|---|
-| `<CR>` | On a file row, select it and open its diff. On a group or directory row, toggle it. |
+| `<CR>` | On a file row, render its diff if needed (a pure focus change if the cursor already rendered it) and move focus into the diff pane. On a group or directory row, toggle it. |
 | `za` / `h` / `l` | On a directory row, toggle that directory. Anywhere else in the group (title, stats line, or a file row), toggle the enclosing group. |
+| `zA` | Collapse every intent if any is currently expanded, otherwise expand every intent. Per-directory collapse state inside each intent is preserved. (`:IntentDiffToggleAll`) |
+| `<leader>gVt` | Show or hide the sidebar — also works from the diff panes, see below. (`:IntentDiffSidebar`) |
 | `r` | Re-classify (bypasses cache) |
 | `gf` | Open the real file at the group's first hunk, closing the review tab |
 | `<Tab>` / `<S-Tab>` | Jump to next / previous group header |
 | `q` | Close the review tab |
 
-Resting the cursor on a row (no key press) also drives a live preview into
-the diff panes — see "Previewing an intent" above.
+Resting the cursor on a row (no key press) also drives the diff panes — see
+"Previewing an intent" above.
 
 **Diff panes:** `]c` / `[c` (and codediff's own hunk keys) are group-scoped —
 they move only through the current group's hunks; at a file's last hunk in
 the group they roll over to the group's next file. codediff's inline↔side-by-side
-toggle keeps working; the fold filter re-applies after every toggle. The same
-toggle key works inside a whole-intent preview too — see "Previewing an
-intent" above.
+toggle keeps working; the fold filter re-applies after every toggle.
+`<leader>gVt` (`keymaps.toggle_sidebar`) is also installed here, not just on
+the sidebar — since a sidebar-only key would be unreachable once the sidebar
+is hidden, this one works even when codediff's own layout-toggle key is
+disabled. The same toggle key works inside a whole-intent preview too — see
+"Previewing an intent" above.
 
 ## Diagnostics
 
