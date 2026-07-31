@@ -52,6 +52,23 @@ M.defaults = {
   -- tree never settles, so it renders once, at rest. Set false to go back to
   -- restoring the last selection on a file row and requiring <CR> to open.
   preview = { enabled = true, debounce_ms = 120, max_lines = 20000, hover_opens_files = true },
+  -- Review comments attached to diff lines and to whole intents, exported as
+  -- Markdown for an agent to act on. See :IntentDiffCommentsYank / …Write.
+  comments = {
+    enabled = true,
+    -- The order the popup cycles them in. A type's highlight groups are
+    -- derived from its key — see highlight.comment_groups.
+    types = {
+      { key = "note", name = "Note", icon = "✍" },
+      { key = "suggestion", name = "Suggestion", icon = "💡" },
+      { key = "issue", name = "Issue", icon = "⚠" },
+      { key = "praise", name = "Praise", icon = "✨" },
+    },
+    -- Days before a stored review is swept. false disables the sweep.
+    expire_days = 7,
+    -- Default path offered by :IntentDiffCommentsWrite, relative to git root.
+    export_path = ".intentdiff-review.md",
+  },
   -- Buffer-local keys the plugin installs inside a review tab, namespaced by
   -- surface the way codediff namespaces its own (keymaps.view / .explorer /
   -- .history / .conflict). Set any action to false to install nothing,
@@ -101,6 +118,28 @@ M.defaults = {
       -- (codediff's meaning), so this is unbound by default and reachable as
       -- :IntentDiffToggleAll.
       fold_toggle_all = false,
+    },
+    -- Review comments. Cross-surface by nature: installed on the diff panes
+    -- AND the sidebar, since an intent comment is added from a group row and
+    -- a line comment from a pane.
+    comments = {
+      add_comment = "<localleader>cc", -- pick the type in the popup
+      add_note = "<localleader>cn",
+      add_suggestion = "<localleader>cs",
+      add_issue = "<localleader>ci",
+      add_praise = "<localleader>cp",
+      add_file_comment = "<localleader>cf",
+      edit_comment = "<localleader>ce",
+      delete_comment = "<localleader>cd",
+      list_comments = "<localleader>cl",
+      next_comment = "]n",
+      prev_comment = "[n",
+      export_clipboard = "<localleader>cy",
+      export_file = "<localleader>cw",
+      clear_comments = "<localleader>cx",
+      -- The review.nvim end-of-review flow: copy, then close. Plain `q` still
+      -- closes without touching the clipboard.
+      export_and_close = "<localleader>q",
     },
   },
 }
@@ -175,7 +214,18 @@ function M.setup(opts)
   local keymaps, moved = migrate_keymaps(opts.keymaps or {})
   opts = vim.tbl_extend("force", {}, opts)
   opts.keymaps = nil
+  -- comments.types is a LIST, and vim.tbl_deep_extend merges lists by index:
+  -- a user supplying two types would silently inherit defaults at 3 and 4.
+  -- Pull it out, deep-extend everything else, then put it back wholesale.
+  local types = opts.comments and opts.comments.types
+  if types then
+    opts.comments = vim.tbl_extend("force", {}, opts.comments)
+    opts.comments.types = nil
+  end
   M.options = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
+  if types then
+    M.options.comments.types = vim.deepcopy(types)
+  end
   M.options.keymaps = merge_keymaps(M.defaults.keymaps, keymaps)
   if #moved > 0 then
     vim.notify(

@@ -19,6 +19,14 @@ M.links = {
   IntentDiffPreviewFile = "Title",
   IntentDiffPreviewHunk = "Comment",
   IntentDiffFiller = "Comment",
+  IntentDiffCommentNote = "DiagnosticHint",
+  IntentDiffCommentSuggestion = "DiagnosticInfo",
+  IntentDiffCommentIssue = "DiagnosticWarn",
+  IntentDiffCommentPraise = "DiagnosticOk",
+  IntentDiffCommentNoteLine = "CursorLine",
+  IntentDiffCommentSuggestionLine = "CursorLine",
+  IntentDiffCommentIssueLine = "CursorLine",
+  IntentDiffCommentPraiseLine = "CursorLine",
 }
 
 --- Status letter → highlight group, for the sidebar's status gutter and the
@@ -39,9 +47,31 @@ function M.status_char(status)
   return status == "??" and "?" or (status or "M")
 end
 
+--- Sign and line highlight groups for a comment type, derived from its key so
+--- a user-configured type needs no extra registration: "issue" →
+--- IntentDiffCommentIssue / IntentDiffCommentIssueLine.
+--- @return string sign_group, string line_group
+function M.comment_groups(type_key)
+  local key = tostring(type_key or "note")
+  local name = "IntentDiffComment" .. key:sub(1, 1):upper() .. key:sub(2)
+  return name, name .. "Line"
+end
+
 local function define()
   for name, target in pairs(M.links) do
     vim.api.nvim_set_hl(0, name, { link = target, default = true })
+  end
+  -- A user-configured type beyond the built-in four has no entry in M.links;
+  -- point it at the note defaults so it still renders.
+  local ok, config = pcall(require, "intentdiff.config")
+  local types = ok and config.options and config.options.comments
+    and config.options.comments.types or {}
+  for _, t in ipairs(types) do
+    local sign, line = M.comment_groups(t.key)
+    if not M.links[sign] then
+      vim.api.nvim_set_hl(0, sign, { link = "DiagnosticHint", default = true })
+      vim.api.nvim_set_hl(0, line, { link = "CursorLine", default = true })
+    end
   end
 end
 

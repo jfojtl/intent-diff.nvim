@@ -114,6 +114,46 @@ describe("config keymaps", function()
     assert.equals("R", config.options.keymaps.sidebar.reclassify)
   end)
 end)
+
+describe("comments config", function()
+  local config = require("intentdiff.config")
+
+  it("defaults to enabled with the four built-in types", function()
+    config.setup({})
+    assert.is_true(config.options.comments.enabled)
+    local keys = {}
+    for _, t in ipairs(config.options.comments.types) do
+      keys[#keys + 1] = t.key
+    end
+    assert.same({ "note", "suggestion", "issue", "praise" }, keys)
+    assert.equals(".intentdiff-review.md", config.options.comments.export_path)
+    assert.equals(7, config.options.comments.expire_days)
+  end)
+
+  it("replaces the types list outright instead of merging by index", function()
+    config.setup({ comments = { types = { { key = "issue", name = "Issue", icon = "!" } } } })
+    assert.equals(1, #config.options.comments.types)
+    assert.equals("issue", config.options.comments.types[1].key)
+  end)
+
+  it("keeps default types when the user overrides another comments field", function()
+    config.setup({ comments = { export_path = "review.md" } })
+    assert.equals(4, #config.options.comments.types)
+    assert.equals("review.md", config.options.comments.export_path)
+  end)
+
+  it("exposes a comments keymap surface a user can override per action", function()
+    config.setup({ comments = {}, keymaps = { comments = { add_issue = "<leader>i" } } })
+    assert.equals("<leader>i", config.options.keymaps.comments.add_issue)
+    assert.equals("<localleader>cc", config.options.keymaps.comments.add_comment)
+  end)
+
+  it("lets an action be disabled with false", function()
+    config.setup({ keymaps = { comments = { add_praise = false } } })
+    assert.is_false(config.options.keymaps.comments.add_praise)
+  end)
+end)
+
 describe("config keymap isolation", function()
   it("does not let an in-place mutation reach the defaults", function()
     local config = require("intentdiff.config")
