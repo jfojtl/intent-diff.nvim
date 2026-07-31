@@ -40,10 +40,47 @@ describe("view: intent preview", function()
     return sess, file_entry, group
   end
 
+  --- Untracked file, status "??" — codediff's show_untracked_file collapses
+  --- this to a SINGLE window (session.original_win = nil, session.modified_win
+  --- = the kept window), even though M.show_file requests side-by-side
+  --- layout. That's the exact shape that broke clear_folds's
+  --- `ipairs({ session.original_win, session.modified_win })`: with the first
+  --- element nil, ipairs stopped before ever looking at the second.
+  local function untracked_fixture()
+    local repo = helpers.make_repo({ ["existing.txt"] = "keep\n" })
+    local lines = {}
+    for i = 1, 20 do lines[i] = "new line " .. i end
+    helpers.write_file(repo, "new.lua", table.concat(lines, "\n"))
+
+    local inv
+    require("intentdiff.hunks").collect({ git_root = repo }, function(i) inv = i end)
+    helpers.wait_for(function() return inv end)
+
+    local base
+    require("codediff.core.git").resolve_revision("HEAD", repo, function(_, h) base = h end)
+    helpers.wait_for(function() return base end)
+
+    local sess = { tabpage = view.open_tab(), git_root = repo, base_revision = base,
+      target_revision = "WORKING" }
+    local file_entry = { path = "new.lua", status = "??", hunks = inv.hunks }
+    local group = { title = "All", hunks = inv.hunks, files = { file_entry } }
+    return sess, file_entry, group
+  end
+
   local function show(sess, file_entry)
     local ready = false
     view.show_file(sess, file_entry, { on_ready = function() ready = true end })
     assert.truthy(helpers.wait_for(function() return ready end, 10000), "show_file timed out")
+  end
+
+  --- Every line of `win`'s buffer is actually visible — no fold (stale or
+  --- otherwise) is hiding it.
+  local function assert_unfolded(win)
+    local last = vim.api.nvim_win_call(win, function() return vim.fn.line("$") end)
+    for lnum = 1, last do
+      assert.equals(-1, vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(lnum) end),
+        ("line %d of win %s is folded closed"):format(lnum, win))
+    end
   end
 
   it("injects two panes without creating or closing a window", function()
@@ -66,8 +103,63 @@ describe("view: intent preview", function()
     show(sess, { path = "big.lua", status = "M", hunks = { file_entry.hunks[1] } })
     view.show_preview(sess, group)
     local session = view.get_session(sess.tabpage)
+    -- foldmethod alone is a weak check — it passes for literally any value
+    -- other than "expr", including a wrong one, and says nothing about
+    -- whether a STALE fold (foldmethod already "manual" but a fold left over
+    -- from before) is still closed over content. Assert the actual visible
+    -- state of every line instead.
     assert.not_equals("expr", vim.wo[session.modified_win].foldmethod)
+    assert_unfolded(session.modified_win)
+    assert_unfolded(session.original_win)
     assert.is_nil(view._active_folds[sess.tabpage])
+  end)
+
+  it("renders an untracked-file (single-pane) preview fully unfolded", function()
+    local sess, file_entry, group = untracked_fixture()
+    show(sess, file_entry)
+    local shown_session = view.get_session(sess.tabpage)
+    -- Confirms the fixture actually reproduces the single-pane shape:
+    -- codediff's show_untracked_file collapsed to one window with
+    -- original_win == nil, exactly what broke clear_folds's ipairs loop.
+    assert.is_true(shown_session.single_pane)
+    assert.is_nil(shown_session.original_win)
+    local before = #vim.api.nvim_tabpage_list_wins(sess.tabpage)
+
+    assert.is_true(view.show_preview(sess, group))
+    assert.equals(before, #vim.api.nvim_tabpage_list_wins(sess.tabpage))
+    local session = view.get_session(sess.tabpage)
+    assert_unfolded(session.modified_win)
+
+    assert.is_true(view.restore(sess))
+    assert.truthy(helpers.wait_for(function()
+      local s = view.get_session(sess.tabpage)
+      return s and s.modified_win and vim.api.nvim_win_is_valid(s.modified_win) or nil
+    end, 10000))
+  end)
+
+  it("restoring a preview with nothing shown yet leaves the tab and its windows intact", function()
+    local sess, _, group = fixture()
+    -- No M.show_file call: bootstrap the codediff session directly, so
+    -- M._last_shown[tabpage] stays nil — the ordinary state of a tab right
+    -- after :IntentDiff opens, before the user has selected any file, which
+    -- is exactly when the next task's sidebar-cursor preview can fire.
+    assert.truthy(view.bootstrap(sess))
+    assert.is_true(view.show_preview(sess, group))
+    local wins_before = vim.api.nvim_tabpage_list_wins(sess.tabpage)
+    assert.truthy(#wins_before > 0)
+
+    assert.is_false(view.restore(sess))
+    -- Any buffer deletion here happens on a scheduled tick (retire_preview_bufs
+    -- is deliberately deferred, see its comment), not synchronously inside
+    -- restore() — so the crash this guards against wouldn't show up in an
+    -- assertion made immediately afterward. Yield to the event loop first.
+    vim.wait(200, function() return false end)
+
+    assert.is_true(vim.api.nvim_tabpage_is_valid(sess.tabpage))
+    assert.truthy(#vim.api.nvim_list_tabpages() >= 1)
+    for _, w in ipairs(wins_before) do
+      assert.is_true(vim.api.nvim_win_is_valid(w), "window " .. w .. " was closed")
+    end
   end)
 
   it("restores the last shown file with its folds", function()

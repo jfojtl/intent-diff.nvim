@@ -27,6 +27,10 @@ function M.load()
     and type(cd.compact.compute_visible_lines) == "function"
     and cd.lifecycle ~= nil
     and type(cd.lifecycle.get_session) == "function"
+    and type(cd.lifecycle.update_buffers) == "function"
+    and type(cd.lifecycle.update_paths) == "function"
+    and type(cd.lifecycle.update_revisions) == "function"
+    and type(cd.lifecycle.update_diff_result) == "function"
     and cd.git ~= nil
     and cd.path ~= nil
     and type(cd.path.make_ref) == "function"
@@ -628,22 +632,63 @@ local function preview_buf(pane)
   return buf
 end
 
+--- True when `buf` is the current buffer of any window, in any tabpage.
+local function buf_is_displayed(buf)
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == buf then
+      return true
+    end
+  end
+  return false
+end
+
 --- Delete `bufs` (a tabpage's previous-generation preview buffers, or nil)
 --- one event-loop tick from now — after codediff's own scheduled
 --- render_everything (see preview_buf above) has had a chance to move
 --- session.*_bufnr off of them, so deleting them can never leave that field
 --- dangling mid-tick for a caller that reads it in between.
+---
+--- Never deletes a buffer still displayed in a window: `nvim_buf_delete`
+--- with `force = true` closes every window showing that buffer, and closes
+--- the tabpage along with it if it was the tab's last window — exactly the
+--- window-closing this whole preview mechanism exists to avoid. A caller
+--- that retires buffers before anything has actually replaced them in their
+--- windows (M.restore with nothing to restore to, M.cleanup_tab_state
+--- racing a not-yet-closed tab) would otherwise take the tab down with it.
+--- Buffers this leaves behind are still tracked by whichever M._preview_bufs
+--- entry named them, and get a further chance to retire the next time that
+--- entry is replaced or the tab is actually torn down.
 function retire_preview_bufs(bufs)
   if not bufs or #bufs == 0 then
     return
   end
   vim.schedule(function()
     for _, buf in ipairs(bufs) do
-      if buf and vim.api.nvim_buf_is_valid(buf) then
+      if buf and vim.api.nvim_buf_is_valid(buf) and not buf_is_displayed(buf) then
         pcall(vim.api.nvim_buf_delete, buf, { force = true })
       end
     end
   end)
+end
+
+--- session.original_win/modified_win as a plain array with nil entries
+--- dropped. `ipairs({ a, b })` stops at the first missing index — if
+--- `a` is nil it never even looks at `b`, even though `b` is set. Whole-file
+--- ??/A/D panes routinely leave exactly one of the two nil (codediff's
+--- show_single_file, used for untracked/added/deleted files, closes the
+--- window it doesn't need and sets that side's session field to nil rather
+--- than leaving it pointing at a closed window) — a bare table-literal loop
+--- over both fields silently no-ops for those statuses. Every loop over both
+--- panes in this file must go through this instead of the literal.
+local function pane_windows(session)
+  local wins = {}
+  if session.original_win then
+    wins[#wins + 1] = session.original_win
+  end
+  if session.modified_win and session.modified_win ~= session.original_win then
+    wins[#wins + 1] = session.modified_win
+  end
+  return wins
 end
 
 --- Drop any group-fold state for `tabpage`'s panes, so a preview buffer is
@@ -654,8 +699,8 @@ local function clear_folds(tabpage)
   if not session then
     return
   end
-  for _, win in ipairs({ session.original_win, session.modified_win }) do
-    if win and vim.api.nvim_win_is_valid(win) then
+  for _, win in ipairs(pane_windows(session)) do
+    if vim.api.nvim_win_is_valid(win) then
       visible_by_win[win] = nil
       vim.wo[win].foldenable = false
       vim.wo[win].foldmethod = "manual"
@@ -728,25 +773,34 @@ function M.show_preview(sess, group)
 end
 
 --- Leave the preview and re-render the file that was last shown, folds and all.
+---
+--- Returns false — leaving the preview exactly as it is, buffers, windows and
+--- all — when there's nothing to restore to yet: previewing before any file
+--- has ever been selected in this tab is the ordinary first moment of a
+--- sidebar cursor move, not an error. Clearing preview state or retiring the
+--- preview buffers in that case, before anything has actually replaced them
+--- in their windows, would hand still-displayed buffers to
+--- retire_preview_bufs — which now refuses to delete those (see its comment)
+--- but there is no reason to even try: nothing changed, so nothing needs
+--- retiring.
 --- @return boolean whether a file was restored
 function M.restore(sess)
   local tabpage = sess.tabpage
+  local shown = M._last_shown[tabpage]
+  if not shown then
+    return false
+  end
   M._preview_active[tabpage] = nil
   local prior_bufs = M._preview_bufs[tabpage]
   M._preview_bufs[tabpage] = nil
   local session = cd.lifecycle.get_session(tabpage)
   if session then
-    for _, win in ipairs({ session.original_win, session.modified_win }) do
-      if win and vim.api.nvim_win_is_valid(win) then
+    for _, win in ipairs(pane_windows(session)) do
+      if vim.api.nvim_win_is_valid(win) then
         vim.wo[win].scrollbind = false
         vim.wo[win].cursorbind = false
       end
     end
-  end
-  local shown = M._last_shown[tabpage]
-  if not shown then
-    retire_preview_bufs(prior_bufs)
-    return false
   end
   M.show_file(shown.sess, shown.file_entry)
   -- M.show_file's real-file path (cd.view.update) only finishes moving
@@ -944,8 +998,14 @@ function M.diff_wins(tabpage)
     return {}
   end
   local wins = {}
-  for _, w in ipairs({ session.original_win, session.modified_win }) do
-    if w and vim.api.nvim_win_is_valid(w) then
+  -- pane_windows, not a bare `{ session.original_win, session.modified_win }`
+  -- literal: this had the exact ipairs-nil-hole bug pane_windows documents
+  -- (pre-existing, not introduced by this task) — whole-file ??/A/D panes
+  -- leave session.original_win nil, so this returned {} even with a valid
+  -- modified_win, silently skipping ]c/[c keymap installation for them
+  -- (navigation.lua's only caller).
+  for _, w in ipairs(pane_windows(session)) do
+    if vim.api.nvim_win_is_valid(w) then
       wins[#wins + 1] = w
     end
   end
