@@ -475,4 +475,87 @@ describe("sidebar hover preview", function()
       assert.is_true(ok, tostring(err))
     end)
   end)
+
+  describe("cursor opens files", function()
+    local function file_rows(entry)
+      local rows = {}
+      for l = 1, vim.api.nvim_buf_line_count(entry.sidebar.bufnr) do
+        local m = entry.sidebar.meta_at(l)
+        if m and m.kind == "file" then
+          rows[#rows + 1] = { lnum = l, group_i = m.group_i, file_i = m.file_i }
+        end
+      end
+      return rows
+    end
+
+    it("renders the hovered file's diff and keeps focus in the sidebar", function()
+      local tab, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
+      local rows = file_rows(entry)
+      assert.is_true(#rows >= 1)
+      hover(entry, rows[1].lnum)
+
+      local path = entry.model.groups[rows[1].group_i].files[rows[1].file_i].path
+      assert.truthy(helpers.wait_for(function()
+        local shown = require("intentdiff.view")._last_shown[tab]
+        return shown and shown.file_entry.path == path or nil
+      end, 10000), "hovered file was never rendered")
+      assert.is_nil(require("intentdiff.view")._preview_active[tab])
+      -- Focus returns to the sidebar asynchronously, in show_file's on_ready
+      -- (see open_file's restore_focus handling) — strictly later than
+      -- _last_shown above, which show_file sets synchronously at its top,
+      -- before codediff's cd.view.update() has had a chance to steal focus
+      -- onto a diff pane. Asserting the window immediately after the
+      -- _last_shown wait is racy; wait on the focus condition itself, same
+      -- pattern as the pre-existing auto-open focus-restore assertion in
+      -- integration_spec.lua.
+      assert.truthy(helpers.wait_for(function()
+        return vim.api.nvim_get_current_win() == entry.sidebar.winid or nil
+      end, 10000), "focus never returned to the sidebar")
+    end)
+
+    it("re-renders when the cursor moves to a different file row", function()
+      local tab, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
+      local rows = file_rows(entry)
+      assert.is_true(#rows >= 2, "fixture must have two file rows")
+      local function path_of(r)
+        return entry.model.groups[r.group_i].files[r.file_i].path
+      end
+      assert.not_equals(path_of(rows[1]), path_of(rows[2]))
+
+      hover(entry, rows[1].lnum)
+      assert.truthy(helpers.wait_for(function()
+        local s = require("intentdiff.view")._last_shown[tab]
+        return s and s.file_entry.path == path_of(rows[1]) or nil
+      end, 10000))
+
+      hover(entry, rows[2].lnum)
+      assert.truthy(helpers.wait_for(function()
+        local s = require("intentdiff.view")._last_shown[tab]
+        return s and s.file_entry.path == path_of(rows[2]) or nil
+      end, 10000), "moving between file rows must re-render (per-file de-dupe key)")
+    end)
+
+    it("leaves the preview when moving from a group row to a file row", function()
+      local tab, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
+      hover(entry, line_of(entry, "group"))
+      assert.truthy(helpers.wait_for(function()
+        return require("intentdiff.view")._preview_active[tab]
+      end, 10000))
+      hover(entry, file_rows(entry)[1].lnum)
+      assert.truthy(helpers.wait_for(function()
+        return require("intentdiff.view")._preview_active[tab] == nil or nil
+      end, 10000))
+    end)
+
+    it("restores instead of opening when hover_opens_files is false", function()
+      local tab, entry = open_ready({
+        preview = { enabled = true, debounce_ms = 10, hover_opens_files = false },
+      })
+      local before = require("intentdiff.view")._last_shown[tab]
+      hover(entry, file_rows(entry)[1].lnum)
+      vim.wait(400, function() return false end, 50)
+      local after = require("intentdiff.view")._last_shown[tab]
+      assert.equals(before and before.file_entry.path, after and after.file_entry.path)
+    end)
+  end)
 end)

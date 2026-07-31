@@ -380,8 +380,14 @@ local function open_file(token, group_i, file_i, opts)
         local h = opts.jump == "last" and file_entry.hunks[#file_entry.hunks] or file_entry.hunks[1]
         pcall(vim.api.nvim_win_set_cursor, win, { h.modified.start_line, 0 })
       end
-      if opts and opts.auto and vim.api.nvim_tabpage_is_valid(tabpage)
-          and current.sidebar and vim.api.nvim_win_is_valid(current.sidebar.winid) then
+      -- `auto` and `restore_focus` are deliberately separate flags. `auto`
+      -- ALSO means "bail if the user has selected something" (see the guard
+      -- above), and a hover-open sets user_selected itself — reusing `auto`
+      -- for it would make every hover-open bail before rendering.
+      if opts and (opts.auto or opts.restore_focus)
+          and vim.api.nvim_tabpage_is_valid(tabpage)
+          and current.sidebar and current.sidebar.winid
+          and vim.api.nvim_win_is_valid(current.sidebar.winid) then
         vim.api.nvim_set_current_win(current.sidebar.winid)
       end
     end,
@@ -397,7 +403,10 @@ select_file = function(token, group_i, file_i, opts)
     entry.user_selected = true
     -- The panes now show a file; the next hover onto a file row must be a
     -- no-op rather than a restore of something older.
-    entry.hover_key = "file"
+    -- Per-file, matching apply_hover's key: a flat "file" key made every file
+    -- row the same hover target, which was right when they all did the same
+    -- thing and is wrong now that each renders its own diff.
+    entry.hover_key = ("f%d:%d"):format(group_i, file_i)
   end
   open_file(token, group_i, file_i, opts)
 end
@@ -651,7 +660,7 @@ local function apply_hover(token)
   elseif m.kind == "dir" then
     key = ("d%d:%s"):format(m.group_i, m.dir_path)
   elseif m.kind == "file" then
-    key = "file"
+    key = ("f%d:%d"):format(m.group_i, m.file_i)
   else
     return
   end
@@ -661,11 +670,16 @@ local function apply_hover(token)
   entry.hover_key = key
 
   if m.kind == "file" then
-    -- Hovering a file row does NOT open that file: rendering every row the
-    -- cursor passes over would re-run codediff's diff for each one. It just
-    -- leaves the preview, restoring whatever the user last selected. <CR>
-    -- still selects.
-    view.restore(entry.sess)
+    if not require("intentdiff.config").options.preview.hover_opens_files then
+      view.restore(entry.sess)
+      return
+    end
+    -- Opening on the cursor marks the selection: a classification completing
+    -- while the user browses must re-fold their current file in place
+    -- (refold_shown_file), not yank them to the first group. Hovering a GROUP
+    -- deliberately does not set this — rerender_preview handles that path.
+    entry.user_selected = true
+    open_file(token, m.group_i, m.file_i, { restore_focus = true })
     return
   end
   local group = entry.model and entry.model.groups and entry.model.groups[m.group_i]

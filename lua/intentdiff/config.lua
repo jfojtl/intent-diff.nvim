@@ -46,7 +46,12 @@ M.defaults = {
   -- sidebar shows that intent's complete diff in the diff panes, with a
   -- separator per file. debounce_ms keeps scrolling the sidebar from thrashing
   -- the panes; max_lines caps a very large intent, stating what it omitted.
-  preview = { enabled = true, debounce_ms = 120, max_lines = 20000 },
+  -- hover_opens_files: moving the sidebar cursor onto a file row renders that
+  -- file's diff, matching how group and directory rows already preview on the
+  -- cursor. debounce_ms is what keeps this cheap — holding `j` through a large
+  -- tree never settles, so it renders once, at rest. Set false to go back to
+  -- restoring the last selection on a file row and requiring <CR> to open.
+  preview = { enabled = true, debounce_ms = 120, max_lines = 20000, hover_opens_files = true },
 }
 
 M.options = vim.deepcopy(M.defaults)
