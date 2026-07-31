@@ -211,6 +211,68 @@ describe("comments.marks", function()
     assert.equals(0, #vim.api.nvim_buf_get_extmarks(new_buf, marks.ns_padding, 0, -1, {}))
   end)
 
+  describe("refresh", function()
+    local view = require("intentdiff.view")
+    local tab
+    local real_get_session, real_diff_wins
+
+    before_each(function()
+      tab = 900001 -- a sentinel key, never a real tabpage id
+      real_get_session = view.get_session
+      real_diff_wins = view.diff_wins
+    end)
+
+    after_each(function()
+      view.get_session = real_get_session
+      view.diff_wins = real_diff_wins
+      view._last_shown[tab] = nil
+      view._preview_active[tab] = nil
+    end)
+
+    --- Regression: M.align is the only place that clears ns_padding, so
+    --- skipping it (inline layout, or a whole-file single-pane render) must
+    --- not also skip that cleanup. Reproduces the concrete path: a
+    --- side-by-side working-tree review with an old-side comment (so the
+    --- shorter NEW side gets the padding), then a layout toggle that
+    --- collapses both windows onto the (real, modified) buffer — mirroring
+    --- inline layout reusing the modified buffer.
+    it("clears stale padding once a layout toggle collapses both panes onto one buffer", function()
+      local win_orig = vim.api.nvim_open_win(scratch(10), false, {
+        relative = "editor", row = 0, col = 0, width = 20, height = 5, style = "minimal",
+      })
+      local win_mod = vim.api.nvim_open_win(scratch(10), false, {
+        relative = "editor", row = 6, col = 0, width = 20, height = 5, style = "minimal",
+      })
+      local buf_orig = vim.api.nvim_win_get_buf(win_orig)
+      local buf_mod = vim.api.nvim_win_get_buf(win_mod)
+
+      store.add({ file = "a.lua", line = 3, side = "old", type = "note", text = "one\ntwo" })
+      marks.render_buffer(buf_orig, "a.lua", "old")
+      marks.render_buffer(buf_mod, "a.lua", "new")
+      marks.align(buf_orig, buf_mod, "a.lua")
+      -- Old side is taller (2-line box vs. no comment on new) — padding lands
+      -- on the shorter, new side.
+      assert.equals(1, #vim.api.nvim_buf_get_extmarks(buf_mod, marks.ns_padding, 0, -1, {}))
+
+      -- Simulate the toggle to inline: both windows now show the (real,
+      -- modified) buffer — exactly what inline layout does with a
+      -- working-tree review's buffer.
+      vim.api.nvim_win_set_buf(win_orig, buf_mod)
+
+      view.get_session = function() return { original_win = win_orig, modified_win = win_mod } end
+      view.diff_wins = function() return { win_orig, win_mod } end
+      view._last_shown[tab] = { file_entry = { path = "a.lua" } }
+      view._preview_active[tab] = nil
+
+      marks.refresh(tab)
+
+      assert.equals(0, #vim.api.nvim_buf_get_extmarks(buf_mod, marks.ns_padding, 0, -1, {}))
+
+      pcall(vim.api.nvim_win_close, win_orig, true)
+      pcall(vim.api.nvim_win_close, win_mod, true)
+    end)
+  end)
+
   it("signs a sidebar group row that has an intent comment", function()
     local buf = scratch(6)
     store.add({ intent_title = "Rename things", type = "issue", text = "wrong" })

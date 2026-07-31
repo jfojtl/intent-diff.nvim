@@ -68,25 +68,30 @@ function M.prev_line(file, from, side)
   return best
 end
 
+--- Human-readable label for one comment: `[TYPE] where — first text line`.
+--- Shared by the list picker (`list_entries`, every comment in the review)
+--- and the intent-disambiguation picker (`at_cursor`, comments within ONE
+--- intent) so the two read alike.
+local function label_for(c)
+  local first_line = vim.split(c.text or "", "\n")[1] or ""
+  local where
+  if c.intent_title then
+    where = "intent: " .. c.intent_title
+  elseif (c.line or 0) == 0 then
+    where = c.file
+  elseif c.line_end then
+    where = ("%s:%d-%d"):format(c.file, c.line, c.line_end)
+  else
+    where = ("%s:%d"):format(c.file, c.line)
+  end
+  return ("[%s] %s — %s"):format(tostring(c.type):upper(), where, first_line)
+end
+
 --- One selectable row per comment, for the list picker.
 function M.list_entries()
   local out = {}
   for _, c in ipairs(store.get_all()) do
-    local first_line = vim.split(c.text or "", "\n")[1] or ""
-    local where
-    if c.intent_title then
-      where = "intent: " .. c.intent_title
-    elseif (c.line or 0) == 0 then
-      where = c.file
-    elseif c.line_end then
-      where = ("%s:%d-%d"):format(c.file, c.line, c.line_end)
-    else
-      where = ("%s:%d"):format(c.file, c.line)
-    end
-    out[#out + 1] = {
-      comment = c,
-      label = ("[%s] %s — %s"):format(tostring(c.type):upper(), where, first_line),
-    }
+    out[#out + 1] = { comment = c, label = label_for(c) }
   end
   return out
 end
@@ -96,23 +101,34 @@ local function entry_for(tabpage)
   return require("intentdiff")._session(tabpage or vim.api.nvim_get_current_tabpage())
 end
 
---- Current branch of `git_root`, for the storage key of a working-tree review.
-local function branch_of(git_root)
-  local out = vim.fn.systemlist({ "git", "-C", git_root, "rev-parse", "--abbrev-ref", "HEAD" })[1]
-  if vim.v.shell_error ~= 0 or not out or out == "" then
+--- `git -C git_root <...>`'s first output line, or nil on any failure —
+--- including `git` not being executable at all. `vim.fn.systemlist` throws
+--- (E475) rather than returning an error value when the argv[0] executable
+--- cannot be found, so this must be pcall'd like every other Neovim API call
+--- that can fail on the user's environment, not just checked via
+--- vim.v.shell_error.
+--- @return string|nil
+local function git_rev(git_root, ...)
+  local ok, out = pcall(vim.fn.systemlist, { "git", "-C", git_root, ... })
+  if not ok or vim.v.shell_error ~= 0 then
     return nil
   end
-  return out
+  local first = out and out[1]
+  if not first or first == "" then
+    return nil
+  end
+  return first
+end
+
+--- Current branch of `git_root`, for the storage key of a working-tree review.
+local function branch_of(git_root)
+  return git_rev(git_root, "rev-parse", "--abbrev-ref", "HEAD")
 end
 
 --- HEAD's commit hash, for is_worktree's "does base_revision still name HEAD"
 --- check.
 local function head_hash(git_root)
-  local out = vim.fn.systemlist({ "git", "-C", git_root, "rev-parse", "HEAD" })[1]
-  if vim.v.shell_error ~= 0 or not out or out == "" then
-    return nil
-  end
-  return out
+  return git_rev(git_root, "rev-parse", "HEAD")
 end
 
 --- A working-tree review keys by BRANCH so it survives new commits; anything
@@ -210,8 +226,15 @@ function M.context(tabpage, opts)
     return ctx
   end
   if opts.visual then
-    local first, last = M.visual_range(
-      vim.fn.line("'<"), vim.fn.line("'>"))
+    local mark_start, mark_end = vim.fn.line("'<"), vim.fn.line("'>")
+    -- An unset visual mark reports line 0 (not the cursor line, not an
+    -- error). Taking that at face value falls straight into visual_range and
+    -- produces line = 0 — silently creating a FILE-LEVEL comment instead of a
+    -- line comment. Refuse instead: there is no selection to record.
+    if mark_start == 0 or mark_end == 0 then
+      return nil, "no visual selection"
+    end
+    local first, last = M.visual_range(mark_start, mark_end)
     ctx.line, ctx.line_end = first, last
   else
     ctx.line = vim.api.nvim_win_get_cursor(win)[1]
@@ -249,55 +272,80 @@ function M.add_file(tabpage)
   return M.add(tabpage, nil, { file_level = true })
 end
 
---- The comment under the cursor, for edit/delete.
-local function at_cursor(tabpage)
+--- The comment under the cursor, for edit/delete. Calls `cb(comment|nil)` —
+--- an intent can carry SEVERAL comments (the design spec's "a group can have
+--- several; they are emitted in creation order"), and disambiguating among
+--- them needs a `vim.ui.select` round-trip, so this resolves asynchronously
+--- even though every other branch answers synchronously (cb is still called
+--- before returning in those cases). A file-level comment never needs
+--- disambiguation: `store.collides` enforces exactly one per file.
+local function at_cursor(tabpage, cb)
   local ctx = M.context(tabpage)
   if not ctx then
-    return nil
+    return cb(nil)
   end
   if ctx.intent_title then
-    return store.get_for_intent(ctx.intent_title)[1]
+    local candidates = store.get_for_intent(ctx.intent_title)
+    if #candidates == 0 then
+      return cb(nil)
+    end
+    if #candidates == 1 then
+      return cb(candidates[1])
+    end
+    local entries = {}
+    for _, c in ipairs(candidates) do
+      entries[#entries + 1] = { comment = c, label = label_for(c) }
+    end
+    return vim.ui.select(entries, {
+      prompt = "intent-diff: which comment?",
+      format_item = function(e) return e.label end,
+    }, function(choice)
+      cb(choice and choice.comment or nil)
+    end)
   end
   if (ctx.line or 0) == 0 then
     for _, c in ipairs(store.get_for_file(ctx.file)) do
       if (c.line or 0) == 0 then
-        return c
+        return cb(c)
       end
     end
-    return nil
+    return cb(nil)
   end
-  return store.get_at_line(ctx.file, ctx.line, ctx.side)
+  return cb(store.get_at_line(ctx.file, ctx.line, ctx.side))
 end
 
 function M.edit(tabpage)
-  local comment = at_cursor(tabpage)
-  if not comment then
-    return notify("no comment here", vim.log.levels.WARN)
-  end
-  popup.open({ type = comment.type, text = comment.text }, function(chosen, text)
-    if not (chosen and text) then
-      return
+  at_cursor(tabpage, function(comment)
+    if not comment then
+      return notify("no comment here", vim.log.levels.WARN)
     end
-    store.update(comment, chosen, text)
-    marks.refresh(tabpage)
-    M.refresh_sidebar(tabpage)
+    popup.open({ type = comment.type, text = comment.text }, function(chosen, text)
+      if not (chosen and text) then
+        return
+      end
+      store.update(comment, chosen, text)
+      marks.refresh(tabpage)
+      M.refresh_sidebar(tabpage)
+    end)
   end)
 end
 
 function M.delete(tabpage)
-  local comment = at_cursor(tabpage)
-  if not comment then
-    return notify("no comment here", vim.log.levels.WARN)
-  end
-  store.delete(comment)
-  marks.refresh(tabpage)
-  M.refresh_sidebar(tabpage)
-  notify("deleted comment")
+  at_cursor(tabpage, function(comment)
+    if not comment then
+      return notify("no comment here", vim.log.levels.WARN)
+    end
+    store.delete(comment)
+    marks.refresh(tabpage)
+    M.refresh_sidebar(tabpage)
+    notify("deleted comment")
+  end)
 end
 
 local function jump(tabpage, finder)
+  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local view = require("intentdiff.view")
-  local shown = view._last_shown[tabpage or vim.api.nvim_get_current_tabpage()]
+  local shown = view._last_shown[tabpage]
   if not (shown and shown.file_entry) then
     return
   end
@@ -320,7 +368,17 @@ function M.prev(tabpage)
   jump(tabpage, M.prev_line)
 end
 
+--- Show every comment in the review; picking one jumps the cursor to it.
+---
+--- TODO(task-8): once there is a path to OPEN a file from the action layer,
+--- this should open the comment's file and then jump, for any comment in a
+--- file that isn't already on screen. Until that path exists, jumping
+--- straight to `c.line` in whatever happens to be on screen would silently
+--- land the cursor on the wrong line of the WRONG file whenever the chosen
+--- comment belongs to a different file than the one currently shown — so
+--- this refuses instead of guessing.
 function M.list(tabpage)
+  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local entries = M.list_entries()
   if #entries == 0 then
     return notify("no comments yet")
@@ -337,8 +395,18 @@ function M.list(tabpage)
       return
     end
     local view = require("intentdiff.view")
-    for _, win in ipairs(view.diff_wins(tabpage or vim.api.nvim_get_current_tabpage())) do
-      pcall(vim.api.nvim_win_set_cursor, win, { c.line, 0 })
+    local shown = view._last_shown[tabpage]
+    if not (shown and shown.file_entry and shown.file_entry.path == c.file) then
+      return notify(("comment is in %s — open that file first"):format(c.file), vim.log.levels.WARN)
+    end
+    local session = view.get_session(tabpage)
+    for _, win in ipairs(view.diff_wins(tabpage)) do
+      -- An old-side comment's line number only addresses a row of the
+      -- ORIGINAL pane; jumping it into the modified pane too would land on
+      -- an unrelated line that merely shares the same number.
+      if (c.side or "new") == M.side_for_win(win, session) then
+        pcall(vim.api.nvim_win_set_cursor, win, { c.line, 0 })
+      end
     end
   end)
 end
@@ -365,7 +433,12 @@ function M.export_file(tabpage, path)
     if not chosen or chosen == "" then
       return
     end
-    local abs = chosen:sub(1, 1) == "/" and chosen or (root .. "/" .. chosen)
+    -- expand() resolves "~/…" (and $VAR-style env references) before the
+    -- absolute/relative check below — without it, "~/review.md" is treated
+    -- as a literal relative path and creates a directory named "~" under the
+    -- git root instead of writing under the user's home.
+    local expanded = vim.fn.expand(chosen)
+    local abs = expanded:sub(1, 1) == "/" and expanded or (root .. "/" .. expanded)
     local ok, err = export.to_file(store.get_all(), model_of(tabpage), abs)
     if not ok then
       return notify(err, vim.log.levels.ERROR)

@@ -54,6 +54,18 @@ describe("comments actions", function()
       assert.is_nil(comments.prev_line("a.lua", 3, "new"))
     end)
 
+    it("returns the NEAREST previous comment, not the earliest", function()
+      -- With only comments at 3 and 9, prev_line(9) == 3 under both the
+      -- correct "nearest" implementation and a mutant that just returns the
+      -- first match found. A third comment at 5 pins down which one it is:
+      -- only "nearest" answers 5 here.
+      store.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
+      store.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "z" })
+      store.add({ file = "a.lua", line = 9, side = "new", type = "note", text = "y" })
+      assert.equals(5, comments.prev_line("a.lua", 9, "new"))
+      assert.is_nil(comments.prev_line("a.lua", 3, "new"))
+    end)
+
     it("ignores file-level comments when navigating", function()
       store.add({ file = "a.lua", line = 0, type = "note", text = "f" })
       store.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "x" })
@@ -72,6 +84,22 @@ describe("comments actions", function()
       assert.is_truthy(entries[1].label:match("bad thing"))
       assert.is_nil(entries[1].label:match("more"))
       assert.is_truthy(entries[2].label:match("Rename"))
+    end)
+
+    it("labels a range comment with both endpoints", function()
+      store.add({ file = "b.lua", line = 4, line_end = 8, side = "new", type = "suggestion", text = "range" })
+      local entries = comments.list_entries()
+      assert.equals(1, #entries)
+      assert.is_truthy(entries[1].label:match("b%.lua:4%-8"))
+    end)
+
+    it("labels a file-level comment with just the file path", function()
+      store.add({ file = "c.lua", line = 0, type = "praise", text = "nice file" })
+      local entries = comments.list_entries()
+      assert.equals(1, #entries)
+      assert.is_truthy(entries[1].label:match("PRAISE"))
+      assert.is_truthy(entries[1].label:match("c%.lua"))
+      assert.is_nil(entries[1].label:match("c%.lua:"))
     end)
   end)
 
@@ -143,6 +171,163 @@ describe("comments actions", function()
         sess = { git_root = repo, base_revision = base_before, target_revision = "WORKING" },
       })
       assert.equals(0, store.count())
+    end)
+  end)
+
+  -- `store.collides` deliberately allows several comments on ONE intent (the
+  -- design spec's "a group can have several; they are emitted in creation
+  -- order"). edit/delete resolve the comment under the cursor via
+  -- `at_cursor`, which acts directly when there is exactly one, and opens a
+  -- `vim.ui.select` picker — the same one `list` uses, with matching labels —
+  -- to disambiguate when there are several. A file-level comment never hits
+  -- the picker: `store.collides` enforces one per file.
+  describe("edit/delete disambiguation for multiple intent comments", function()
+    local popup = require("intentdiff.comments.popup")
+    local view = require("intentdiff.view")
+    local real_context, real_select, real_open, real_get_session
+
+    before_each(function()
+      real_context = comments.context
+      real_select = vim.ui.select
+      real_open = popup.open
+      -- edit/delete call marks.refresh() on success, which calls
+      -- view.get_session() unconditionally (even with no file shown for this
+      -- tabpage). The real one indexes codediff internals that view.load()
+      -- (never called in this spec) leaves nil, so it must be stubbed here —
+      -- these tests are about the disambiguation picker, not a real review
+      -- tab's pane rendering.
+      real_get_session = view.get_session
+      view.get_session = function() return nil end
+    end)
+
+    after_each(function()
+      comments.context = real_context
+      vim.ui.select = real_select
+      popup.open = real_open
+      view.get_session = real_get_session
+    end)
+
+    it("edits a single intent comment directly, without opening a picker", function()
+      comments.context = function() return { intent_title = "Rename" } end
+      local c = store.add({ intent_title = "Rename", type = "note", text = "only one" })
+
+      local select_called = false
+      vim.ui.select = function() select_called = true end
+      popup.open = function(_, cb) cb("issue", "edited text") end
+
+      comments.edit()
+
+      assert.is_false(select_called)
+      assert.equals("issue", c.type)
+      assert.equals("edited text", c.text)
+    end)
+
+    it("opens a picker to disambiguate several intent comments, and edits only the chosen one", function()
+      comments.context = function() return { intent_title = "Rename" } end
+      local first = store.add({ intent_title = "Rename", type = "note", text = "first" })
+      local second = store.add({ intent_title = "Rename", type = "note", text = "second" })
+
+      vim.ui.select = function(entries, _, cb)
+        for _, e in ipairs(entries) do
+          if e.comment == second then
+            return cb(e)
+          end
+        end
+      end
+      popup.open = function(_, cb) cb("praise", "edited second") end
+
+      comments.edit()
+
+      assert.equals("note", first.type)
+      assert.equals("first", first.text)
+      assert.equals("praise", second.type)
+      assert.equals("edited second", second.text)
+    end)
+
+    it("opens a picker to disambiguate on delete, removing only the chosen one", function()
+      comments.context = function() return { intent_title = "Rename" } end
+      local first = store.add({ intent_title = "Rename", type = "note", text = "first" })
+      local second = store.add({ intent_title = "Rename", type = "note", text = "second" })
+
+      -- Picks SECOND, not first: get_for_intent returns comments in creation
+      -- order, so a mutant that skips the picker and always acts on
+      -- candidates[1] would delete `first` here and pass by coincidence if
+      -- this test picked `first` instead.
+      vim.ui.select = function(entries, _, cb)
+        for _, e in ipairs(entries) do
+          if e.comment == second then
+            return cb(e)
+          end
+        end
+      end
+
+      comments.delete()
+
+      assert.equals(1, store.count())
+      assert.equals(first, store.get_all()[1])
+    end)
+  end)
+
+  -- `list` cannot yet OPEN a file (that lands with Task 8's file-opening
+  -- path), so jumping straight to a comment's line number in whatever is
+  -- currently on screen would land on the wrong line of the WRONG file
+  -- whenever the comment belongs to a different file. Same hazard for an
+  -- old-side comment jumped into a pane that isn't the original side. Both
+  -- must refuse rather than guess.
+  describe("list", function()
+    local view = require("intentdiff.view")
+    local tab
+    local real_select, real_get_session, real_diff_wins
+    local win_orig, win_mod
+
+    before_each(function()
+      tab = 900002 -- sentinel key, never a real tabpage id
+      real_select = vim.ui.select
+      real_get_session = view.get_session
+      real_diff_wins = view.diff_wins
+      win_orig = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, {
+        relative = "editor", row = 0, col = 0, width = 20, height = 5, style = "minimal",
+      })
+      win_mod = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, {
+        relative = "editor", row = 6, col = 0, width = 20, height = 5, style = "minimal",
+      })
+      -- Buffers need >= 5 lines for a cursor move to line 5 to succeed.
+      for _, w in ipairs({ win_orig, win_mod }) do
+        vim.api.nvim_buf_set_lines(vim.api.nvim_win_get_buf(w), 0, -1, false,
+          { "1", "2", "3", "4", "5" })
+      end
+      view.get_session = function() return { original_win = win_orig, modified_win = win_mod } end
+      view.diff_wins = function() return { win_orig, win_mod } end
+      view._last_shown[tab] = { file_entry = { path = "a.lua" } }
+    end)
+
+    after_each(function()
+      vim.ui.select = real_select
+      view.get_session = real_get_session
+      view.diff_wins = real_diff_wins
+      view._last_shown[tab] = nil
+      pcall(vim.api.nvim_win_close, win_orig, true)
+      pcall(vim.api.nvim_win_close, win_mod, true)
+    end)
+
+    it("refuses to jump when the chosen comment's file differs from what's shown", function()
+      store.add({ file = "b.lua", line = 5, side = "new", type = "note", text = "x" })
+      vim.ui.select = function(entries, _, cb) cb(entries[1]) end
+
+      comments.list(tab)
+
+      assert.equals(1, vim.api.nvim_win_get_cursor(win_orig)[1])
+      assert.equals(1, vim.api.nvim_win_get_cursor(win_mod)[1])
+    end)
+
+    it("jumps only the pane whose side matches an old-side comment", function()
+      store.add({ file = "a.lua", line = 5, side = "old", type = "note", text = "x" })
+      vim.ui.select = function(entries, _, cb) cb(entries[1]) end
+
+      comments.list(tab)
+
+      assert.equals(5, vim.api.nvim_win_get_cursor(win_orig)[1])
+      assert.equals(1, vim.api.nvim_win_get_cursor(win_mod)[1])
     end)
   end)
 end)

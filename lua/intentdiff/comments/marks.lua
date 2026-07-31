@@ -253,6 +253,14 @@ function M.refresh(tabpage)
   local mod_buf = session.modified_win and vim.api.nvim_win_is_valid(session.modified_win)
     and vim.api.nvim_win_get_buf(session.modified_win) or nil
   -- Inline layout puts one buffer in both windows; render it once, as "new".
+  -- Old-side comments are therefore deliberately invisible/unreachable in
+  -- inline layout — do NOT "fix" this by rendering them here too. The single
+  -- buffer inline shows is the MODIFIED file's content; an old-side line
+  -- number addresses a row of the ORIGINAL file, which simply has no
+  -- corresponding row in this buffer to anchor a box to. The check just below
+  -- (`orig_buf ~= mod_buf`) is what skips the old-side render; it exists to
+  -- avoid exactly that mis-positioned render, not merely to avoid rendering
+  -- the same buffer twice.
   if orig_buf and orig_buf ~= mod_buf then
     M.render_buffer(orig_buf, file, "old")
   end
@@ -261,6 +269,26 @@ function M.refresh(tabpage)
   end
   if orig_buf and mod_buf and orig_buf ~= mod_buf then
     M.align(orig_buf, mod_buf, file)
+  else
+    -- M.align is the ONLY place that clears ns_padding. Skipping it here
+    -- (inline layout, or a whole-file pane with only one side populated)
+    -- must not also skip that cleanup, or padding extmarks set while this
+    -- buffer was previously shown side-by-side survive a layout toggle:
+    -- e.g. a working-tree review's modified buffer picks up old-side-driven
+    -- padding in side-by-side layout, the user toggles to inline (which
+    -- reuses that same buffer), and without this the blank filler lines
+    -- would render forever under a comment box that isn't even shown here.
+    -- Not `ipairs({ orig_buf, mod_buf })`: a table literal with a nil first
+    -- element (orig_buf nil, mod_buf set) makes ipairs stop before ever
+    -- looking at index 2 — the same nil-hole this codebase's pane_windows
+    -- helper (view.lua) exists to avoid — so each buffer is cleared
+    -- explicitly instead.
+    if orig_buf then
+      pcall(vim.api.nvim_buf_clear_namespace, orig_buf, M.ns_padding, 0, -1)
+    end
+    if mod_buf then
+      pcall(vim.api.nvim_buf_clear_namespace, mod_buf, M.ns_padding, 0, -1)
+    end
   end
 end
 
