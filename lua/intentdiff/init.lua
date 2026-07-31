@@ -224,6 +224,11 @@ end
 local auto_open_first
 local refold_shown_file
 
+-- Forward-declared: classify_and_render re-derives an on-screen hover preview
+-- from each newly rendered model, but the hover machinery (apply_hover and the
+-- sidebar-cursor plumbing it reads) lives further down the file.
+local rerender_preview
+
 local function classify_and_render(token, opts)
   local classify = require("intentdiff.classify")
   local entry = sessions[token]
@@ -238,6 +243,12 @@ local function classify_and_render(token, opts)
   -- flat "All changes" group holds every hunk, so its first file's diff is
   -- complete on its own even before classification groups anything.
   auto_open_first(token)
+  -- `r` (reclassify) can land here with a preview already on screen — the key
+  -- is a sidebar mapping, so the cursor is typically sitting on the very group
+  -- row that raised it. The sidebar has just been redrawn as the flat loading
+  -- model; re-derive the preview from it so the panes agree with the row the
+  -- cursor is on. No-op when nothing is previewed (the first-open case).
+  rerender_preview(token)
   start_elapsed_timer(token) -- live "⟳ classifying… Ns" counter while this run is in flight
   local previous_hash = require("intentdiff.cache").get_last_hash(entry.scope_key)
   classify.run(inventory, {
@@ -283,11 +294,23 @@ local function classify_and_render(token, opts)
     -- picked their own file (manually or via ]c/[c) while this was running,
     -- in which case their view is left alone and just re-folded to match
     -- whichever group it now belongs to.
-    if current.user_selected then
+    --
+    -- A hover preview owning the panes counts as "leave the view alone" too,
+    -- and this is the DEFAULT first-use path: auto-open returns focus to the
+    -- sidebar, the user presses `j` onto a group row, a preview appears, and
+    -- the provider answers a second later. Rendering a file into the panes
+    -- here would replace that preview while the sidebar cursor still sits on a
+    -- group row — and apply_hover's hover_key de-dupe makes re-entering that
+    -- same row a no-op, so the cursor would name one intent while the panes
+    -- showed another, with no way back. Refold instead (view.rebind_shown_file
+    -- defers it to the eventual restore, since the file is off screen), then
+    -- re-derive the preview itself from the new grouping.
+    if current.user_selected or require("intentdiff.view")._preview_active[current.sess.tabpage] then
       refold_shown_file(token)
     else
       auto_open_first(token)
     end
+    rerender_preview(token)
   end)
 end
 
@@ -443,6 +466,16 @@ auto_open_first = function(token)
     return
   end
   local tabpage = entry.sess.tabpage
+  -- A hover preview owns the panes: auto-open must never yank it out from
+  -- under the sidebar cursor. Both branches below would: the de-dupe branch
+  -- would fold the preview buffers, the open_file branch would silently
+  -- replace the preview with a file. classify_and_render's completion handler
+  -- routes around this case explicitly, but the LOADING-phase call above (and
+  -- any future caller) reaches it with a preview up whenever `r` is pressed
+  -- from a group row, so the guard belongs here too.
+  if require("intentdiff.view")._preview_active[tabpage] then
+    return
+  end
   if same_as_shown(tabpage, file_entry) then
     require("intentdiff.view").apply_group_folds(tabpage, file_entry.hunks)
     return
@@ -494,7 +527,17 @@ refold_shown_file = function(token)
   for _, g in ipairs(entry.model.groups or {}) do
     for _, f in ipairs(g.files or {}) do
       if f.path == path then
-        view.apply_group_folds(tabpage, f.hunks, fold_opts)
+        if view._preview_active[tabpage] then
+          -- The shown file is NOT on screen — a hover preview is. Folding now
+          -- would fold the preview's buffers (view.apply_group_folds refuses,
+          -- by design), so hand the new hunk set to the deferred restore
+          -- instead: leaving the preview re-renders the file, and it must do
+          -- so with the classified group's filter rather than the flat
+          -- "All changes" one it was opened with.
+          view.rebind_shown_file(tabpage, f)
+        else
+          view.apply_group_folds(tabpage, f.hunks, fold_opts)
+        end
         return
       end
     end
@@ -630,6 +673,31 @@ local function apply_hover(token)
     return
   end
   view.show_preview(entry.sess, m.kind == "dir" and subtree_group(group, m.dir_path) or group)
+end
+
+--- Re-derive an already-on-screen hover preview from the CURRENT model.
+---
+--- Called after every model swap (classification starting and completing).
+--- The sidebar has just been redrawn, so the row the cursor sits on may now
+--- mean a different intent — and apply_hover's hover_key de-dupe would make
+--- re-entering that same row a no-op, freezing the panes on the previous
+--- model's grouping. Dropping hover_key first is exactly what makes the
+--- re-derive possible; the row itself, not a remembered key, is the source of
+--- truth for what the panes should show.
+---
+--- No-op unless a preview is actually up: with a file in the panes, the model
+--- swap is handled by refold_shown_file/auto_open_first and re-running the
+--- hover would be a spurious render.
+rerender_preview = function(token)
+  local entry = sessions[token]
+  if not entry or not entry.sess then
+    return
+  end
+  if not require("intentdiff.view")._preview_active[entry.sess.tabpage] then
+    return
+  end
+  entry.hover_key = nil
+  apply_hover(token)
 end
 
 --- Debounced CursorMoved handler on the sidebar buffer.

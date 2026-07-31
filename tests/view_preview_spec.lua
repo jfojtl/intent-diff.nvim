@@ -214,6 +214,53 @@ describe("view: intent preview", function()
     assert.equals("inline", session().layout)
   end)
 
+  it("restoring onto an untracked file keeps the session's inline layout", function()
+    -- M.restore now fires on ordinary sidebar cursor movement (a file row),
+    -- so M.show_file's whole-file branch hardcoding "side-by-side" silently
+    -- reverted a user working in inline layout just by scrolling the sidebar
+    -- past an untracked/added/deleted file.
+    local sess, file_entry, group = untracked_fixture()
+    show(sess, file_entry)
+    local function session() return view.get_session(sess.tabpage) end
+    assert.equals("side-by-side", session().layout)
+
+    local toggled = false
+    view.toggle_layout(sess.tabpage, { on_done = function() toggled = true end })
+    assert.truthy(helpers.wait_for(function() return toggled end, 10000))
+    assert.equals("inline", session().layout)
+    local wins_before = #vim.api.nvim_tabpage_list_wins(sess.tabpage)
+
+    assert.is_true(view.show_preview(sess, group))
+    assert.is_true(view.restore(sess))
+    assert.truthy(helpers.wait_for(function()
+      local s = session()
+      return s and s.modified_win and vim.api.nvim_win_is_valid(s.modified_win) or nil
+    end, 10000))
+    vim.wait(300, function() return false end, 20)
+
+    assert.equals("inline", session().layout,
+      "leaving a preview must not change the layout the user chose")
+    assert.equals(wins_before, #vim.api.nvim_tabpage_list_wins(sess.tabpage))
+  end)
+
+  it("falls back to a single-pane preview when the session owns one pane window", function()
+    -- Deliberate, documented limitation: show_preview derives its layout from
+    -- session.layout, but a "??"/"A"/"D" anchor file has already collapsed the
+    -- session to ONE pane window, and a preview may never create a window to
+    -- get the second one back. So the preview renders inline even though the
+    -- session still calls itself side-by-side.
+    local sess, file_entry, group = untracked_fixture()
+    show(sess, file_entry)
+    assert.equals("side-by-side", view.get_session(sess.tabpage).layout)
+    assert.is_nil(view.get_session(sess.tabpage).original_win)
+    local wins_before = #vim.api.nvim_tabpage_list_wins(sess.tabpage)
+
+    assert.is_true(view.show_preview(sess, group))
+    assert.equals(1, #view._preview_bufs[sess.tabpage],
+      "a one-window session must get a one-buffer (inline) preview")
+    assert.equals(wins_before, #vim.api.nvim_tabpage_list_wins(sess.tabpage))
+  end)
+
   it("toggles layout from inside a preview and comes back previewing", function()
     local sess, file_entry, group = fixture()
     show(sess, file_entry)

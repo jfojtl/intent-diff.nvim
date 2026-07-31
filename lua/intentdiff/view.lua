@@ -74,9 +74,12 @@ M._active_folds = {}
 ---     applied group folds.
 M._last_shown = {}
 
---- Group currently previewed per tabpage, or nil. Set by M.show_preview,
---- cleared by M.restore. The TabEnter re-assert and the fold machinery both
---- consult it: preview buffers must never be folded to a group filter.
+--- Group currently previewed per tabpage, or nil. Set by M.show_preview and
+--- cleared by M.show_file — i.e. by whatever actually puts a real file back in
+--- the panes, including but not limited to M.restore. The TabEnter re-assert
+--- and M.apply_group_folds both consult it: preview buffers must never be
+--- folded to a group filter, and a value left behind after the preview is gone
+--- disables both of those permanently for the tab.
 M._preview_active = {}
 
 --- The session behind each tabpage's active preview, so the preview's own
@@ -186,9 +189,25 @@ end
 --- between them, so codediff's normal context-lines padding would bleed a
 --- few lines of the NEXT (unowned) sub-hunk into view — unlike modified-file
 --- hunks, where that padding is genuine surrounding code.
+---
+--- Refuses to do anything while a hover preview owns the panes: preview
+--- buffers are our own scratch render of a WHOLE intent (many files, with
+--- separators and filler lines), not the file these `hunks` line numbers were
+--- computed against, so a foldexpr built from them folds arbitrary preview
+--- content away — measured 10 of 14 lines closed. The guard lives here rather
+--- than in each caller because the callers are many and growing (M.show_file,
+--- M.toggle_layout, `reassert`, and two separate paths in init.lua's
+--- classification-completion handler), and every one of them wants the same
+--- answer. `reassert` keeps its own earlier return as well, for a different
+--- reason: it must also skip re-installing the non-preview pane keymaps over
+--- the preview's own.
+--- @return boolean whether folds were applied
 function M.apply_group_folds(tabpage, hunks, opts)
   opts = opts or {}
   ensure_folds_augroup()
+  if M._preview_active[tabpage] then
+    return false
+  end
   local session = cd.lifecycle.get_session(tabpage)
   if not session or not session.stored_diff_result then
     return false
@@ -510,10 +529,9 @@ end
 --- ("side-by-side" or "inline"), then call `on_ready` once content has
 --- actually loaded — synchronously for untracked files, after codediff's
 --- async virtual-file fetch completes for "A"/"D" (wait_for_virtual_file
---- above). Shared by M.show_file (always side-by-side, matching the
---- pre-existing behavior of a fresh sidebar selection) and M.toggle_layout
---- (whichever layout the user just toggled to) so the status dispatch and
---- the async-ready wait live in exactly one place.
+--- above). Shared by M.show_file (the session's CURRENT layout) and
+--- M.toggle_layout (whichever layout the user just toggled to) so the status
+--- dispatch and the async-ready wait live in exactly one place.
 local function show_whole_file_in_layout(tabpage, sess, file_entry, abs_path, target_layout, on_ready)
   if target_layout == "inline" then
     show_whole_file_inline(tabpage, sess, file_entry, abs_path)
@@ -547,6 +565,21 @@ function M.show_file(sess, file_entry, opts)
   local abs_path = sess.git_root .. "/" .. file_entry.path
   M._last_shown[tabpage] = { sess = sess, file_entry = file_entry }
 
+  -- Putting a real file in the panes ENDS any preview that owned them — the
+  -- preview's buffers are about to be replaced by codediff's, below. Retiring
+  -- the preview bookkeeping HERE rather than in each caller is what keeps
+  -- M._preview_active from going stale: a truthy _preview_active for a tab
+  -- whose panes show a file makes `reassert` early-return forever (killing the
+  -- TabEnter re-assert of group folds and of the group-scoped ]c/[c), makes
+  -- M.apply_group_folds refuse forever, and leaves M._preview_bufs naming
+  -- orphaned buffers. M.restore is no longer the only caller that legitimately
+  -- takes the panes over; classification completing mid-preview can reach
+  -- show_file too (init.lua).
+  local prior_preview = M._preview_bufs[tabpage]
+  M._preview_active[tabpage] = nil
+  M._preview_sess[tabpage] = nil
+  M._preview_bufs[tabpage] = nil
+
   -- Whole-file statuses render a single pane. Added and untracked files are
   -- split into sub-hunks (hunks.split_added), so a group may own only part of
   -- one — fold the rest away exactly as for modified files. "D" is excluded:
@@ -562,7 +595,17 @@ function M.show_file(sess, file_entry, opts)
   -- have a single hunk spanning everything anyway, so skipping the fold is a
   -- no-op in side-by-side layout and avoids this inline-layout bug.
   if file_entry.status == "??" or file_entry.status == "A" or file_entry.status == "D" then
-    show_whole_file_in_layout(tabpage, sess, file_entry, abs_path, "side-by-side", function()
+    -- The session's CURRENT layout, not a hardcoded "side-by-side": this is
+    -- reached on every sidebar cursor move onto a file row (M.restore), so
+    -- hardcoding it silently reverted a user working in inline layout back to
+    -- side-by-side just by scrolling the sidebar past an untracked/added/
+    -- deleted file. codediff keeps session.layout current for both entry
+    -- points show_whole_file_in_layout dispatches to (side_by_side's
+    -- show_untracked_file sets "side-by-side"; inline_view's show_single_file
+    -- sets "inline"), so reading it back is exact rather than a guess.
+    local current = cd.lifecycle.get_session(tabpage)
+    local layout = (current and current.layout == "inline") and "inline" or "side-by-side"
+    show_whole_file_in_layout(tabpage, sess, file_entry, abs_path, layout, function()
       if file_entry.status ~= "D" and file_entry.hunks then
         M.apply_group_folds(tabpage, file_entry.hunks, { context = 0 })
       end
@@ -570,6 +613,7 @@ function M.show_file(sess, file_entry, opts)
         opts.on_ready()
       end
     end)
+    retire_preview_bufs(prior_preview)
     return
   end
 
@@ -583,6 +627,12 @@ function M.show_file(sess, file_entry, opts)
     modified_revision = sess.target_revision or "WORKING",
   }
   cd.view.update(tabpage, session_config, false)
+  -- Strictly AFTER cd.view.update: it moves session.*_bufnr off the preview
+  -- buffers from a callback it schedules itself, and retire_preview_bufs also
+  -- defers by one tick — so queueing ours second is what guarantees it never
+  -- deletes a buffer the session still names. (This ordering used to live in
+  -- M.restore, the only caller that had preview buffers to retire.)
+  retire_preview_bufs(prior_preview)
   when_diff_ready(tabpage, abs_path, function()
     M.apply_group_folds(tabpage, file_entry.hunks)
     M.install_keymaps(tabpage)
@@ -724,9 +774,29 @@ function M.show_preview(sess, group)
     return false
   end
   local original_win, modified_win = session.original_win, session.modified_win
-  local single = original_win == modified_win
-    or not (original_win and vim.api.nvim_win_is_valid(original_win))
-    or not (modified_win and vim.api.nvim_win_is_valid(modified_win))
+  -- The session's own layout decides, so that `t` inside a preview
+  -- (M.toggle_preview_layout — which flips session.layout through codediff's
+  -- toggle and then re-renders the preview) actually changes how the preview
+  -- looks. Deriving it from window identity alone made the preview's layout an
+  -- accident of whatever the last-shown file happened to need.
+  --
+  -- The window structure is still a hard floor: two panes need two distinct,
+  -- valid pane windows, and when the last-shown file is untracked/added/
+  -- deleted codediff's single-file entry points have already collapsed the
+  -- session to ONE window. We may not manufacture the second one — this
+  -- function must never create or close a window (probe 2 section D:
+  -- hand-built panes orphan a window and corrupt the following restore), so a
+  -- single-window session falls back to a single-pane preview even when
+  -- session.layout says "side-by-side". Known, deliberate limitation: with a
+  -- ??/A/D file as the anchor, the preview stays inline and `t` cannot change
+  -- that until a modified file is shown again.
+  local two_pane = session.layout ~= "inline"
+    and original_win ~= nil
+    and modified_win ~= nil
+    and original_win ~= modified_win
+    and vim.api.nvim_win_is_valid(original_win)
+    and vim.api.nvim_win_is_valid(modified_win)
+  local single = not two_pane
   local layout = single and "inline" or "side-by-side"
   local rendered = require("intentdiff.preview").render(group, layout,
     { max_lines = require("intentdiff.config").options.preview.max_lines })
@@ -790,9 +860,6 @@ function M.restore(sess)
   if not shown then
     return false
   end
-  M._preview_active[tabpage] = nil
-  local prior_bufs = M._preview_bufs[tabpage]
-  M._preview_bufs[tabpage] = nil
   local session = cd.lifecycle.get_session(tabpage)
   if session then
     for _, win in ipairs(pane_windows(session)) do
@@ -802,12 +869,35 @@ function M.restore(sess)
       end
     end
   end
+  -- Clearing M._preview_active/_preview_sess and retiring the preview buffers
+  -- is M.show_file's job now (see its comment): it is what actually replaces
+  -- the preview in the panes, and doing it there covers every caller that
+  -- does so, not just this one.
   M.show_file(shown.sess, shown.file_entry)
-  -- M.show_file's real-file path (cd.view.update) only finishes moving
-  -- session.*_bufnr off of the panes' old buffers on a tick it schedules
-  -- itself; retiring the vacated preview buffers here (also deferred, see
-  -- preview_buf) queues strictly after that, so it never races it.
-  retire_preview_bufs(prior_bufs)
+  return true
+end
+
+--- Re-point `tabpage`'s deferred restore at `file_entry` — the same file
+--- M._last_shown already names, but carrying a different (freshly classified)
+--- hunk set — WITHOUT touching what the panes currently display.
+---
+--- Used when classification completes while a hover preview owns the panes.
+--- The last-shown file is off screen, so applying its new group's folds now
+--- would mean folding the PREVIEW buffers (M.apply_group_folds refuses, by
+--- design), and skipping the refold entirely would leave the file wearing the
+--- pre-classification "All changes" filter the next time M.restore renders it.
+--- Recording the new entry here defers the refold to that render instead.
+---
+--- Replaces the stored entry rather than mutating it: file_entry tables are
+--- shared with the model (classify.group_files), and the model is not ours to
+--- edit.
+--- @return boolean whether there was a last-shown file to re-point
+function M.rebind_shown_file(tabpage, file_entry)
+  local shown = M._last_shown[tabpage]
+  if not shown then
+    return false
+  end
+  M._last_shown[tabpage] = { sess = shown.sess, file_entry = file_entry }
   return true
 end
 
