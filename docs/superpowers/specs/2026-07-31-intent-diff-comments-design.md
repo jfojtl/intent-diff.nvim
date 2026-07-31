@@ -301,8 +301,9 @@ Neither clears the store: exporting twice, or to both targets, is normal.
 ## Export format
 
 Numbering runs continuously across groups. Groups appear in sidebar order with
-`Ungrouped` last. Within a group, comments sort by file in tree order, then by
-line, with the file-level comment for a file before its line comments.
+`Ungrouped` last. Within a group, comments sort by file path, then by line,
+with the file-level comment for a file before its line comments (this can
+differ from the sidebar's tree order, which lists directories first).
 
 ```markdown
 I reviewed your code and have the following comments. Please address them.

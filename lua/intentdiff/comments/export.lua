@@ -16,7 +16,10 @@ local UNMATCHED = "Unmatched comments"
 --- Does `hunk` cover `line` on `side`? Ranges are END-EXCLUSIVE — see
 --- hunks.lua's range(): { start_line = s, end_line = s + len }.
 local function hunk_covers(hunk, line, side)
-  local r = (side == "old") and hunk.original or hunk.modified
+  local r = hunk.modified
+  if side == "old" then
+    r = hunk.original
+  end
   if not r then
     return false
   end
@@ -73,12 +76,18 @@ local function location(c)
 end
 
 --- Sort key within a group: file path, then line, with the file-level comment
---- for a file ahead of its line comments.
+--- for a file ahead of its line comments, then side as a final tiebreak so an
+--- old-side and new-side comment on the same line always order the same way
+--- (table.sort is not stable, so without this the output could vary between
+--- exports of the same store).
 local function before(a, b)
   if a.file ~= b.file then
     return (a.file or "") < (b.file or "")
   end
-  return (a.line or 0) < (b.line or 0)
+  if (a.line or 0) ~= (b.line or 0) then
+    return (a.line or 0) < (b.line or 0)
+  end
+  return (a.side or "new") < (b.side or "new")
 end
 
 local function entry_lines(index, c, out)
@@ -159,6 +168,10 @@ function M.generate(comments, model)
   if buckets[0] then
     emit(buckets[0]) -- flat fallback: no headings
   end
+  -- "Ungrouped last" is not enforced here — it holds only because
+  -- classify.reconcile appends the synthetic Ungrouped group last. A future
+  -- model builder that reorders groups will not break this loop, but will
+  -- silently break that ordering guarantee.
   for gi, g in ipairs(groups) do
     local bucket = buckets[gi]
     if bucket then
@@ -211,8 +224,11 @@ function M.to_file(comments, model, path)
   end
   local dir = vim.fn.fnamemodify(path, ":h")
   if dir ~= "" and vim.fn.isdirectory(dir) == 0 then
-    local ok = pcall(vim.fn.mkdir, dir, "p")
-    if not ok then
+    -- mkdir signals some failures by returning 0 rather than erroring, so a
+    -- successful pcall is not enough: check the return value too, or a real
+    -- failure here surfaces as a misleading "cannot write <path>" below.
+    local ok, made = pcall(vim.fn.mkdir, dir, "p")
+    if not (ok and made == 1) then
       return false, "cannot create " .. dir
     end
   end

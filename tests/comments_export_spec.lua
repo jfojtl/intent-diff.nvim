@@ -1,6 +1,16 @@
 local export = require("intentdiff.comments.export")
 
 --- A model with two groups. Hunk ranges are END-EXCLUSIVE, matching hunks.lua.
+--
+-- The account.ts and client.ts hunks are deliberately ASYMMETRIC (original ~=
+-- modified), the way any hunk with a net add or delete is in practice. This
+-- lets tests pin old-side vs new-side resolution against DIFFERENT ranges:
+-- a hunk where original == modified can't tell a correct implementation from
+-- one that resolves every side against the same range.
+--   account.ts: shrank.  original 40-51 (incl.), modified 40-49 (incl.) —
+--     line 50 is in the old range only.
+--   client.ts:  grew.    original 40-49 (incl.), modified 40-55 (incl.) —
+--     line 54 is in the new range only.
 local function model()
   return {
     state = "ready",
@@ -12,7 +22,7 @@ local function model()
             original = { start_line = 4, end_line = 6 },
             modified = { start_line = 4, end_line = 6 } },
           { id = "src/services/account.ts:1", file = "src/services/account.ts",
-            original = { start_line = 40, end_line = 50 },
+            original = { start_line = 40, end_line = 52 },
             modified = { start_line = 40, end_line = 50 } },
         },
         files = {
@@ -24,8 +34,8 @@ local function model()
         title = "Add retry logic to HTTP client",
         hunks = {
           { id = "src/http/client.ts:1", file = "src/http/client.ts",
-            original = { start_line = 40, end_line = 60 },
-            modified = { start_line = 40, end_line = 60 } },
+            original = { start_line = 40, end_line = 50 },
+            modified = { start_line = 40, end_line = 56 } },
         },
         files = { { path = "src/http/client.ts", status = "M" } },
       },
@@ -145,11 +155,44 @@ describe("comments.export", function()
   end)
 
   it("resolves an old-side comment against the hunk's original range", function()
+    -- account.ts hunk shrank: original covers up to line 51, modified only up
+    -- to line 49. Line 50 is old-range-only, so this fails if old-side
+    -- resolution is ever collapsed onto the modified range.
     local md = export.generate({
-      { file = "src/services/account.ts", line = 45, side = "old", type = "note", text = "x" },
+      { file = "src/services/account.ts", line = 50, side = "old", type = "note", text = "x" },
     }, model())
     assert.is_nil(md:match("Unmatched"))
     assert.is_truthy(md:match("## Rename UserService"))
+  end)
+
+  it("does not resolve a new-side comment against a shrunk hunk's old-only range", function()
+    -- Same line 50, but new-side: only the old range covers it, so a
+    -- new-side comment there must NOT match.
+    local md = export.generate({
+      { file = "src/services/account.ts", line = 50, side = "new", type = "note", text = "shrank-new" },
+    }, model())
+    assert.is_truthy(md:match("## Unmatched comments"))
+  end)
+
+  it("resolves a new-side comment against the hunk's modified range, not original", function()
+    -- client.ts hunk grew: modified covers up to line 55, original only up to
+    -- line 49. Line 54 is new-range-only, so this fails if new-side
+    -- resolution is ever collapsed onto the original range.
+    local md = export.generate({
+      { file = "src/http/client.ts", line = 54, side = "new", type = "note", text = "grew-new" },
+    }, model())
+    assert.is_nil(md:match("Unmatched"))
+    assert.is_truthy(md:match("## Add retry logic"))
+  end)
+
+  it("does not resolve an old-side comment against a grown hunk's new-only range", function()
+    -- Same line 54, but old-side: only the new range covers it, so an
+    -- old-side comment there must NOT match. This is the exact case that
+    -- proves old-side resolution isn't silently using hunk.modified.
+    local md = export.generate({
+      { file = "src/http/client.ts", line = 54, side = "old", type = "note", text = "grew-old" },
+    }, model())
+    assert.is_truthy(md:match("## Unmatched comments"))
   end)
 
   it("resolves a file-level comment by file, not by line", function()
