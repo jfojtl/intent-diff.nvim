@@ -1440,17 +1440,32 @@ describe("comments in a review tab", function()
   -- shows its own footer; listing them in the tab-wide cheatsheet would
   -- advertise keys that do nothing on any of the surfaces it describes.
   it("omits the popup-local keys from the help", function()
-    require("intentdiff.config").setup({})
+    -- Distinctive keys, so the assertion cannot pass by coincidence: the
+    -- defaults are <Tab>, <C-s> and q, and <Tab>/q are also bound elsewhere in
+    -- the config (sidebar next_group, view quit) — a test written against the
+    -- defaults would be asserting about someone else's key.
+    require("intentdiff.config").setup({
+      keymaps = { comments = {
+        popup_cycle_type = "<F13>", popup_submit = "<F14>", popup_cancel = "<F15>",
+      } },
+    })
+    local km = require("intentdiff.config").options.keymaps.comments
     local sections = require("intentdiff.keymap_help")._build_sections(
       require("intentdiff.config").options.keymaps)
+    local found_comments = false
     for _, s in ipairs(sections) do
       if s.title == "COMMENTS" then
+        found_comments = true
         for _, item in ipairs(s.items) do
-          assert.are_not.equals("Cycle the comment type", item[2])
-          assert.are_not.equals("<C-s>", item[1])
+          -- All three, read from config — not just popup_submit.
+          for _, action in ipairs({ "popup_cycle_type", "popup_submit", "popup_cancel" }) do
+            assert.are_not.equals(km[action], item[1],
+              action .. " is popup-local and must not be listed tab-wide")
+          end
         end
       end
     end
+    assert.is_true(found_comments, "the COMMENTS section must exist for this to mean anything")
   end)
 
   it("omits a disabled comment action from the help", function()
@@ -1628,6 +1643,125 @@ describe("comments in a review tab", function()
     -- memory, so the next review does not inherit them.
     require("intentdiff").close(tab)
     assert.equals(0, store.count())
+  end)
+
+  -- Correction B, pinned by its CONSEQUENCE rather than by where the call
+  -- sits. attach_session chooses between branch keying and revision-pair
+  -- keying by reading sess.base_revision/target_revision, which are only
+  -- assigned late, inside the resolve_revision callback. Attach any earlier
+  -- (e.g. where `sess` is first created) and it sees neither field, takes the
+  -- working-tree branch for EVERY review, and a `:IntentDiff HEAD~1` review
+  -- both loads and overwrites the working-tree review's comments. Here that
+  -- would write the branch-keyed file and this test would fail.
+  it("keys a revision-pinned review by its revisions, not by the branch", function()
+    local repo = helpers.make_repo({ ["a.lua"] = table.concat(vim.fn.range(1, 40), "\n") })
+    helpers.write_file(repo, "a.lua", "SECOND\n" .. table.concat(vim.fn.range(2, 40), "\n"))
+    helpers.git(repo, "add", "-A")
+    helpers.git(repo, "commit", "-q", "-m", "second")
+    vim.cmd("cd " .. repo)
+
+    local cache_dir = vim.fn.tempname()
+    require("intentdiff").setup({
+      cache_dir = cache_dir,
+      provider = function(_, cb)
+        vim.schedule(function() cb({ groups = {} }) end)
+        return { cancel = function() end }
+      end,
+    })
+    require("intentdiff").open("HEAD~1")
+    local tab = vim.api.nvim_get_current_tabpage()
+    -- The revisions and the attach land together, in one scheduled callback:
+    -- once base_revision is observable from out here, attach_session has run.
+    local entry = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.sess.base_revision and s or nil
+    end, 10000)
+    assert.truthy(entry, "the review never resolved its base revision")
+    assert.equals("WORKING", entry.sess.target_revision)
+
+    -- Adding a comment persists it under whatever key the store attached to.
+    store.add({ file = "a.lua", line = 2, side = "new", type = "note", text = "pinned" })
+
+    local storage = require("intentdiff.comments.storage")
+    local root = entry.sess.git_root -- codediff's resolved root, symlinks and all
+    local branch = vim.trim(helpers.git(root, "rev-parse", "--abbrev-ref", "HEAD"))
+    local branch_key = storage.key(root, nil, nil, branch)
+    local pair_key = storage.key(root, entry.sess.base_revision, entry.sess.target_revision, nil)
+    assert.are_not.equals(branch_key, pair_key, "the two keys must differ for this to mean anything")
+
+    assert.equals(1, vim.fn.filereadable(storage.path(pair_key)),
+      "a HEAD~1-pinned review must persist under its revision pair")
+    assert.equals(0, vim.fn.filereadable(storage.path(branch_key)),
+      "attaching before the revisions are known would key it by branch instead")
+
+    require("intentdiff").close(tab)
+  end)
+
+  -- M.open_path is the file-opening path comments.list jumps through. Every
+  -- other test stubs it, so this is the only place the real one — and the
+  -- on_shown callbacks threaded into open_file and select_file — actually run.
+  it("opens a file by path and reports back once it is on screen", function()
+    local repo = helpers.make_repo({
+      ["a.lua"] = table.concat(vim.fn.range(1, 40), "\n"),
+      ["b.lua"] = "x",
+    })
+    helpers.write_file(repo, "a.lua", "CHANGED\n" .. table.concat(vim.fn.range(2, 40), "\n"))
+    helpers.write_file(repo, "b.lua", "y")
+    vim.cmd("cd " .. repo)
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = function(_, cb)
+        vim.schedule(function()
+          cb({ groups = { { title = "Both", hunk_ids = { "a.lua:1", "b.lua:1" } } } })
+        end)
+        return { cancel = function() end }
+      end,
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local entry = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model.state == "ready" and s or nil
+    end, 10000)
+    assert.truthy(entry, "the review never became ready")
+
+    local view = require("intentdiff.view")
+    local shown = helpers.wait_for(function()
+      local s = view._last_shown[tab]
+      return s and s.file_entry and s.file_entry.path or nil
+    end, 10000)
+    assert.truthy(shown, "no file was ever auto-opened")
+
+    -- Whichever file is NOT the one on screen.
+    local other
+    for _, f in ipairs(entry.model.groups[1].files) do
+      if f.path ~= shown then
+        other = f.path
+      end
+    end
+    assert.truthy(other, "the fixture must group two files")
+
+    local fired = false
+    assert.is_true(require("intentdiff").open_path(tab, other, function() fired = true end))
+    assert.truthy(helpers.wait_for(function() return fired or nil end, 10000),
+      "on_shown never fired for a file that had to be rendered")
+    assert.equals(other, view._last_shown[tab].file_entry.path)
+
+    -- Asking again for the file now on screen takes select_file's
+    -- same_as_shown short-circuit, which never calls open_file at all — its
+    -- own on_shown call is the only thing that answers there.
+    local again = false
+    assert.is_true(require("intentdiff").open_path(tab, other, function() again = true end))
+    assert.truthy(helpers.wait_for(function() return again or nil end, 10000),
+      "on_shown never fired for a file that was already on screen")
+
+    -- A path the model does not mention opens nothing and says so.
+    local ghost = false
+    assert.is_false(require("intentdiff").open_path(tab, "nope.lua", function() ghost = true end))
+    assert.is_false(ghost)
+    assert.equals(other, view._last_shown[tab].file_entry.path)
+
+    require("intentdiff").close(tab)
   end)
 
   it("re-files comments under new intents after re-classification", function()

@@ -107,8 +107,7 @@ local function build_sections(keymaps)
   -- to any tab-wide surface this cheatsheet describes, and the float shows its
   -- own footer.
   local ckm = keymaps.comments or {}
-  local cfg = require("intentdiff.config").options.comments or {}
-  if cfg.enabled ~= false then
+  if require("intentdiff.config").comments_enabled() then
     local comments = section("COMMENTS", {
       { ckm.add_comment, "Add a comment (pick the type)" },
       { ckm.add_note, "Add a note" },

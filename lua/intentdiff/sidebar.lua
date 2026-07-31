@@ -5,13 +5,6 @@ M.ns = vim.api.nvim_create_namespace("intentdiff_sidebar")
 local tree = require("intentdiff.tree")
 local hl = require("intentdiff.highlight")
 
---- Whether the review-comment feature is on. Every comment hook in this file
---- is gated on it, so with `comments.enabled = false` the sidebar installs no
---- comment keys and renders no signs.
-local function comments_enabled()
-  return (require("intentdiff.config").options.comments or {}).enabled ~= false
-end
-
 --- Hard-wrap `text` to `width` display columns on word boundaries, hard-cutting
 --- a single word that is longer than the width. The sidebar window keeps
 --- `wrap = false` so tree alignment survives; wrapping happens here instead.
@@ -293,7 +286,7 @@ function M.create(callbacks)
     -- moved every row: re-sign the intents that carry a comment. No-op when
     -- comments are off, or before this sidebar's session is registered (the
     -- very first update, which has nothing to sign anyway).
-    if comments_enabled() then
+    if require("intentdiff.config").comments_enabled() then
       pcall(function()
         require("intentdiff.comments").refresh_sidebar(tabpage)
       end)
@@ -308,7 +301,9 @@ function M.create(callbacks)
       return false
     end
     if handle.winid and vim.api.nvim_win_is_valid(handle.winid) then
-      local tabpage = vim.api.nvim_win_get_tabpage(handle.winid)
+      -- `tabpage` is the one captured at create time; the sidebar window has
+      -- never lived anywhere else, so re-deriving it here only shadowed it
+      -- with an identical value.
       if #vim.api.nvim_tabpage_list_wins(tabpage) <= 1 then
         return false
       end

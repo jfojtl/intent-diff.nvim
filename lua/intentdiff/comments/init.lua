@@ -416,8 +416,19 @@ function M.list(tabpage)
     if c.intent_title or (c.line or 0) == 0 then
       return
     end
-    local shown = require("intentdiff.view")._last_shown[tabpage]
-    if shown and shown.file_entry and shown.file_entry.path == c.file then
+    -- `_last_shown` names the last file RENDERED, which is not the same thing
+    -- as what the panes currently DISPLAY: a hover preview swaps its own
+    -- buffers in without touching it (view.show_preview), so during a preview
+    -- _last_shown still names the pre-preview file while the panes hold a
+    -- concatenation of a whole intent's files. Jumping to `c.line` there lands
+    -- on an arbitrary line of an unrelated file — the exact wrong-file hazard
+    -- this function refuses to take elsewhere. Treat a live preview as "not
+    -- shown" so it falls through to open_path, which re-renders the real file
+    -- first. marks.refresh and M.context guard on the same flag.
+    local view = require("intentdiff.view")
+    local shown = view._last_shown[tabpage]
+    if shown and shown.file_entry and shown.file_entry.path == c.file
+        and not view._preview_active[tabpage] then
       return place_cursor(tabpage, c)
     end
     local opened = require("intentdiff").open_path(tabpage, c.file, function()

@@ -24,7 +24,7 @@ end, { desc = "Show or hide the intent-diff sidebar" })
 --- to do anything while `comments.enabled = false`, so the feature really is
 --- inert when it is turned off.
 local function comments_off()
-  if (require("intentdiff.config").options.comments or {}).enabled == false then
+  if not require("intentdiff.config").comments_enabled() then
     vim.notify("intent-diff: review comments are disabled", vim.log.levels.WARN)
     return true
   end

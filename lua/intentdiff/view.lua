@@ -163,7 +163,7 @@ end
 --- No-op when comments are disabled, and pcall'd: a failure to draw a comment
 --- box must never break the render it is hanging off.
 local function refresh_comments(tabpage)
-  if (require("intentdiff.config").options.comments or {}).enabled == false then
+  if not require("intentdiff.config").comments_enabled() then
     return
   end
   pcall(function()
@@ -768,28 +768,38 @@ end
 --- Takes the buffers the pane WINDOWS actually display first, and only then
 --- the session's own original_bufnr/modified_bufnr fields.
 ---
---- The window-derived half is the point. Those session fields lag a render:
---- codediff writes them from a callback it schedules (see preview_buf's
---- comment on exactly that), and mid-flight they were observed still naming
+--- The window-derived half is the point. Those session fields lag a render,
+--- and not merely as a race: `lifecycle.update_buffers` is their only writer,
+--- it runs inside codediff's `render_everything`, and that is either
+--- vim.schedule'd or deferred until `CodeDiffVirtualFileLoaded` — which for a
+--- HEAD-vs-worktree review's always-virtual original side is the ORDINARY
+--- path, not the exceptional one. Our `when_diff_ready` poll, meanwhile, can
+--- pass on a `stored_diff_result` left over from the PREVIOUS render and call
+--- back before any of that. Mid-flight the fields were observed still naming
 --- codediff's 1-line "CodeDiff 2.1"/"2.2" placeholder buffers while the panes
---- had already moved on to the real file and its `codediff://` counterpart.
---- Whether a given install_keymaps call lands inside that gap depends on
---- codediff's scheduling, so keys installed from the fields alone are keys
---- that MIGHT end up on a buffer nobody is looking at. intentdiff.navigation
+--- had already moved on to the real file and its `codediff://` counterpart, so
+--- keys installed from the fields alone are keys that end up on a buffer
+--- nobody is looking at. (A single-file review hides this: the file is
+--- rendered twice, and the second install reads fields the first render has
+--- already corrected. A multi-file review does not.) intentdiff.navigation
 --- has always installed ]c/[c via `nvim_win_get_buf(win)`, and marks.lua
 --- renders comment boxes the same way; this puts the rest of our buffer-local
 --- keys on that same footing. The fields are still consulted afterwards, so a
 --- pane whose window is momentarily closed (a layout toggle in flight) keeps
---- its keys.
+--- its keys — at the cost of also picking up, for a single-pane ??/A/D file,
+--- the empty scratch buffer codediff passes to update_buffers for the side it
+--- did not render. Nothing displays that buffer, so the keys on it are inert;
+--- do not go looking for the pane they belong to.
 ---
 --- The de-duplication is not cosmetic: inline layout puts one buffer in both
 --- panes, and the two sources overlap by design.
 ---
 --- Deliberately not `ipairs({ session.original_bufnr, session.modified_bufnr })`:
---- that stops at the first nil. Codediff does appear to keep both bufnr fields
---- populated even for a single-pane ??/A/D file (it is the *_win fields that go
---- nil there — see pane_windows), so this is a guard rather than a fix for an
---- observed break; but nothing about codediff's API promises it, and this
+--- that stops at the first nil. Codediff does keep both bufnr fields populated
+--- even for a single-pane ??/A/D file — it sets `original_win = keep_win;
+--- modified_win = nil` but still hands update_buffers a scratch empty buffer
+--- for the side it did not render — so this is a guard rather than a fix for
+--- an observed break; but nothing about codediff's API promises it, and this
 --- codebase has shipped that exact nil hole twice.
 local function pane_bufs(session)
   local out, seen = {}, {}
@@ -1078,7 +1088,7 @@ local VISUAL_ACTIONS = {
 --- when the key is pressed — which is always the right one for a
 --- buffer-local mapping.
 function M.install_comment_keymaps(buf, tabpage)
-  if (require("intentdiff.config").options.comments or {}).enabled == false then
+  if not require("intentdiff.config").comments_enabled() then
     return
   end
   local comments = require("intentdiff.comments")

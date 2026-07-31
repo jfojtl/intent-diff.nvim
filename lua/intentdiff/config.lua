@@ -214,6 +214,22 @@ end
 
 M.options = vim.deepcopy(M.defaults)
 
+--- Whether the review-comment feature is on.
+---
+--- The single spelling of this check. It lives here because every surface asks
+--- it — the panes and the sidebar before installing keys, the mark refresh
+--- after every pane rebuild, the g? cheatsheet, the session lifecycle, and the
+--- :IntentDiffComments* commands — and five copies of
+--- `(options.comments or {}).enabled ~= false` are five chances for one of them
+--- to drift into meaning something subtly different.
+---
+--- `~= false`, not `== true`: an explicit `false` disables the feature, and
+--- anything else (including a `comments` table a user replaced wholesale
+--- without an `enabled` key) leaves it on, matching the default.
+function M.comments_enabled()
+  return (M.options.comments or {}).enabled ~= false
+end
+
 function M.setup(opts)
   opts = opts or {}
   -- Keymaps are merged separately from everything else: see merge_keymaps.

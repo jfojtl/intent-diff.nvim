@@ -12,12 +12,6 @@ local M = {}
 local sessions = {} -- [token] = { sess, model, sidebar, inventory, scope_key, elapsed_timer }
 local next_token = 0
 
---- Whether the review-comment feature is on. Every comment hook in this file
---- is gated on it, so a disabled feature attaches no store and leaves no marks.
-local function comments_enabled()
-  return (require("intentdiff.config").options.comments or {}).enabled ~= false
-end
-
 function M.setup(opts)
   require("intentdiff.config").setup(opts)
 end
@@ -810,8 +804,14 @@ local function forget_entry(token)
   -- Stop persisting to this review's key, drop its comments from memory and
   -- wipe their marks. Anything the user added is already on disk (the store
   -- saves on every change), so the next review of the same range loads it back.
-  if comments_enabled() then
-    require("intentdiff.comments").detach_session()
+  -- pcall'd like every other teardown step here: detach_session touches disk
+  -- state and every buffer's extmarks, and a throw would abort forget_entry
+  -- before the sidebar buffer is deleted AND before close_entry's close_tab —
+  -- so `q` would leak a buffer and leave the review tab open.
+  if require("intentdiff.config").comments_enabled() then
+    pcall(function()
+      require("intentdiff.comments").detach_session()
+    end)
   end
   -- The sidebar buffer is bufhidden="hide" so it can survive being hidden;
   -- nothing reclaims it automatically, so the session that created it owns
@@ -1249,8 +1249,16 @@ function M.open(argline)
           -- comments — then persist them back under the wrong key. Nothing
           -- renders between here and classify_and_render below, so there is no
           -- window in which the comments are missing from a drawn pane.
-          if comments_enabled() then
-            require("intentdiff.comments").attach_session(current)
+          --
+          -- pcall'd: attach_session shells out to git and reads a JSON file the
+          -- user could have corrupted. A throw here would abort this scheduled
+          -- callback before classify_and_render below ever runs, stranding the
+          -- review on "⟳ classifying…" forever. Losing the comments is bad;
+          -- losing the review is worse.
+          if require("intentdiff.config").comments_enabled() then
+            pcall(function()
+              require("intentdiff.comments").attach_session(current)
+            end)
           end
           current.inventory = inventory
           classify_and_render(token)

@@ -310,6 +310,7 @@ describe("comments actions", function()
       view.diff_wins = real_diff_wins
       require("intentdiff").open_path = real_open_path
       view._last_shown[tab] = nil
+      view._preview_active[tab] = nil
       pcall(vim.api.nvim_win_close, win_orig, true)
       pcall(vim.api.nvim_win_close, win_mod, true)
     end)
@@ -361,6 +362,32 @@ describe("comments actions", function()
 
       assert.is_false(opened, "the file on screen must not be re-opened")
       assert.equals(5, vim.api.nvim_win_get_cursor(win_mod)[1])
+    end)
+
+    -- `_last_shown` names the last file RENDERED, not what the panes DISPLAY.
+    -- A hover preview swaps its own buffers in without touching it, so during
+    -- a preview _last_shown still names the pre-preview file while the panes
+    -- hold a whole intent's files concatenated. Jumping to c.line there lands
+    -- on an arbitrary line of an unrelated file — the same wrong-file hazard
+    -- this function refuses to take when the file simply isn't open.
+    it("does not jump into a hover preview's buffers, even for the last-shown file", function()
+      store.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "x" })
+      vim.ui.select = function(entries, _, cb) cb(entries[1]) end
+      view._preview_active[tab] = { title = "An intent" }
+      local asked_path
+      require("intentdiff").open_path = function(_, path)
+        asked_path = path
+        return true -- the real one re-renders the file; on_shown deliberately
+                    -- not called, so any cursor move here would be this
+                    -- function jumping on its own.
+      end
+
+      comments.list(tab)
+
+      assert.equals("a.lua", asked_path,
+        "a live preview must route through open_path, not be treated as shown")
+      assert.equals(1, vim.api.nvim_win_get_cursor(win_mod)[1])
+      assert.equals(1, vim.api.nvim_win_get_cursor(win_orig)[1])
     end)
 
     it("jumps only the pane whose side matches an old-side comment", function()
