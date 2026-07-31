@@ -668,6 +668,108 @@ describe(":IntentDiff end-to-end", function()
     end
   end)
 
+  --- Repo with two files, each owned entirely by a different group, at
+  --- clearly different line numbers — so ]c's jump target unambiguously
+  --- reveals WHICH file's hunks navigation.attach actually bound. Unlike
+  --- make_two_group_repo, whose two files both change at line 5: with that
+  --- fixture a ]c jump landing on line 5 could mean either "correct ctx,
+  --- y.lua's own hunk" or "stale ctx, x.lua's hunk" — no good for proving a
+  --- ctx did NOT get clobbered by the wrong file.
+  local function make_two_file_two_group_repo()
+    local x, y = sixty("xxx"), sixty("yyy")
+    local r = helpers.make_repo({ ["x.lua"] = table.concat(x, "\n"), ["y.lua"] = table.concat(y, "\n") })
+    x[5] = "CHANGED 5"
+    y[40] = "CHANGED 40"
+    helpers.write_file(r, "x.lua", table.concat(x, "\n"))
+    helpers.write_file(r, "y.lua", table.concat(y, "\n"))
+    vim.cmd("cd " .. r)
+    return r
+  end
+
+  local function open_two_file_groups()
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = fake_provider({
+        { title = "Group X", hunk_ids = { "x.lua:1" } },
+        { title = "Group Y", hunk_ids = { "y.lua:1" } },
+      }),
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local session = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model.state == "ready" and #s.model.groups == 2 and s or nil
+    end, 10000)
+    assert.truthy(session, "session never reached ready with 2 groups")
+    assert.equals(tab, session.sess.tabpage)
+    return session, tab
+  end
+
+  -- Direct, isolated coverage for the `superseded` / `still_current`
+  -- handling added to open_file's on_ready (task 2 review fix). Previously
+  -- this was exercised only incidentally, as a side effect of the "keeps ]c
+  -- group-scoped" test's setup above. Positive case: a <CR> that lands on the
+  -- SAME file a still-in-flight auto-open is rendering must still end up with
+  -- OUR navigation attached, not codediff's default.
+  it("attaches OUR ]c/[c navigation when a same-file <CR> races a still-pending auto-open", function()
+    -- open_two_groups() only waits for model.state == "ready";
+    -- classify_and_render's own auto_open_first (group1/file1 = a.lua) is
+    -- kicked off synchronously in that SAME completion callback, but its
+    -- show_file()'s on_ready (where navigation.attach would normally run)
+    -- only fires later, once when_diff_ready's poll succeeds — so the <CR>
+    -- below reliably (though not necessarily) lands inside that gap. Either
+    -- way the assertions below must hold: settled-before-<CR> takes
+    -- select_file's plain open_file() path, in-flight takes the
+    -- same_as_shown short-circuit + the superseded/still_current path in
+    -- on_ready — both must end up with OUR ]c attached.
+    make_two_group_repo()
+    local session = open_two_groups()
+    local win = select_and_wait(session, 1, 1, "a.lua", 5, 55)
+    local buf = vim.api.nvim_win_get_buf(win)
+    local desc
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+      if m.lhs == "]c" then desc = m.desc end
+    end
+    assert.truthy((desc or ""):find("intent-diff", 1, true),
+      "]c must be group-scoped (intentdiff's own attach), not codediff's default")
+    -- Functional proof, not just the desc string: group 1's only hunk in this
+    -- file has nowhere to go — codediff's own all-hunks ]c would jump to 55.
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { 5, 0 })
+    press(win, "]c")
+    assert.equals(5, vim.api.nvim_win_get_cursor(win)[1])
+  end)
+
+  -- Negative-case counterpart: a newer selection that lands on a DIFFERENT
+  -- file (not what the still-in-flight auto-open was rendering) must still
+  -- bail out of attaching that stale ctx.
+  it("does not attach a stale ctx when a newer selection lands on a different file "
+      .. "while an auto-open is still in flight", function()
+    make_two_file_two_group_repo()
+    local session = open_two_file_groups()
+    -- auto_open_first is targeting group 1 / x.lua right now (possibly still
+    -- in flight — same race window as above). select_and_wait drives <CR> on
+    -- a DIFFERENT file/group immediately, without any artificial delay.
+    local win = select_and_wait(session, 2, 1, "y.lua")
+
+    -- Read the expected jump target from the model rather than hardcoding
+    -- the changed line number: hunks carry surrounding context lines, so a
+    -- hunk's modified.start_line is a few lines before the literal edit.
+    local y_hunk = session.model.groups[2].files[1].hunks[1]
+    local x_hunk = session.model.groups[1].files[1].hunks[1]
+    assert.not_equals(x_hunk.modified.start_line, y_hunk.modified.start_line,
+      "fixture must place x.lua's and y.lua's hunks at different lines "
+      .. "for this test to discriminate a stale ctx")
+
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    press(win, "]c")
+    -- If x.lua's stale ctx had won the race, this would jump to x_hunk's
+    -- line instead of y.lua's own.
+    assert.equals(y_hunk.modified.start_line, vim.api.nvim_win_get_cursor(win)[1],
+      "]c must use y.lua's own hunk, not a stale ctx left over from x.lua's auto-open")
+  end)
+
   it("re-matches a changed diff against the previous classification", function()
     local repo = make_two_group_repo()
     local cache_dir = vim.fn.tempname()

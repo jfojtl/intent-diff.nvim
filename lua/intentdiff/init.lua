@@ -372,6 +372,19 @@ end
 --- Manual selection (opts.auto unset) leaves focus wherever codediff's own
 --- render left it, unless opts.focus_diff or opts.restore_focus says
 --- otherwise.
+---
+--- entry.render_seq: bumped by every open_file() call AND by select_file's
+--- same_as_shown short-circuit (which decides focus without calling
+--- open_file at all). on_ready captures its own call's number (`my_seq`) and
+--- only applies FOCUS-changing effects (cursor jump, opts.focus_diff, the
+--- restore-to-sidebar tail) if it is still the most recent one — a hover's
+--- open_file(restore_focus=true) can still be in flight when <CR> on that
+--- SAME row takes the short-circuit path; without this, the hover's own
+--- on_ready firing afterward unconditionally restores focus to the sidebar,
+--- undoing the short-circuit's focus_diff_pane. navigation.attach is NOT
+--- gated on this — see `superseded`/`still_current` below, a different,
+--- file-identity-based concern where attaching is idempotent regardless of
+--- recency.
 local function open_file(token, group_i, file_i, opts)
   local entry = sessions[token]
   if not entry then
@@ -381,6 +394,8 @@ local function open_file(token, group_i, file_i, opts)
   if not file_entry then
     return
   end
+  entry.render_seq = (entry.render_seq or 0) + 1
+  local my_seq = entry.render_seq
   local navigation = require("intentdiff.navigation")
   navigation.set_position(entry.sess.tabpage, group_i, file_i)
   require("intentdiff.view").show_file(entry.sess, file_entry, {
@@ -392,6 +407,7 @@ local function open_file(token, group_i, file_i, opts)
       -- Read sess.tabpage fresh: show_file() may have just reconciled it to
       -- the tab codediff actually created (see module-level note above).
       local tabpage = current.sess.tabpage
+      local is_latest = current.render_seq == my_seq
       local superseded = opts and opts.auto and current.user_selected
       if superseded then
         -- The user made their own selection while this auto-open was in
@@ -428,6 +444,14 @@ local function open_file(token, group_i, file_i, opts)
           select_file(token, gi, fi, o)
         end,
       })
+      -- Everything below is a FOCUS-changing effect: skip it once a newer
+      -- render_seq exists, since a newer caller (another open_file, or a
+      -- select_file short-circuit) has already made — and is entitled to
+      -- keep — its own, more recent focus decision. See entry.render_seq
+      -- above.
+      if not is_latest then
+        return
+      end
       local session = require("intentdiff.view").get_session(tabpage)
       local win = session and session.modified_win
       if opts and opts.jump and win and vim.api.nvim_win_is_valid(win) and #file_entry.hunks > 0 then
@@ -499,7 +523,21 @@ select_file = function(token, group_i, file_i, opts)
   -- <CR> on the file the cursor already rendered is a pure focus change: the
   -- panes are already correct, so re-rendering would spend a codediff diff to
   -- produce identical output.
-  if opts and opts.focus_diff and entry then
+  --
+  -- Guarded on NOT _preview_active: same_as_shown reads view._last_shown,
+  -- which a hover PREVIEW never touches (show_preview swaps the pane buffers
+  -- without updating it — see view.show_preview). With a preview up,
+  -- _last_shown still names whatever file was rendered before the preview
+  -- took over, so without this guard same_as_shown would report "already
+  -- shown" for it, the short-circuit would fire, hover_key would already be
+  -- set to this row (above) so the pending debounced hover never renders the
+  -- file either, and focus_diff_pane would move focus INTO the preview
+  -- buffer instead of a real diff pane — the file is never actually shown.
+  -- auto_open_first (below) already guards the identical hazard; on defaults
+  -- (debounce_ms = 120) this is reachable just by pressing `j` onto a file
+  -- row and Enter before the hover fires.
+  if opts and opts.focus_diff and entry
+      and not require("intentdiff.view")._preview_active[entry.sess.tabpage] then
     local _, file_entry = group_file(entry.model, group_i, file_i)
     -- Navigation (]c/[c) for this file is already attached, or will be: if a
     -- same-file auto-open is still in flight (same_as_shown true, but that
@@ -507,6 +545,12 @@ select_file = function(token, group_i, file_i, opts)
     -- `still_current` handling (see its on_ready) still attaches it once
     -- ready — this short-circuit only needs to move focus.
     if file_entry and same_as_shown(entry.sess.tabpage, file_entry) then
+      -- Bump render_seq even though we're not calling open_file: this IS a
+      -- fresh, authoritative focus decision, and a same-file render that's
+      -- still in flight (e.g. a hover's restore_focus=true open_file call)
+      -- must not undo it once ITS on_ready eventually fires — see
+      -- entry.render_seq's doc comment on open_file above.
+      entry.render_seq = (entry.render_seq or 0) + 1
       focus_diff_pane(entry.sess.tabpage)
       return
     end

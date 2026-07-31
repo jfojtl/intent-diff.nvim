@@ -574,6 +574,15 @@ describe("sidebar hover preview", function()
         vim.api.nvim_replace_termcodes("<CR>", true, false, true), "x", false)
     end
 
+    local function row_for(entry, group_i, file_i)
+      for l = 1, vim.api.nvim_buf_line_count(entry.sidebar.bufnr) do
+        local m = entry.sidebar.meta_at(l)
+        if m and m.kind == "file" and m.group_i == group_i and m.file_i == file_i then
+          return l
+        end
+      end
+    end
+
     it("moves focus into the diff pane without re-rendering an already-shown file", function()
       local tab, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
       local lnum = first_file_row(entry)
@@ -602,20 +611,36 @@ describe("sidebar hover preview", function()
       assert.truthy(helpers.wait_for(function()
         return vim.api.nvim_get_current_win() == entry.sidebar.winid or nil
       end, 10000), "hover's render never settled (focus never returned to the sidebar)")
-      local before = require("intentdiff.view").get_session(tab).modified_bufnr
 
-      press_cr(entry, lnum)
-      vim.wait(500, function() return false end, 50)
+      -- Buffer-number equality cannot prove "did not re-render": codediff
+      -- reuses the same bufnr for the same path, so comparing
+      -- session.modified_bufnr before/after would pass even against code
+      -- that unconditionally re-renders. Spy on view.show_file instead and
+      -- require exactly zero calls.
+      local view = require("intentdiff.view")
+      local real_show_file = view.show_file
+      local calls = 0
+      view.show_file = function(...)
+        calls = calls + 1
+        return real_show_file(...)
+      end
+      local ok, err = pcall(function()
+        press_cr(entry, lnum)
+        vim.wait(500, function() return false end, 50)
+        assert.equals(0, calls, "already-shown file must not re-render (show_file was called)")
 
-      local session = require("intentdiff.view").get_session(tab)
-      assert.equals(before, session.modified_bufnr, "already-shown file must not re-render")
-      -- Focus-change timing depends on which path was taken: the short-circuit
-      -- moves focus synchronously inside select_file, but if this assertion
-      -- ever runs against a real render instead, on_ready's focus_diff_pane
-      -- call is asynchronous — wait rather than assert bare-equals immediately.
-      assert.truthy(helpers.wait_for(function()
-        return session.modified_win == vim.api.nvim_get_current_win() or nil
-      end, 10000))
+        local session = require("intentdiff.view").get_session(tab)
+        -- Focus-change timing depends on which path was taken: the
+        -- short-circuit moves focus synchronously inside select_file, but if
+        -- this assertion ever runs against a real render instead, on_ready's
+        -- focus_diff_pane call is asynchronous — wait rather than assert
+        -- bare-equals immediately.
+        assert.truthy(helpers.wait_for(function()
+          return session.modified_win == vim.api.nvim_get_current_win() or nil
+        end, 10000))
+      end)
+      view.show_file = real_show_file
+      assert.is_true(ok, tostring(err))
     end)
 
     it("renders and focuses a file that was not shown yet", function()
@@ -638,6 +663,63 @@ describe("sidebar hover preview", function()
       assert.truthy(helpers.wait_for(function()
         return session.modified_win == vim.api.nvim_get_current_win() or nil
       end, 10000))
+    end)
+
+    it("renders the file instead of leaving a hover preview on screen", function()
+      -- Regression test: same_as_shown reads view._last_shown, which a hover
+      -- PREVIEW never touches (show_preview swaps the pane buffers without
+      -- updating it). With a preview up, _last_shown still names whatever
+      -- file was rendered before the preview took over — auto_open (on by
+      -- default) already rendered group1/file1 by the time open_ready
+      -- returns — so without a _preview_active guard, pressing <CR> on that
+      -- SAME row would take the pure-focus short-circuit and move focus INTO
+      -- the preview buffer, never actually rendering the file. Reachable on
+      -- defaults just by landing on a file row and pressing <CR> before its
+      -- hover debounce fires.
+      local tab, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
+      local shown = require("intentdiff.view")._last_shown[tab]
+      assert.truthy(shown, "auto-open never rendered a file")
+
+      hover(entry, line_of(entry, "group"))
+      assert.truthy(helpers.wait_for(function()
+        return require("intentdiff.view")._preview_active[tab]
+      end, 10000), "preview never activated")
+      local preview_bufs_before = vim.deepcopy(require("intentdiff.view")._preview_bufs[tab] or {})
+      assert.truthy(#preview_bufs_before > 0, "expected preview buffers to be tracked")
+
+      -- The SAME file/hunks the row names is what auto-open already rendered
+      -- (group 1 / file 1) — exactly the same_as_shown match that must be
+      -- suppressed while the preview owns the panes.
+      local lnum = row_for(entry, 1, 1)
+      assert.truthy(lnum, "no sidebar row for the auto-opened file")
+      press_cr(entry, lnum)
+
+      assert.truthy(helpers.wait_for(function()
+        return require("intentdiff.view")._preview_active[tab] == nil or nil
+      end, 10000), "preview must be cleared once the file actually renders")
+
+      local session = require("intentdiff.view").get_session(tab)
+      assert.truthy(helpers.wait_for(function()
+        return session.modified_win == vim.api.nvim_get_current_win() or nil
+      end, 10000))
+      local cur_buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
+      for _, b in ipairs(preview_bufs_before) do
+        assert.not_equals(b, cur_buf, "focus landed inside a preview buffer")
+      end
+
+      -- The pane must show the FILE's own diff (a real codediff buffer, named
+      -- after the file), not a leftover preview scratch buffer's content —
+      -- checked by name rather than by grepping the buffer text, since a real
+      -- diff pane's content is the file's lines, which need not contain its
+      -- own path anywhere.
+      local buf_name = vim.api.nvim_buf_get_name(session.modified_bufnr)
+      assert.truthy(buf_name:find(shown.file_entry.path, 1, true),
+        ("modified pane must show %s, got buffer named %s"):format(
+          shown.file_entry.path, buf_name))
+      assert.truthy(helpers.wait_for(function()
+        local s = require("intentdiff.view")._last_shown[tab]
+        return s and s.file_entry.path == shown.file_entry.path or nil
+      end, 10000), "_last_shown must reflect the actually-rendered file")
     end)
   end)
 end)
