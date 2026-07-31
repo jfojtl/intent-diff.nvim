@@ -268,16 +268,18 @@ describe("comments actions", function()
     end)
   end)
 
-  -- `list` cannot yet OPEN a file (that lands with Task 8's file-opening
-  -- path), so jumping straight to a comment's line number in whatever is
-  -- currently on screen would land on the wrong line of the WRONG file
-  -- whenever the comment belongs to a different file. Same hazard for an
-  -- old-side comment jumped into a pane that isn't the original side. Both
-  -- must refuse rather than guess.
+  -- Picking a comment in a file that is NOT on screen opens that file first
+  -- (intentdiff.open_path — the same select_file/open_file route sidebar <CR>
+  -- takes, so it arrives folded to its intent) and places the cursor from the
+  -- open path's completion callback. Jumping straight to the comment's line
+  -- number in whatever happens to be displayed would land on the wrong line of
+  -- the WRONG file, so a file this review cannot open still refuses rather
+  -- than guessing. Same hazard for an old-side comment jumped into a pane that
+  -- isn't the original side.
   describe("list", function()
     local view = require("intentdiff.view")
     local tab
-    local real_select, real_get_session, real_diff_wins
+    local real_select, real_get_session, real_diff_wins, real_open_path
     local win_orig, win_mod
 
     before_each(function()
@@ -285,6 +287,7 @@ describe("comments actions", function()
       real_select = vim.ui.select
       real_get_session = view.get_session
       real_diff_wins = view.diff_wins
+      real_open_path = require("intentdiff").open_path
       win_orig = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, {
         relative = "editor", row = 0, col = 0, width = 20, height = 5, style = "minimal",
       })
@@ -305,19 +308,59 @@ describe("comments actions", function()
       vim.ui.select = real_select
       view.get_session = real_get_session
       view.diff_wins = real_diff_wins
+      require("intentdiff").open_path = real_open_path
       view._last_shown[tab] = nil
       pcall(vim.api.nvim_win_close, win_orig, true)
       pcall(vim.api.nvim_win_close, win_mod, true)
     end)
 
-    it("refuses to jump when the chosen comment's file differs from what's shown", function()
+    it("opens the comment's file, then jumps, when it is not the one on screen", function()
       store.add({ file = "b.lua", line = 5, side = "new", type = "note", text = "x" })
       vim.ui.select = function(entries, _, cb) cb(entries[1]) end
 
+      local asked_tab, asked_path
+      require("intentdiff").open_path = function(tabpage, path, on_shown)
+        asked_tab, asked_path = tabpage, path
+        -- The real one renders the file and folds it to its intent before
+        -- calling back; the cursor must be placed from THAT callback, not
+        -- before it.
+        assert.equals(1, vim.api.nvim_win_get_cursor(win_mod)[1])
+        on_shown()
+        return true
+      end
+
       comments.list(tab)
 
+      assert.equals(tab, asked_tab)
+      assert.equals("b.lua", asked_path)
+      assert.equals(5, vim.api.nvim_win_get_cursor(win_mod)[1])
+    end)
+
+    it("refuses to jump when the review cannot open the comment's file", function()
+      store.add({ file = "b.lua", line = 5, side = "new", type = "note", text = "x" })
+      vim.ui.select = function(entries, _, cb) cb(entries[1]) end
+      require("intentdiff").open_path = function() return false end
+
+      comments.list(tab)
+
+      -- Never the shown file's line 5: that is a different file's line.
       assert.equals(1, vim.api.nvim_win_get_cursor(win_orig)[1])
       assert.equals(1, vim.api.nvim_win_get_cursor(win_mod)[1])
+    end)
+
+    it("jumps straight in when the comment's file is already shown", function()
+      store.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "x" })
+      vim.ui.select = function(entries, _, cb) cb(entries[1]) end
+      local opened = false
+      require("intentdiff").open_path = function()
+        opened = true
+        return true
+      end
+
+      comments.list(tab)
+
+      assert.is_false(opened, "the file on screen must not be re-opened")
+      assert.equals(5, vim.api.nvim_win_get_cursor(win_mod)[1])
     end)
 
     it("jumps only the pane whose side matches an old-side comment", function()

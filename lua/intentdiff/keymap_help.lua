@@ -99,8 +99,43 @@ local function build_sections(keymaps)
     sections[#sections + 1] = view
   end
 
+  -- Review comments. Listed only while the feature is on, so a user who set
+  -- comments.enabled = false never sees keys that install nothing.
+  --
+  -- The popup-local keys (popup_cycle_type / popup_submit / popup_cancel) are
+  -- deliberately absent: they are buffer-local to the comment entry float, not
+  -- to any tab-wide surface this cheatsheet describes, and the float shows its
+  -- own footer.
+  local ckm = keymaps.comments or {}
+  local cfg = require("intentdiff.config").options.comments or {}
+  if cfg.enabled ~= false then
+    local comments = section("COMMENTS", {
+      { ckm.add_comment, "Add a comment (pick the type)" },
+      { ckm.add_note, "Add a note" },
+      { ckm.add_suggestion, "Add a suggestion" },
+      { ckm.add_issue, "Add an issue" },
+      { ckm.add_praise, "Add praise" },
+      { ckm.add_file_comment, "Comment on the file / the intent" },
+      { ckm.edit_comment, "Edit the comment at the cursor" },
+      { ckm.delete_comment, "Delete the comment at the cursor" },
+      { ckm.next_comment, "Next comment" },
+      { ckm.prev_comment, "Previous comment" },
+      { ckm.list_comments, "List every comment" },
+      { ckm.export_clipboard, "Copy the review as Markdown" },
+      { ckm.export_file, "Write the review to a file" },
+      { ckm.clear_comments, "Delete every comment" },
+      { ckm.export_and_close, "Copy the review, then close the tab" },
+    })
+    if comments then
+      sections[#sections + 1] = comments
+    end
+  end
+
   return sections
 end
+
+--- Exposed for tests: the section list the float renders.
+M._build_sections = build_sections
 
 local function compute_width(sections)
   local max_desc, max_key = 0, 0

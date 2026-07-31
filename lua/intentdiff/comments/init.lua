@@ -368,15 +368,35 @@ function M.prev(tabpage)
   jump(tabpage, M.prev_line)
 end
 
---- Show every comment in the review; picking one jumps the cursor to it.
+--- Put the cursor on `c`'s line, in every pane of `tabpage` showing `c`'s side.
 ---
---- TODO(task-8): once there is a path to OPEN a file from the action layer,
---- this should open the comment's file and then jump, for any comment in a
---- file that isn't already on screen. Until that path exists, jumping
---- straight to `c.line` in whatever happens to be on screen would silently
---- land the cursor on the wrong line of the WRONG file whenever the chosen
---- comment belongs to a different file than the one currently shown — so
---- this refuses instead of guessing.
+--- An old-side comment's line number only addresses a row of the ORIGINAL
+--- pane; jumping it into the modified pane too would land on an unrelated line
+--- that merely shares the same number. `zv` afterwards opens just enough of
+--- the group fold filter for the line — and the comment box hanging off it —
+--- to be visible, instead of leaving the cursor buried in a closed fold.
+local function place_cursor(tabpage, c)
+  local view = require("intentdiff.view")
+  local session = view.get_session(tabpage)
+  for _, win in ipairs(view.diff_wins(tabpage)) do
+    if (c.side or "new") == M.side_for_win(win, session) then
+      pcall(vim.api.nvim_win_set_cursor, win, { c.line, 0 })
+      pcall(vim.api.nvim_win_call, win, function()
+        vim.cmd("normal! zv")
+      end)
+    end
+  end
+end
+
+--- Show every comment in the review; picking one jumps the cursor to it,
+--- opening its file first when that file is not the one on screen.
+---
+--- Opening goes through `intentdiff.open_path` — the same select_file/open_file
+--- route the sidebar's <CR> takes — so the file arrives folded to its intent
+--- before the cursor is placed. Jumping straight to `c.line` in whatever
+--- happens to be on screen would land on the wrong line of the WRONG file, so
+--- when the review has no such file to open this still refuses rather than
+--- guessing.
 function M.list(tabpage)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local entries = M.list_entries()
@@ -391,22 +411,21 @@ function M.list(tabpage)
       return
     end
     local c = choice.comment
+    -- An intent comment lives on a sidebar row and a file-level comment hangs
+    -- above line 1: neither addresses a line to jump to.
     if c.intent_title or (c.line or 0) == 0 then
       return
     end
-    local view = require("intentdiff.view")
-    local shown = view._last_shown[tabpage]
-    if not (shown and shown.file_entry and shown.file_entry.path == c.file) then
-      return notify(("comment is in %s — open that file first"):format(c.file), vim.log.levels.WARN)
+    local shown = require("intentdiff.view")._last_shown[tabpage]
+    if shown and shown.file_entry and shown.file_entry.path == c.file then
+      return place_cursor(tabpage, c)
     end
-    local session = view.get_session(tabpage)
-    for _, win in ipairs(view.diff_wins(tabpage)) do
-      -- An old-side comment's line number only addresses a row of the
-      -- ORIGINAL pane; jumping it into the modified pane too would land on
-      -- an unrelated line that merely shares the same number.
-      if (c.side or "new") == M.side_for_win(win, session) then
-        pcall(vim.api.nvim_win_set_cursor, win, { c.line, 0 })
-      end
+    local opened = require("intentdiff").open_path(tabpage, c.file, function()
+      place_cursor(tabpage, c)
+    end)
+    if not opened then
+      notify(("comment is in %s, which this review does not show"):format(c.file),
+        vim.log.levels.WARN)
     end
   end)
 end

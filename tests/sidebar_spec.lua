@@ -351,6 +351,66 @@ describe("sidebar.create", function()
     assert.same({ 1, 2 }, selected)
     vim.api.nvim_win_close(handle.winid, true)
   end)
+
+  --- A handle with nothing wired up, for the comment-surface tests below.
+  local function bare_handle()
+    return sidebar.create({
+      on_select = function() end, on_fold = function() end,
+      on_fold_all = function() end, on_reclassify = function() end,
+      on_close = function() end, on_next_group = function() end,
+      on_prev_group = function() end, on_goto_file = function() end,
+    })
+  end
+
+  -- comment_rows is what signs an intent that carries a comment. It reports
+  -- ONE row per intent — the head row — even though every wrapped title line
+  -- and the stats line share kind == "group", and it reads the title off the
+  -- rendered meta rather than a retained model, so it can never disagree with
+  -- what is on screen.
+  it("reports one comment row per intent, with its title", function()
+    local handle = bare_handle()
+    handle.update(mk_model({ groups = { { title =
+      "Extract the integration catalog into a shared provider registry" } } }))
+    local rows = handle.comment_rows()
+    table.sort(rows, function(a, b) return a.lnum < b.lnum end)
+    assert.equals(2, #rows)
+    assert.equals("Extract the integration catalog into a shared provider registry", rows[1].title)
+    assert.equals("Ungrouped", rows[2].title)
+    -- Each lnum must be a head row, not a continuation or the stats line.
+    for _, row in ipairs(rows) do
+      assert.is_true(handle.meta_at(row.lnum).group_head)
+    end
+    vim.api.nvim_win_close(handle.winid, true)
+  end)
+
+  it("installs the comment keys on the sidebar buffer", function()
+    require("intentdiff.config").setup({ keymaps = { comments = { add_comment = "gK" } } })
+    local handle = bare_handle()
+    local found = false
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(handle.bufnr, "n")) do
+      if m.lhs == "gK" then
+        found = true
+      end
+    end
+    assert.is_true(found,
+      "an intent comment is added from a sidebar group row, so the comment "
+        .. "keys must be installed here too")
+    vim.api.nvim_win_close(handle.winid, true)
+    require("intentdiff.config").setup({})
+  end)
+
+  it("installs no comment keys on the sidebar when comments are disabled", function()
+    require("intentdiff.config").setup({
+      comments = { enabled = false },
+      keymaps = { comments = { add_comment = "gK" } },
+    })
+    local handle = bare_handle()
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(handle.bufnr, "n")) do
+      assert.are_not.equals("gK", m.lhs)
+    end
+    vim.api.nvim_win_close(handle.winid, true)
+    require("intentdiff.config").setup({})
+  end)
 end)
 
 describe("sidebar fold keys", function()

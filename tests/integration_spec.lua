@@ -1396,3 +1396,258 @@ describe(":IntentDiff end-to-end", function()
       "zR is intent-level: the directories the user collapsed must stay collapsed")
   end)
 end)
+
+describe("comments in a review tab", function()
+  local store = require("intentdiff.comments.store")
+
+  before_each(function()
+    store.detach()
+    store.clear()
+  end)
+
+  after_each(function()
+    require("intentdiff.config").setup({})
+  end)
+
+  it("registers the four comment commands", function()
+    local cmds = vim.api.nvim_get_commands({})
+    assert.is_truthy(cmds.IntentDiffCommentsYank)
+    assert.is_truthy(cmds.IntentDiffCommentsWrite)
+    assert.is_truthy(cmds.IntentDiffCommentsList)
+    assert.is_truthy(cmds.IntentDiffCommentsClear)
+  end)
+
+  it("lists comment keys in the g? help", function()
+    require("intentdiff.config").setup({})
+    local sections = require("intentdiff.keymap_help")._build_sections(
+      require("intentdiff.config").options.keymaps)
+    local found
+    for _, s in ipairs(sections) do
+      if s.title == "COMMENTS" then
+        found = s
+      end
+    end
+    assert.is_truthy(found)
+    local labels = {}
+    for _, item in ipairs(found.items) do
+      labels[item[1]] = item[2]
+    end
+    assert.is_truthy(labels["<localleader>ci"])
+    assert.is_truthy(labels["<localleader>q"])
+  end)
+
+  -- The popup's own keys are buffer-local to the comment entry float, which
+  -- shows its own footer; listing them in the tab-wide cheatsheet would
+  -- advertise keys that do nothing on any of the surfaces it describes.
+  it("omits the popup-local keys from the help", function()
+    require("intentdiff.config").setup({})
+    local sections = require("intentdiff.keymap_help")._build_sections(
+      require("intentdiff.config").options.keymaps)
+    for _, s in ipairs(sections) do
+      if s.title == "COMMENTS" then
+        for _, item in ipairs(s.items) do
+          assert.are_not.equals("Cycle the comment type", item[2])
+          assert.are_not.equals("<C-s>", item[1])
+        end
+      end
+    end
+  end)
+
+  it("omits a disabled comment action from the help", function()
+    require("intentdiff.config").setup({ keymaps = { comments = { add_praise = false } } })
+    local sections = require("intentdiff.keymap_help")._build_sections(
+      require("intentdiff.config").options.keymaps)
+    for _, s in ipairs(sections) do
+      if s.title == "COMMENTS" then
+        for _, item in ipairs(s.items) do
+          assert.are_not.equals("<localleader>cp", item[1])
+        end
+      end
+    end
+  end)
+
+  it("installs no comment keys when comments are disabled", function()
+    require("intentdiff.config").setup({ comments = { enabled = false } })
+    local sections = require("intentdiff.keymap_help")._build_sections(
+      require("intentdiff.config").options.keymaps)
+    for _, s in ipairs(sections) do
+      assert.are_not.equals("COMMENTS", s.title)
+    end
+  end)
+
+  it("binds nothing on a buffer when comments are disabled", function()
+    require("intentdiff.config").setup({ comments = { enabled = false } })
+    local buf = vim.api.nvim_create_buf(false, true)
+    require("intentdiff.view").install_comment_keymaps(buf, nil)
+    assert.equals(0, #vim.api.nvim_buf_get_keymap(buf, "n"))
+    assert.equals(0, #vim.api.nvim_buf_get_keymap(buf, "x"))
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+
+  -- Correction A: the visual-mode variants are driven by an ordered list of
+  -- {action, type} records, not a table keyed by lhs. add_comment's type is
+  -- nil BY DESIGN (the popup asks), which a value-keyed table cannot express —
+  -- and a disabled action must be skipped by keymaps.each, never used as a
+  -- table key.
+  --- Literal lhs values, so the assertions compare against exactly what
+  --- nvim_buf_get_keymap reports: the defaults use <localleader>, which is
+  --- expanded at map time and would come back as "\cc".
+  local PLAIN_KEYS = {
+    add_comment = "gc",
+    add_note = "gn",
+    add_suggestion = "gs",
+    add_issue = "gi",
+    add_praise = "gp",
+    export_and_close = "gq",
+  }
+
+  local function mapped(buf, mode)
+    local out = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, mode)) do
+      out[m.lhs] = true
+    end
+    return out
+  end
+
+  it("installs a visual-mode variant for every add action, including add_comment", function()
+    require("intentdiff.config").setup({ keymaps = { comments = PLAIN_KEYS } })
+    local buf = vim.api.nvim_create_buf(false, true)
+    require("intentdiff.view").install_comment_keymaps(buf, nil)
+    local visual = mapped(buf, "x")
+    -- add_comment's type is nil by design (the popup asks). A table keyed by
+    -- lhs with the type as the VALUE simply drops it — this is the assertion
+    -- that catches that.
+    for _, action in ipairs({ "add_comment", "add_note", "add_suggestion", "add_issue", "add_praise" }) do
+      assert.is_truthy(visual[PLAIN_KEYS[action]], "no visual mapping for " .. action)
+    end
+    -- Non-add actions stay normal-mode only.
+    assert.is_nil(visual[PLAIN_KEYS.export_and_close])
+    assert.is_truthy(mapped(buf, "n")[PLAIN_KEYS.export_and_close])
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+
+  it("skips a disabled add action instead of erroring on a nil key", function()
+    local keys = vim.tbl_extend("force", {}, PLAIN_KEYS)
+    keys.add_comment = false
+    require("intentdiff.config").setup({ keymaps = { comments = keys } })
+    local buf = vim.api.nvim_create_buf(false, true)
+    -- A disabled action must be skipped by keymaps.each, never used as a table
+    -- key: `[nil] = ...` in a table constructor raises "table index is nil".
+    assert.has_no.errors(function()
+      require("intentdiff.view").install_comment_keymaps(buf, nil)
+    end)
+    local visual = mapped(buf, "x")
+    assert.is_truthy(visual[PLAIN_KEYS.add_note], "the other add actions must still bind")
+    assert.is_nil(visual[PLAIN_KEYS.add_comment], "the disabled action must bind nothing")
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+
+  it("binds every key of a list-valued comment action", function()
+    require("intentdiff.config").setup({ keymaps = { comments = { add_issue = { "<leader>x", "<leader>y" } } } })
+    local buf = vim.api.nvim_create_buf(false, true)
+    require("intentdiff.view").install_comment_keymaps(buf, nil)
+    local normal, visual = {}, {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+      normal[m.lhs] = true
+    end
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "x")) do
+      visual[m.lhs] = true
+    end
+    local leader = vim.g.mapleader or "\\"
+    for _, lhs in ipairs({ leader .. "x", leader .. "y" }) do
+      assert.is_truthy(normal[lhs], "missing normal mapping " .. lhs)
+      assert.is_truthy(visual[lhs], "missing visual mapping " .. lhs)
+    end
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+
+  -- The wiring this task is actually about, against a real review tab: the
+  -- keys have to reach the buffer the pane DISPLAYS (codediff's
+  -- session.*_bufnr fields lag behind a render by a scheduled callback, so
+  -- installing from them alone can land the keys on a placeholder buffer
+  -- nobody is looking at), the marks have to survive the rebuild, and closing
+  -- the tab has to detach the store.
+  it("wires comments into a live review tab", function()
+    local repo = helpers.make_repo({ ["a.lua"] = table.concat(vim.fn.range(1, 40), "\n") })
+    helpers.write_file(repo, "a.lua", "CHANGED\n" .. table.concat(vim.fn.range(2, 40), "\n"))
+    vim.cmd("cd " .. repo)
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      keymaps = { comments = { add_issue = "gI" } },
+      provider = function(_, cb)
+        vim.schedule(function()
+          cb({ groups = { { title = "Only intent", hunk_ids = { "a.lua:1" } } } })
+        end)
+        return { cancel = function() end }
+      end,
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local entry = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model.state == "ready" and s or nil
+    end, 10000)
+    assert.truthy(entry, "the review never became ready")
+
+    local view = require("intentdiff.view")
+    local displayed = helpers.wait_for(function()
+      local session = view.get_session(tab)
+      local win = session and session.modified_win
+      if not (win and vim.api.nvim_win_is_valid(win)) then
+        return nil
+      end
+      local buf = vim.api.nvim_win_get_buf(win)
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+        if m.lhs == "gI" then
+          return buf
+        end
+      end
+      return nil
+    end, 10000)
+    assert.truthy(displayed,
+      "the comment keys never reached the buffer the diff pane displays")
+
+    -- The store is attached to this review, so a comment persists and renders.
+    local marks = require("intentdiff.comments.marks")
+    local shown = view._last_shown[tab]
+    assert.truthy(shown and shown.file_entry, "no file was ever shown")
+    store.add({ file = shown.file_entry.path, line = 2, side = "new",
+      type = "issue", text = "live comment" })
+    marks.refresh(tab)
+    assert.is_true(#vim.api.nvim_buf_get_extmarks(displayed, marks.ns, 0, -1, {}) > 0,
+      "the comment left no extmark on the displayed pane buffer")
+
+    -- An intent comment signs the sidebar's group head row, and survives a
+    -- re-render of the sidebar.
+    store.add({ intent_title = entry.model.groups[1].title, type = "praise", text = "nice" })
+    entry.sidebar.update(entry.model)
+    assert.is_true(#vim.api.nvim_buf_get_extmarks(entry.sidebar.bufnr, marks.ns, 0, -1, {}) > 0,
+      "the intent comment left no sign on the sidebar")
+
+    -- Closing the review detaches the store: the comments are on disk, not in
+    -- memory, so the next review does not inherit them.
+    require("intentdiff").close(tab)
+    assert.equals(0, store.count())
+  end)
+
+  it("re-files comments under new intents after re-classification", function()
+    local export = require("intentdiff.comments.export")
+    local before_model = {
+      state = "ready",
+      groups = { { title = "First pass", files = { { path = "a.lua" } },
+        hunks = { { id = "a.lua:1", file = "a.lua",
+          original = { start_line = 1, end_line = 5 },
+          modified = { start_line = 1, end_line = 5 } } } } },
+    }
+    local after_model = {
+      state = "ready",
+      groups = { { title = "Second pass", files = { { path = "a.lua" } },
+        hunks = { { id = "a.lua:1", file = "a.lua",
+          original = { start_line = 1, end_line = 5 },
+          modified = { start_line = 1, end_line = 5 } } } } },
+    }
+    store.add({ file = "a.lua", line = 2, side = "new", type = "issue", text = "x" })
+    assert.is_truthy(export.generate(store.get_all(), before_model):match("## First pass"))
+    assert.is_truthy(export.generate(store.get_all(), after_model):match("## Second pass"))
+  end)
+end)

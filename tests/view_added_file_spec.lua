@@ -56,6 +56,40 @@ describe("view: added files", function()
     assert.equals("added line 20", lines[20])
   end)
 
+  -- An added file renders a SINGLE pane: codediff closes the window it does
+  -- not need and nils that side's session_win field. Nothing else covered
+  -- keymap installation for that shape, and the comment keys made it matter —
+  -- an untracked or added file is exactly where a reviewer wants to leave
+  -- notes. (This passes against the older `ipairs({ original_bufnr,
+  -- modified_bufnr })` loop too: the *bufnr* fields do stay populated here.
+  -- It pins the behaviour, not the fix.)
+  it("installs the buffer-local keys on an added file's single pane", function()
+    local repo = repo_with_added(20)
+    require("intentdiff.config").setup({ keymaps = { comments = { add_issue = "gI" } } })
+    local inv
+    require("intentdiff.hunks").collect({ git_root = repo }, function(i) inv = i end)
+    helpers.wait_for(function() return inv end)
+    local added = vim.tbl_filter(function(h) return h.file == "added.lua" end, inv.hunks)
+
+    local sess = { tabpage = view.open_tab(), git_root = repo,
+      base_revision = base_of(repo), target_revision = "WORKING" }
+    local ready = false
+    view.show_file(sess, { path = "added.lua", status = "A", hunks = added },
+      { on_ready = function() ready = true end })
+    helpers.wait_for(function() return ready end, 10000)
+
+    local session = view.get_session(sess.tabpage)
+    assert.is_nil(session.original_win, "an added file must render a single pane")
+    local found = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(
+      vim.api.nvim_win_get_buf(session.modified_win), "n")) do
+      found[m.lhs] = true
+    end
+    assert.is_true(found["gI"] or false, "the comment keys must reach an added file's pane")
+    assert.is_true(found["g?"] or false, "the view keys must reach an added file's pane")
+    require("intentdiff.config").setup({})
+  end)
+
   it("folds a split added file down to the open group's sub-hunks", function()
     local repo = helpers.make_repo({ ["a.lua"] = "one" })
     local src = {}

@@ -12,6 +12,12 @@ local M = {}
 local sessions = {} -- [token] = { sess, model, sidebar, inventory, scope_key, elapsed_timer }
 local next_token = 0
 
+--- Whether the review-comment feature is on. Every comment hook in this file
+--- is gated on it, so a disabled feature attaches no store and leaves no marks.
+local function comments_enabled()
+  return (require("intentdiff.config").options.comments or {}).enabled ~= false
+end
+
 function M.setup(opts)
   require("intentdiff.config").setup(opts)
 end
@@ -509,6 +515,12 @@ local function open_file(token, group_i, file_i, opts)
         local h = opts.jump == "last" and hunks[#hunks] or hunks[1]
         pcall(vim.api.nvim_win_set_cursor, win, { h.modified.start_line, 0 })
       end
+      -- Also a CONTENT effect, not a focus one (see the doc comment above), so
+      -- it sits with opts.jump on the identity side of the gate: the caller
+      -- asked to be told when THIS file is on screen, and it now is.
+      if opts and opts.on_shown then
+        opts.on_shown()
+      end
       -- Everything below IS a window-focus-changing effect: skip it once a
       -- newer render_seq exists, since a newer caller (another open_file, or
       -- a select_file short-circuit) has already made — and is entitled to
@@ -613,10 +625,45 @@ select_file = function(token, group_i, file_i, opts)
       -- entry.render_seq's doc comment on open_file above.
       entry.render_seq = (entry.render_seq or 0) + 1
       focus_diff_pane(entry.sess.tabpage)
+      -- The panes already show this file, so it IS "shown" — the callback must
+      -- still fire here, or M.open_path's caller would silently never place
+      -- its cursor whenever the file happened to be on screen already.
+      if opts.on_shown then
+        opts.on_shown()
+      end
       return
     end
   end
   open_file(token, group_i, file_i, opts)
+end
+
+--- Open `path`'s diff in `tabpage`'s panes and call `on_shown()` once it has
+--- actually rendered.
+---
+--- Deliberately the SAME route the sidebar's <CR> takes (select_file →
+--- open_file), so the file arrives folded to its intent, with ]c/[c attached
+--- and focus in the diff — the caller gets a properly opened file, not a
+--- buffer swap. The comment list picker is the caller: jumping to a comment in
+--- a file that is not on screen has to open that file first.
+---
+--- Resolves `path` against the CURRENT model, first group wins — the same
+--- convention refold_shown_file uses for a file whose hunks straddle two
+--- intents, so both name the same one.
+--- @return boolean whether the model has a file at `path` (on_shown never
+---   fires when this is false, or when a newer render supersedes this one)
+function M.open_path(tabpage, path, on_shown)
+  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+  for token, entry in pairs(sessions) do
+    if entry.sess.tabpage == tabpage then
+      local group_i, file_i = locate_in_model(entry.model, { path = path })
+      if not group_i then
+        return false
+      end
+      select_file(token, group_i, file_i, { focus_diff = true, on_shown = on_shown })
+      return true
+    end
+  end
+  return false
 end
 
 --- Auto-open the first file of the first group, when auto_open is enabled
@@ -760,6 +807,12 @@ local function forget_entry(token)
   end
   require("intentdiff.classify").cancel(token) -- kill any in-flight provider
   require("intentdiff.navigation").detach(entry.sess.tabpage)
+  -- Stop persisting to this review's key, drop its comments from memory and
+  -- wipe their marks. Anything the user added is already on disk (the store
+  -- saves on every change), so the next review of the same range loads it back.
+  if comments_enabled() then
+    require("intentdiff.comments").detach_session()
+  end
   -- The sidebar buffer is bufhidden="hide" so it can survive being hidden;
   -- nothing reclaims it automatically, so the session that created it owns
   -- deleting it. Without this the plugin leaks one buffer per review.
@@ -1187,6 +1240,18 @@ function M.open(argline)
           end
           current.sess.base_revision = base_hash
           current.sess.target_revision = target_rev or "WORKING"
+          -- Load this review's stored comments HERE, and not one line earlier:
+          -- attach_session decides between branch keying (a working-tree
+          -- review) and revision-pair keying by reading exactly the two fields
+          -- just assigned above. Attaching back where `sess` is first created
+          -- would see neither, treat every review as a working-tree one, and a
+          -- `:IntentDiff HEAD~1` review would load the working-tree review's
+          -- comments — then persist them back under the wrong key. Nothing
+          -- renders between here and classify_and_render below, so there is no
+          -- window in which the comments are missing from a drawn pane.
+          if comments_enabled() then
+            require("intentdiff.comments").attach_session(current)
+          end
           current.inventory = inventory
           classify_and_render(token)
         end)

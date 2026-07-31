@@ -5,6 +5,13 @@ M.ns = vim.api.nvim_create_namespace("intentdiff_sidebar")
 local tree = require("intentdiff.tree")
 local hl = require("intentdiff.highlight")
 
+--- Whether the review-comment feature is on. Every comment hook in this file
+--- is gated on it, so with `comments.enabled = false` the sidebar installs no
+--- comment keys and renders no signs.
+local function comments_enabled()
+  return (require("intentdiff.config").options.comments or {}).enabled ~= false
+end
+
 --- Hard-wrap `text` to `width` display columns on word boundaries, hard-cutting
 --- a single word that is longer than the width. The sidebar window keeps
 --- `wrap = false` so tree alignment survives; wrapping happens here instead.
@@ -125,7 +132,13 @@ function M.layout(model)
     -- lines 2+ and the stats line share `group_meta`, so group_head must
     -- NOT be set on that shared table, or every line would report it).
     local group_meta = { kind = "group", group_i = gi }
-    local group_head_meta = { kind = "group", group_i = gi, group_head = true }
+    -- `title` rides along on the HEAD row only, so handle.comment_rows can
+    -- report one row per intent — with the title comment lookups key on —
+    -- without the sidebar having to retain the model it last rendered. The
+    -- shared `group_meta` deliberately does not carry it, for the same reason
+    -- it does not carry group_head: every wrapped title line and the stats
+    -- line share that one table.
+    local group_head_meta = { kind = "group", group_i = gi, group_head = true, title = g.title }
     local marker = g.collapsed and "▸" or "▾"
     local title_lines = wrap_text(g.title, width - 2)
     for i, text in ipairs(title_lines) do
@@ -221,6 +234,11 @@ function M.create(callbacks)
   local width = require("intentdiff.config").options.sidebar_width
   vim.cmd("topleft " .. width .. "vsplit")
   local winid = vim.api.nvim_get_current_win()
+  -- The tab this sidebar belongs to, captured once: init.lua creates the
+  -- sidebar INSIDE the codediff tab it just bootstrapped, and hiding the
+  -- sidebar drops handle.winid, so re-deriving it later would fail exactly
+  -- when a comment refresh still needs it.
+  local tabpage = vim.api.nvim_win_get_tabpage(winid)
   local bufnr = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_win_set_buf(winid, bufnr)
   vim.bo[bufnr].buftype = "nofile"
@@ -232,6 +250,23 @@ function M.create(callbacks)
 
   function handle.meta_at(lnum)
     return handle.meta[lnum]
+  end
+
+  --- The one row per intent that a comment sign can hang from, straight out of
+  --- the meta table the last render produced — no retained model, so this can
+  --- never disagree with what is on screen.
+  ---
+  --- `pairs`, not `ipairs`: meta is keyed by line number and the caller sorts
+  --- nothing, but more importantly a hole would end an ipairs walk early.
+  --- @return { lnum: integer, title: string }[]
+  function handle.comment_rows()
+    local out = {}
+    for lnum, m in pairs(handle.meta) do
+      if m and m.kind == "group" and m.group_head and m.title then
+        out[#out + 1] = { lnum = lnum, title = m.title }
+      end
+    end
+    return out
   end
 
   function handle.update(model)
@@ -253,6 +288,15 @@ function M.create(callbacks)
     for _, s in ipairs(highlights) do
       pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, s.line - 1, s.col_start,
         { end_col = s.col_end, hl_group = s.hl })
+    end
+    -- Comment signs live in their own namespace, and the render above just
+    -- moved every row: re-sign the intents that carry a comment. No-op when
+    -- comments are off, or before this sidebar's session is registered (the
+    -- very first update, which has nothing to sign anyway).
+    if comments_enabled() then
+      pcall(function()
+        require("intentdiff.comments").refresh_sidebar(tabpage)
+      end)
     end
   end
 
@@ -369,6 +413,11 @@ function M.create(callbacks)
       callbacks.on_goto_file(m.group_i, m.file_i)
     end
   end, "intent-diff: open the real file")
+
+  -- The comment keys are installed on the sidebar as well as on the panes: an
+  -- intent comment is added from a group row, and the export/list keys have to
+  -- be reachable from whichever surface the user happens to be in.
+  require("intentdiff.view").install_comment_keymaps(bufnr, tabpage)
 
   return handle
 end

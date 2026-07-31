@@ -155,6 +155,22 @@ function M.foldexpr()
   return visible[vim.v.lnum] and "0" or "1"
 end
 
+--- Re-render the comment marks of `tabpage` after a pane rebuild. Every event
+--- that replaces or refolds a pane buffer goes through here: extmarks live on
+--- the buffer, so a fresh buffer (or a re-fold that changes what is visible)
+--- loses them.
+---
+--- No-op when comments are disabled, and pcall'd: a failure to draw a comment
+--- box must never break the render it is hanging off.
+local function refresh_comments(tabpage)
+  if (require("intentdiff.config").options.comments or {}).enabled == false then
+    return
+  end
+  pcall(function()
+    require("intentdiff.comments.marks").refresh(tabpage)
+  end)
+end
+
 local function context_lines()
   local ours = require("intentdiff.config").options.context_lines
   if ours then
@@ -238,6 +254,7 @@ function M.apply_group_folds(tabpage, hunks, opts)
     end
   end
   M._active_folds[tabpage] = { hunks = hunks, context = opts.context }
+  refresh_comments(tabpage)
   return true
 end
 
@@ -609,6 +626,9 @@ function M.show_file(sess, file_entry, opts)
       if file_entry.status ~= "D" and file_entry.hunks then
         M.apply_group_folds(tabpage, file_entry.hunks, { context = 0 })
       end
+      -- Not covered by apply_group_folds' own refresh: it is skipped for "D"
+      -- and for a file with no hunks, and refuses outright during a preview.
+      refresh_comments(tabpage)
       if opts.on_ready then
         opts.on_ready()
       end
@@ -636,6 +656,7 @@ function M.show_file(sess, file_entry, opts)
   when_diff_ready(tabpage, abs_path, function()
     M.apply_group_folds(tabpage, file_entry.hunks)
     M.install_keymaps(tabpage)
+    refresh_comments(tabpage)
     if opts.on_ready then
       opts.on_ready()
     end
@@ -739,6 +760,56 @@ local function pane_windows(session)
     wins[#wins + 1] = session.modified_win
   end
   return wins
+end
+
+--- Every buffer of `session`'s diff panes that a buffer-local keymap should be
+--- installed on, hole-free and de-duplicated.
+---
+--- Takes the buffers the pane WINDOWS actually display first, and only then
+--- the session's own original_bufnr/modified_bufnr fields.
+---
+--- The window-derived half is the point. Those session fields lag a render:
+--- codediff writes them from a callback it schedules (see preview_buf's
+--- comment on exactly that), and mid-flight they were observed still naming
+--- codediff's 1-line "CodeDiff 2.1"/"2.2" placeholder buffers while the panes
+--- had already moved on to the real file and its `codediff://` counterpart.
+--- Whether a given install_keymaps call lands inside that gap depends on
+--- codediff's scheduling, so keys installed from the fields alone are keys
+--- that MIGHT end up on a buffer nobody is looking at. intentdiff.navigation
+--- has always installed ]c/[c via `nvim_win_get_buf(win)`, and marks.lua
+--- renders comment boxes the same way; this puts the rest of our buffer-local
+--- keys on that same footing. The fields are still consulted afterwards, so a
+--- pane whose window is momentarily closed (a layout toggle in flight) keeps
+--- its keys.
+---
+--- The de-duplication is not cosmetic: inline layout puts one buffer in both
+--- panes, and the two sources overlap by design.
+---
+--- Deliberately not `ipairs({ session.original_bufnr, session.modified_bufnr })`:
+--- that stops at the first nil. Codediff does appear to keep both bufnr fields
+--- populated even for a single-pane ??/A/D file (it is the *_win fields that go
+--- nil there — see pane_windows), so this is a guard rather than a fix for an
+--- observed break; but nothing about codediff's API promises it, and this
+--- codebase has shipped that exact nil hole twice.
+local function pane_bufs(session)
+  local out, seen = {}, {}
+  local function add(buf)
+    if buf and not seen[buf] and vim.api.nvim_buf_is_valid(buf) then
+      seen[buf] = true
+      out[#out + 1] = buf
+    end
+  end
+  for _, win in ipairs(pane_windows(session)) do
+    if vim.api.nvim_win_is_valid(win) then
+      local ok, buf = pcall(vim.api.nvim_win_get_buf, win)
+      if ok then
+        add(buf)
+      end
+    end
+  end
+  add(session.original_bufnr)
+  add(session.modified_bufnr)
+  return out
 end
 
 --- Drop any group-fold state for `tabpage`'s panes, so a preview buffer is
@@ -874,6 +945,10 @@ function M.restore(sess)
   -- the preview in the panes, and doing it there covers every caller that
   -- does so, not just this one.
   M.show_file(shown.sess, shown.file_entry)
+  -- show_file's own completion path refreshes too, once its (async) render has
+  -- landed; this covers the synchronous half — the preview's marks are gone
+  -- from these buffers the moment the file is back.
+  refresh_comments(tabpage)
   return true
 end
 
@@ -932,11 +1007,14 @@ function M.install_keymaps(tabpage)
   -- key is unreachable then). An early return gated only on `key` used to
   -- skip this block entirely.
   local vkm = require("intentdiff.config").options.keymaps.view or {}
-  if not key and not vkm.toggle_sidebar and not vkm.show_help then
-    return -- nothing to install
-  end
-  for _, buf in ipairs({ session.original_bufnr, session.modified_bufnr }) do
-    if buf and vim.api.nvim_buf_is_valid(buf) then
+  -- Was an early return; it is now a flag, because the comment keys below are
+  -- installed on the same buffers and have nothing to do with whether any
+  -- `keymaps.view` action is enabled.
+  local want_view_keys = (key or vkm.toggle_sidebar or vkm.show_help) and true or false
+  -- pane_bufs, not `ipairs({ original_bufnr, modified_bufnr })`: see its
+  -- comment on the nil hole that literal opens up for whole-file panes.
+  for _, buf in ipairs(pane_bufs(session)) do
+    if want_view_keys then
       if key then
         pcall(vim.keymap.set, "n", key, function()
           M.toggle_layout(tabpage)
@@ -951,6 +1029,91 @@ function M.install_keymaps(tabpage)
         end,
       })
     end
+    M.install_comment_keymaps(buf, tabpage)
+  end
+end
+
+--- Descriptions for the `keymaps.comments` actions, shown in :map / which-key.
+M.COMMENT_DESCS = {
+  add_comment = "intent-diff: add a comment",
+  add_note = "intent-diff: add a note",
+  add_suggestion = "intent-diff: add a suggestion",
+  add_issue = "intent-diff: add an issue",
+  add_praise = "intent-diff: add praise",
+  add_file_comment = "intent-diff: comment on the file / the intent",
+  edit_comment = "intent-diff: edit the comment at the cursor",
+  delete_comment = "intent-diff: delete the comment at the cursor",
+  list_comments = "intent-diff: list every comment",
+  next_comment = "intent-diff: next comment",
+  prev_comment = "intent-diff: previous comment",
+  export_clipboard = "intent-diff: copy the review as Markdown",
+  export_file = "intent-diff: write the review to a file",
+  clear_comments = "intent-diff: delete every comment",
+  export_and_close = "intent-diff: copy the review, then close the tab",
+}
+
+--- The visual-mode comment actions, in the order the popup's type list uses.
+---
+--- An ORDERED LIST of records, deliberately not a table keyed by lhs: an entry
+--- whose VALUE is nil is simply absent from a table constructor (so
+--- `add_comment`, whose type is nil by design, would vanish), `[nil] = ...`
+--- RAISES "table index is nil" the moment an action is disabled, and two
+--- actions sharing one lhs would silently collapse into a single entry. Keying
+--- by action name and looking the lhs up per record has none of those
+--- failure modes, and lets every binding go through keymaps.each like the rest
+--- of the plugin.
+local VISUAL_ACTIONS = {
+  { action = "add_comment", type = nil },
+  { action = "add_note", type = "note" },
+  { action = "add_suggestion", type = "suggestion" },
+  { action = "add_issue", type = "issue" },
+  { action = "add_praise", type = "praise" },
+}
+
+--- Comment keys, installed on every diff pane and on the sidebar.
+---
+--- Cross-surface by design: an intent comment is added from a sidebar group
+--- row, a line comment from a pane, and both surfaces need the export keys.
+--- `tabpage` may be nil, in which case the actions resolve the current tabpage
+--- when the key is pressed — which is always the right one for a
+--- buffer-local mapping.
+function M.install_comment_keymaps(buf, tabpage)
+  if (require("intentdiff.config").options.comments or {}).enabled == false then
+    return
+  end
+  local comments = require("intentdiff.comments")
+  require("intentdiff.keymaps").install(buf, "comments", {
+    add_comment = function() comments.add(tabpage) end,
+    add_note = function() comments.add(tabpage, "note") end,
+    add_suggestion = function() comments.add(tabpage, "suggestion") end,
+    add_issue = function() comments.add(tabpage, "issue") end,
+    add_praise = function() comments.add(tabpage, "praise") end,
+    add_file_comment = function() comments.add_file(tabpage) end,
+    edit_comment = function() comments.edit(tabpage) end,
+    delete_comment = function() comments.delete(tabpage) end,
+    list_comments = function() comments.list(tabpage) end,
+    next_comment = function() comments.next(tabpage) end,
+    prev_comment = function() comments.prev(tabpage) end,
+    export_clipboard = function() comments.export_clipboard(tabpage) end,
+    export_file = function() comments.export_file(tabpage) end,
+    clear_comments = function() comments.clear(tabpage) end,
+    export_and_close = function() comments.export_and_close(tabpage) end,
+  }, M.COMMENT_DESCS)
+
+  -- Visual-mode variants: the same add actions, over the selected range.
+  local km = (require("intentdiff.config").options.keymaps or {}).comments or {}
+  local each = require("intentdiff.keymaps").each
+  for _, record in ipairs(VISUAL_ACTIONS) do
+    local comment_type = record.type
+    each(km[record.action], function(lhs)
+      pcall(vim.keymap.set, "x", lhs, function()
+        -- <Esc> FIRST: '< and '> hold the PREVIOUS selection until visual mode
+        -- is left, so reading them from within visual mode records the wrong
+        -- lines (or none at all, on the very first selection of a session).
+        vim.cmd("normal! \27")
+        comments.add(tabpage, comment_type, { visual = true })
+      end, { buffer = buf, nowait = true, desc = M.COMMENT_DESCS[record.action] })
+    end)
   end
 end
 
@@ -1003,29 +1166,29 @@ function M.install_preview_keymaps(tabpage, sess, hunk_lines)
       end
     end
   end
-  local seen = {}
-  for _, buf in ipairs({ session.original_bufnr, session.modified_bufnr }) do
-    if buf and vim.api.nvim_buf_is_valid(buf) and not seen[buf] then
-      seen[buf] = true
-      if toggle_key then
-        pcall(vim.keymap.set, "n", toggle_key, function()
-          M.toggle_preview_layout(tabpage)
-        end, { buffer = buf, nowait = true, desc = "intent-diff: toggle preview layout" })
-      end
-      M.map_view_keys(buf, {
-        toggle_sidebar = function()
-          require("intentdiff").toggle_sidebar(tabpage)
-        end,
-        show_help = function()
-          require("intentdiff.keymap_help").toggle()
-        end,
-        quit = function()
-          require("intentdiff").close(tabpage)
-        end,
-        next_hunk = hunk_step(1),
-        prev_hunk = hunk_step(-1),
-      })
+  -- pane_bufs de-dupes (inline layout shares one buffer between both fields)
+  -- and skips the nil hole a bare table literal would leave. Comment keys are
+  -- deliberately NOT installed here: a preview buffer concatenates many files,
+  -- so comments.context refuses to place a comment in one.
+  for _, buf in ipairs(pane_bufs(session)) do
+    if toggle_key then
+      pcall(vim.keymap.set, "n", toggle_key, function()
+        M.toggle_preview_layout(tabpage)
+      end, { buffer = buf, nowait = true, desc = "intent-diff: toggle preview layout" })
     end
+    M.map_view_keys(buf, {
+      toggle_sidebar = function()
+        require("intentdiff").toggle_sidebar(tabpage)
+      end,
+      show_help = function()
+        require("intentdiff.keymap_help").toggle()
+      end,
+      quit = function()
+        require("intentdiff").close(tabpage)
+      end,
+      next_hunk = hunk_step(1),
+      prev_hunk = hunk_step(-1),
+    })
   end
   M._preview_sess[tabpage] = sess
 end
@@ -1049,6 +1212,11 @@ function M.toggle_preview_layout(tabpage)
   M.toggle_layout(tabpage, {
     on_done = function()
       M.show_preview(sess, group)
+      -- A preview owns the panes again, so this is a no-op today (marks.refresh
+      -- refuses while _preview_active is set). It is here so that the moment
+      -- the preview is left — or the guard ever changes — the toggled layout's
+      -- panes are re-signed like every other rebuild.
+      refresh_comments(tabpage)
     end,
   })
   return true
@@ -1104,6 +1272,7 @@ function M.toggle_layout(tabpage, opts)
           if shown.file_entry.status ~= "D" and shown.file_entry.hunks then
             M.apply_group_folds(tabpage, shown.file_entry.hunks, { context = 0 })
           end
+          refresh_comments(tabpage)
           done()
         end)
       return true
@@ -1122,6 +1291,7 @@ function M.toggle_layout(tabpage, opts)
   when_diff_ready(tabpage, abs_path, function()
     M.apply_group_folds(tabpage, file_entry.hunks)
     M.install_keymaps(tabpage)
+    refresh_comments(tabpage)
     done()
   end)
   return true
