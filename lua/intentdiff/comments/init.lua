@@ -202,8 +202,13 @@ function M.attach_session(entry)
   else
     key = storage.key(sess.git_root, sess.base_revision, sess.target_revision, nil)
   end
-  -- No derivable key (no git root, or a working-tree review on a detached
-  -- HEAD): the review still takes comments, they just do not persist.
+  -- No derivable key: a working-tree review whose branch cannot be read at all
+  -- (git not executable, or git_root not actually a repository) — the review
+  -- still takes comments, they just do not persist. A detached HEAD is NOT one
+  -- of those cases: `git rev-parse --abbrev-ref HEAD` answers the literal
+  -- "HEAD", which is a non-empty branch name, so storage.key does return a key
+  -- and such a review DOES persist — with every detached-HEAD working-tree
+  -- review of that repo sharing the one key.
   if key then
     st.attach(key)
   end
@@ -329,6 +334,46 @@ function M.add_file(tabpage)
   return M.add(tabpage, nil, { file_level = true })
 end
 
+--- The buffer the cursor is in, or nil. The same window `M.context` read the
+--- cursor line from, so a clamped lookup measures against exactly the buffer
+--- the user is looking at.
+--- @return integer|nil
+local function current_buf()
+  local ok, bufnr = pcall(vim.api.nvim_win_get_buf, vim.api.nvim_get_current_win())
+  if not ok then
+    return nil
+  end
+  return bufnr
+end
+
+--- The comment whose RENDERED box covers `line` in `bufnr` — the fallback for
+--- a comment that drifted past the end of the buffer.
+---
+--- `store.get_at_line` matches on the RAW stored line, while `marks` clamps a
+--- past-EOF comment onto the buffer's last line so it stays visible. Without
+--- this, a comment stored at line 500 of a file that is now 5 lines long draws
+--- a box the user can see and reports "no comment here" for every edit/delete
+--- on it — visible, but unreachable. The clamp is `marks.clamped_span_in_buf`,
+--- the very function the renderer places the box with, so the two answers
+--- cannot disagree.
+--- @return intentdiff.Comment|nil
+local function drifted_at_line(st, ctx, bufnr)
+  local line = ctx.line
+  if not (bufnr and line) then
+    return nil
+  end
+  for _, c in ipairs(st.get_for_file(ctx.file, ctx.side)) do
+    -- File-level comments hang above line 1 and address no line at all.
+    if (c.line or 0) ~= 0 then
+      local first, final = marks.clamped_span_in_buf(c, bufnr)
+      if first and line >= first and line <= final then
+        return c
+      end
+    end
+  end
+  return nil
+end
+
 --- The comment under the cursor, for edit/delete. Calls `cb(comment|nil)` —
 --- an intent can carry SEVERAL comments (the design spec's "a group can have
 --- several; they are emitted in creation order"), and disambiguating among
@@ -368,7 +413,11 @@ local function at_cursor(tabpage, st, cb)
     end
     return cb(nil)
   end
-  return cb(st.get_at_line(ctx.file, ctx.line, ctx.side))
+  local found = st.get_at_line(ctx.file, ctx.line, ctx.side)
+  if not found then
+    found = drifted_at_line(st, ctx, current_buf())
+  end
+  return cb(found)
 end
 
 function M.edit(tabpage)
@@ -407,6 +456,21 @@ function M.delete(tabpage)
   end)
 end
 
+--- Is `win` one of this review's diff panes? `]n`/`[n` are installed on the
+--- SIDEBAR as well (every comment key is, so the export keys are reachable from
+--- either surface), and a sidebar row number is not a diff line — jumping on it
+--- moved the sidebar cursor to an arbitrary row, which with
+--- `preview.hover_opens_files` on then re-rendered the panes to whatever intent
+--- that row belongs to.
+local function in_diff_pane(tabpage, win)
+  for _, w in ipairs(require("intentdiff.view").diff_wins(tabpage)) do
+    if w == win then
+      return true
+    end
+  end
+  return false
+end
+
 local function jump(tabpage, finder)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local st = M.store_for(tabpage)
@@ -418,7 +482,16 @@ local function jump(tabpage, finder)
   if not (shown and shown.file_entry) then
     return
   end
+  -- The two guards every sibling checks: a preview buffer concatenates many
+  -- files (M.list, M.context and marks.refresh all refuse there), and the
+  -- comment keys reach surfaces that are not diff panes at all.
+  if view._preview_active[tabpage] then
+    return notify("comments are not shown in an intent preview", vim.log.levels.WARN)
+  end
   local win = vim.api.nvim_get_current_win()
+  if not in_diff_pane(tabpage, win) then
+    return notify("comment navigation only works in a diff pane", vim.log.levels.WARN)
+  end
   local session = view.get_session(tabpage)
   local side = M.side_for_win(win, session)
   local cur = vim.api.nvim_win_get_cursor(win)[1]
@@ -426,7 +499,20 @@ local function jump(tabpage, finder)
   if not target then
     return notify("no more comments in this file")
   end
-  pcall(vim.api.nvim_win_set_cursor, win, { target, 0 })
+  -- A comment that outlived its lines is RENDERED on the last line (marks
+  -- clamps it there); its stored line can be far past EOF, and
+  -- nvim_win_set_cursor to a line that does not exist fails — silently, since
+  -- it is pcall'd — so `]n` did nothing at all, not even the "no more
+  -- comments" notice. Land on the box where it is actually drawn instead.
+  local line = target
+  local ok_buf, bufnr = pcall(vim.api.nvim_win_get_buf, win)
+  if ok_buf then
+    local first = marks.clamped_span_in_buf({ line = target }, bufnr)
+    if first then
+      line = first
+    end
+  end
+  pcall(vim.api.nvim_win_set_cursor, win, { line, 0 })
 end
 
 function M.next(tabpage)
@@ -449,7 +535,19 @@ local function place_cursor(tabpage, c)
   local session = view.get_session(tabpage)
   for _, win in ipairs(view.diff_wins(tabpage)) do
     if (c.side or "new") == M.side_for_win(win, session) then
-      pcall(vim.api.nvim_win_set_cursor, win, { c.line, 0 })
+      -- Clamped per window, exactly as marks draws the box: a comment whose
+      -- line outlived the file renders on the last line, and a cursor move to
+      -- its raw line simply fails (pcall'd, so silently) — the picker would
+      -- appear to do nothing.
+      local line = c.line
+      local ok_buf, bufnr = pcall(vim.api.nvim_win_get_buf, win)
+      if ok_buf then
+        local first = marks.clamped_span_in_buf(c, bufnr)
+        if first then
+          line = first
+        end
+      end
+      pcall(vim.api.nvim_win_set_cursor, win, { line, 0 })
       pcall(vim.api.nvim_win_call, win, function()
         vim.cmd("normal! zv")
       end)

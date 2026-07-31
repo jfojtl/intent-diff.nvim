@@ -99,6 +99,14 @@ function M.load(key)
   local ok, decoded = pcall(vim.json.decode, content)
   if not ok or type(decoded) ~= "table" then
     require("intentdiff.log").append({ kind = "comments", event = "corrupt_store", path = path })
+    -- Notified, not just logged: an unwritable DIRECTORY warns the user (see
+    -- M.save), while this — the case where work the user can SEE disappears —
+    -- used to be silent, so the review opened with zero comments and no reason
+    -- to go looking in :IntentDiffLog.
+    vim.notify(
+      "intent-diff: comment store at " .. path .. " is unreadable — starting empty",
+      vim.log.levels.WARN
+    )
     return {}
   end
   return decoded

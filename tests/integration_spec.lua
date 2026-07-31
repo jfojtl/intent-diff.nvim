@@ -1412,6 +1412,43 @@ describe("comments in a review tab", function()
     assert.is_truthy(cmds.IntentDiffCommentsClear)
   end)
 
+  -- The commands are registered UNCONDITIONALLY (plugin/intentdiff.lua runs
+  -- long before setup() decides anything), so `comments.enabled = false` is a
+  -- real contract only because each one refuses up front. Asserting the
+  -- commands merely EXIST never executes that refusal — so run one, with the
+  -- feature off, and check both halves of what refusing means: the user is
+  -- told, and the clipboard is left exactly as it was.
+  it("refuses every comment command while comments are disabled", function()
+    require("intentdiff.config").setup({ comments = { enabled = false } })
+    local real_notify = vim.notify
+    local messages = {}
+    vim.notify = function(msg) messages[#messages + 1] = msg end
+
+    vim.fn.setreg("+", "SENTINEL")
+    local out_path = vim.fn.tempname() .. "/refused.md"
+    local ok, err = pcall(function()
+      for _, cmd in ipairs({ "IntentDiffCommentsYank", "IntentDiffCommentsList",
+        "IntentDiffCommentsClear", "IntentDiffCommentsWrite " .. out_path }) do
+        vim.cmd(cmd)
+      end
+    end)
+    vim.notify = real_notify
+    assert.is_true(ok, "a disabled command must refuse, not error: " .. tostring(err))
+
+    assert.equals("SENTINEL", vim.fn.getreg("+"),
+      "a refused :IntentDiffCommentsYank must not touch the clipboard")
+    assert.equals(0, vim.fn.filereadable(out_path),
+      "a refused :IntentDiffCommentsWrite must not create a file")
+    local refusals = 0
+    for _, msg in ipairs(messages) do
+      if tostring(msg):find("review comments are disabled", 1, true) then
+        refusals = refusals + 1
+      end
+    end
+    assert.equals(4, refusals,
+      "every comment command must say why it did nothing, got: " .. vim.inspect(messages))
+  end)
+
   it("lists comment keys in the g? help", function()
     require("intentdiff.config").setup({})
     local sections = require("intentdiff.keymap_help")._build_sections(
@@ -1467,16 +1504,25 @@ describe("comments in a review tab", function()
     require("intentdiff.config").setup({ keymaps = { comments = { add_praise = false } } })
     local sections = require("intentdiff.keymap_help")._build_sections(
       require("intentdiff.config").options.keymaps)
+    -- The flag its sibling above uses, for the same reason: with every
+    -- assertion inside `if s.title == "COMMENTS"`, a mutation that emits no
+    -- COMMENTS section at all executes ZERO assertions and passes.
+    local found_comments = false
     for _, s in ipairs(sections) do
       if s.title == "COMMENTS" then
+        found_comments = true
         for _, item in ipairs(s.items) do
           assert.are_not.equals("<localleader>cp", item[1])
         end
       end
     end
+    assert.is_true(found_comments, "the COMMENTS section must exist for this to mean anything")
   end)
 
-  it("installs no comment keys when comments are disabled", function()
+  -- Named for what it checks: the g? cheatsheet. What it does NOT check is
+  -- keymap installation — that is the two tests below, on a scratch buffer and
+  -- on a live review tab's real pane.
+  it("omits the whole COMMENTS section from the help when comments are disabled", function()
     require("intentdiff.config").setup({ comments = { enabled = false } })
     local sections = require("intentdiff.keymap_help")._build_sections(
       require("intentdiff.config").options.keymaps)
@@ -1630,6 +1676,16 @@ describe("comments in a review tab", function()
     assert.is_true(#vim.api.nvim_buf_get_extmarks(displayed, marks.ns, 0, -1, {}) > 0,
       "the comment left no extmark on the displayed pane buffer")
 
+    -- `]n` against the REAL diff_wins. The navigation guard ("am I in a diff
+    -- pane?") reads codediff's session windows, so this is what proves those
+    -- agree with the window the user's cursor is actually in — a stub cannot.
+    local session = view.get_session(tab)
+    vim.api.nvim_set_current_win(session.modified_win)
+    vim.api.nvim_win_set_cursor(session.modified_win, { 1, 0 })
+    require("intentdiff.comments").next(tab)
+    assert.equals(2, vim.api.nvim_win_get_cursor(session.modified_win)[1],
+      "]n did not reach the comment from inside a real diff pane")
+
     -- An intent comment signs the sidebar's group head row, and survives a
     -- re-render of the sidebar.
     st.add({ intent_title = entry.model.groups[1].title, type = "praise", text = "nice" })
@@ -1646,6 +1702,98 @@ describe("comments in a review tab", function()
       assert.equals(0, #vim.api.nvim_buf_get_extmarks(displayed, marks.ns, 0, -1, {}),
         "the review's comment extmarks outlived it")
     end
+  end)
+
+  -- The `comments.enabled = false` contract against a REAL review, which is
+  -- the only place it means anything: the pane buffer the review displays and
+  -- the sidebar both go through install_comment_keymaps, and neither may come
+  -- out carrying a comment key. Deliberately identified by a VIEW key first —
+  -- asserting "no comment keys" on a buffer whose keymaps were never installed
+  -- at all would pass no matter what the flag does.
+  it("installs no comment keys on a live review with comments disabled", function()
+    local repo = helpers.make_repo({ ["a.lua"] = table.concat(vim.fn.range(1, 40), "\n") })
+    helpers.write_file(repo, "a.lua", "CHANGED\n" .. table.concat(vim.fn.range(2, 40), "\n"))
+    vim.cmd("cd " .. repo)
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      comments = { enabled = false },
+      -- Distinctive, leader-free keys: nvim_buf_get_keymap reports the
+      -- EXPANDED lhs, so the `<localleader>c*` defaults would come back as
+      -- "\ci" and an assertion written against the config string would be
+      -- comparing the wrong thing.
+      keymaps = { comments = { add_issue = "gI", next_comment = "]N" } },
+      provider = function(_, cb)
+        vim.schedule(function()
+          cb({ groups = { { title = "Only intent", hunk_ids = { "a.lua:1" } } } })
+        end)
+        return { cancel = function() end }
+      end,
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local entry = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model.state == "ready" and s or nil
+    end, 10000)
+    assert.truthy(entry, "the review never became ready")
+
+    local view = require("intentdiff.view")
+    -- Wait for the pane buffer to have OUR view keys on it: that is the moment
+    -- install_comment_keymaps has run for it too.
+    local displayed = helpers.wait_for(function()
+      local session = view.get_session(tab)
+      local win = session and session.modified_win
+      if not (win and vim.api.nvim_win_is_valid(win)) then
+        return nil
+      end
+      local buf = vim.api.nvim_win_get_buf(win)
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+        if m.lhs == "g?" then
+          return buf
+        end
+      end
+      return nil
+    end, 10000)
+    assert.truthy(displayed, "the review's own pane keys never landed on a buffer")
+
+    --- Every lhs bound on `buf` in `mode`, and every desc.
+    local function bound(buf, mode)
+      local lhs, descs = {}, {}
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, mode)) do
+        lhs[m.lhs] = true
+        if m.desc then
+          descs[m.desc] = true
+        end
+      end
+      return lhs, descs
+    end
+
+    local comment_descs = {}
+    for _, desc in pairs(view.COMMENT_DESCS) do
+      comment_descs[desc] = true
+    end
+
+    -- Asserted, not assumed: a nil second element would make this ipairs stop
+    -- at index 1 and silently skip the sidebar — the nil-hole trap this
+    -- codebase has paid for elsewhere.
+    assert.truthy(entry.sidebar and entry.sidebar.bufnr, "the review has no sidebar buffer")
+    for _, buf in ipairs({ displayed, entry.sidebar.bufnr }) do
+      for _, mode in ipairs({ "n", "x" }) do
+        local lhs, descs = bound(buf, mode)
+        assert.is_nil(lhs["gI"], "an add key is bound with comments disabled (" .. mode .. ")")
+        assert.is_nil(lhs["]N"], "a navigation key is bound with comments disabled (" .. mode .. ")")
+        -- Nothing else from the comment set either, whatever it is bound to.
+        for desc in pairs(descs) do
+          assert.is_nil(comment_descs[desc], "comment action still bound: " .. desc)
+        end
+      end
+    end
+
+    -- ...and the review never took a store, so nothing could be recorded even
+    -- if a key did somehow fire.
+    assert.is_nil(entry.comment_store)
+
+    require("intentdiff").close(tab)
   end)
 
   -- Two review tabs open at once, through the real `:IntentDiff` path — the

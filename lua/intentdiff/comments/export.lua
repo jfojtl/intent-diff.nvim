@@ -151,8 +151,20 @@ function M.generate(comments, model)
   out[#out + 1] = ""
 
   local n = 0
-  local function emit(bucket)
+  --- `has_heading` says whether a `## <title>` line for the intent these
+  --- comments were attached to is about to sit above them. When one is, the
+  --- heading IS the anchor and the comment reads as prose under it. When there
+  --- is none, the intent title has to travel WITH the comment: without it, an
+  --- intent comment in the flat fallback (`#groups == 0` — classification
+  --- failed or is still running) renders exactly where a document preamble
+  --- goes, and a consuming agent reads it as part of the instructions; under
+  --- `## Unmatched comments` (the group was renamed by re-classification) it is
+  --- a floating sentence with nothing saying what it was attached to.
+  local function emit(bucket, has_heading)
     for _, c in ipairs(bucket.intents) do
+      if not has_heading and c.intent_title then
+        out[#out + 1] = ("_Intent: %s_"):format(c.intent_title)
+      end
       for _, line in ipairs(vim.split(c.text or "", "\n")) do
         out[#out + 1] = line
       end
@@ -166,7 +178,7 @@ function M.generate(comments, model)
   end
 
   if buckets[0] then
-    emit(buckets[0]) -- flat fallback: no headings
+    emit(buckets[0], false) -- flat fallback: no headings
   end
   -- "Ungrouped last" is not enforced here — it holds only because
   -- classify.reconcile appends the synthetic Ungrouped group last. A future
@@ -177,7 +189,9 @@ function M.generate(comments, model)
     if bucket then
       out[#out + 1] = "## " .. g.title
       out[#out + 1] = ""
-      emit(bucket)
+      -- The `## <title>` line above IS the anchor: repeating the title here
+      -- would be noise.
+      emit(bucket, true)
     end
   end
   if #unmatched > 0 then
@@ -191,7 +205,9 @@ function M.generate(comments, model)
         table.insert(bucket.items, c)
       end
     end
-    emit(bucket)
+    -- "Unmatched" names no intent, so an intent comment here still carries its
+    -- own title.
+    emit(bucket, false)
   end
 
   -- Trim the trailing blank line an entry always emits.

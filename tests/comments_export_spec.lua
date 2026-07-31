@@ -142,6 +142,42 @@ describe("comments.export", function()
     assert.is_truthy(md:match("orphan"))
   end)
 
+  -- An intent comment is emitted as bare prose, which is right UNDER a
+  -- `## <title>` heading — the heading is what says which intent it is about.
+  -- With no heading above it there is nothing making it a comment at all: in
+  -- the flat fallback it sits exactly where a document preamble goes, and a
+  -- consuming agent reads it as part of the instructions. So the title has to
+  -- travel with the comment in both anchorless cases.
+  it("names the intent of an intent comment in the flat fallback", function()
+    local md = export.generate({
+      { intent_title = "Add retry logic", type = "note", text = "whole intent is wrong" },
+    }, { state = "loading", groups = {} })
+    assert.is_nil(md:match("\n## "), "the flat fallback has no headings")
+    assert.is_truthy(md:match("_Intent: Add retry logic_"),
+      "an intent comment with no heading above it must carry its own title: " .. md)
+    assert.is_truthy(md:match("whole intent is wrong"))
+  end)
+
+  it("names the intent of an intent comment under Unmatched", function()
+    -- Re-classification renamed the group: the README sells this as the
+    -- graceful path, so the reader must still be told what the comment was
+    -- attached to. "## Unmatched comments" is not that title.
+    local md = export.generate({
+      { intent_title = "A group that no longer exists", type = "note", text = "orphan" },
+    }, model())
+    assert.is_truthy(md:match("_Intent: A group that no longer exists_"),
+      "an unmatched intent comment must carry the title it was attached to: " .. md)
+  end)
+
+  -- ...and NOT under its own heading, where the title would just be repeated.
+  it("does not repeat the intent title under its own heading", function()
+    local md = export.generate({
+      { intent_title = "Add retry logic to HTTP client", type = "note", text = "Whole thing is wrong." },
+    }, model())
+    assert.is_truthy(md:match("## Add retry logic to HTTP client"))
+    assert.is_nil(md:match("_Intent:"), "the heading is already the anchor: " .. md)
+  end)
+
   it("treats hunk ranges as end-exclusive", function()
     -- routes.ts hunk covers modified lines 4 and 5, not 6.
     local inside = export.generate({
@@ -252,5 +288,28 @@ describe("comments.export", function()
     vim.fn.setreg("+", "SENTINEL")
     assert.is_false(export.to_clipboard({}, model()))
     assert.equals("SENTINEL", vim.fn.getreg("+"))
+  end)
+
+  -- The clipboard is the PRIMARY export target (`<localleader>cy`, `gq`,
+  -- :IntentDiffCommentsYank), and until this test nothing asserted the
+  -- Markdown ever reached a register — only the empty-review refusal was
+  -- covered. Both registers are asserted, but headless Neovim has no clipboard
+  -- provider and aliases `+` and `*`, so this environment cannot tell the two
+  -- writes apart: what it really pins down is that the generated Markdown —
+  -- not an empty string, not nothing at all — reaches the clipboard.
+  it("puts the generated Markdown on both clipboard registers", function()
+    vim.fn.setreg("+", "SENTINEL")
+    vim.fn.setreg("*", "SENTINEL")
+    local comments = {
+      { file = "src/api/routes.ts", line = 5, side = "new", type = "issue", text = "boom" },
+    }
+
+    assert.is_true(export.to_clipboard(comments, model()))
+
+    local expected = export.generate(comments, model())
+    assert.equals(expected, vim.fn.getreg("+"))
+    assert.equals(expected, vim.fn.getreg("*"))
+    -- Not a vacuous comparison against another empty string.
+    assert.is_truthy(expected:match("%*%*%[ISSUE%]%*%* `src/api/routes%.ts:5`"))
   end)
 end)

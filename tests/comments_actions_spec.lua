@@ -431,5 +431,170 @@ describe("comments actions", function()
       assert.equals(5, vim.api.nvim_win_get_cursor(win_orig)[1])
       assert.equals(1, vim.api.nvim_win_get_cursor(win_mod)[1])
     end)
+
+    -- `place_cursor` clamps like marks does, so the picker lands on the box
+    -- rather than failing a cursor move to a line that no longer exists.
+    it("jumps to the line a drifted comment's box is actually drawn on", function()
+      st.add({ file = "a.lua", line = 500, side = "new", type = "note", text = "drifted" })
+      vim.ui.select = function(entries, _, cb) cb(entries[1]) end
+
+      comments.list(tab)
+
+      assert.equals(5, vim.api.nvim_win_get_cursor(win_mod)[1])
+    end)
+  end)
+
+  -- The action layer itself — `M.edit`, `M.delete`, `M.next`, `M.prev` driven
+  -- exactly as the keymaps drive them, with a real window under a real cursor.
+  -- Nothing here stubs `M.context`: the two bugs these cover (a drifted comment
+  -- that renders but cannot be reached, and `]n` fired from the sidebar) both
+  -- live between the cursor and the store, which is precisely what a stubbed
+  -- context hides.
+  describe("edit/delete/next/prev at a real cursor", function()
+    local view = require("intentdiff.view")
+    local popup = require("intentdiff.comments.popup")
+    local tab
+    local real_get_session, real_diff_wins, real_open
+    local win_orig, win_mod, win_sidebar, restore_session
+
+    local function float(rows)
+      local buf = vim.api.nvim_create_buf(false, true)
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, rows)
+      return vim.api.nvim_open_win(buf, false, {
+        relative = "editor", row = 0, col = 0, width = 20, height = 5, style = "minimal",
+      })
+    end
+
+    before_each(function()
+      tab = 900003 -- sentinel key, never a real tabpage id
+      real_get_session = view.get_session
+      real_diff_wins = view.diff_wins
+      real_open = popup.open
+      -- Five-line panes: a comment stored at line 500 is well past EOF.
+      win_orig = float({ "1", "2", "3", "4", "5" })
+      win_mod = float({ "1", "2", "3", "4", "5" })
+      win_sidebar = float({ "s1", "s2", "s3", "s4", "s5" })
+      view.get_session = function() return { original_win = win_orig, modified_win = win_mod } end
+      view.diff_wins = function() return { win_orig, win_mod } end
+      view._last_shown[tab] = { file_entry = { path = "a.lua" } }
+      restore_session = helpers.fake_session(tab, {
+        comment_store = st,
+        -- The sidebar the comment keys are also installed on.
+        sidebar = { winid = win_sidebar, meta_at = function() return {} end },
+      })
+    end)
+
+    after_each(function()
+      view.get_session = real_get_session
+      view.diff_wins = real_diff_wins
+      popup.open = real_open
+      restore_session()
+      view._last_shown[tab] = nil
+      view._preview_active[tab] = nil
+      for _, w in ipairs({ win_orig, win_mod, win_sidebar }) do
+        pcall(vim.api.nvim_win_close, w, true)
+      end
+    end)
+
+    --- Focus `win` with the cursor on `line`, the way a keypress would arrive.
+    local function focus(win, line)
+      vim.api.nvim_set_current_win(win)
+      vim.api.nvim_win_set_cursor(win, { line, 0 })
+    end
+
+    -- A working-tree review outlives the tree it reviews (that is what branch
+    -- keying is FOR), so a stored comment can end up past the end of the file.
+    -- marks clamps its box onto the last line so it "degrades visibly"; the
+    -- action layer used to keep matching on the RAW line, so the box was
+    -- visible and the comment was un-editable, un-deletable and un-jumpable —
+    -- escapable only by destroying the whole review.
+    describe("a comment that drifted past the end of the file", function()
+      before_each(function()
+        st.add({ file = "a.lua", line = 500, side = "new", type = "note", text = "drifted" })
+      end)
+
+      it("is editable from the line its box is drawn on", function()
+        focus(win_mod, 5)
+        popup.open = function(_, cb) cb("issue", "edited drifted") end
+
+        comments.edit(tab)
+
+        local c = st.get_all()[1]
+        assert.equals("issue", c.type)
+        assert.equals("edited drifted", c.text)
+      end)
+
+      it("is deletable from the line its box is drawn on", function()
+        focus(win_mod, 5)
+
+        comments.delete(tab)
+
+        assert.equals(0, st.count())
+      end)
+
+      it("does not answer for a line its box is NOT drawn on", function()
+        focus(win_mod, 2)
+        popup.open = function(_, cb) cb("issue", "must not happen") end
+
+        comments.edit(tab)
+
+        assert.equals("drifted", st.get_all()[1].text,
+          "the clamped fallback must only match the row the box is on")
+      end)
+
+      it("is reachable with ]n, which lands on the box's real row", function()
+        focus(win_mod, 1)
+
+        comments.next(tab)
+
+        assert.equals(5, vim.api.nvim_win_get_cursor(win_mod)[1])
+      end)
+    end)
+
+    -- `]n`/`[n` are installed on the SIDEBAR too (all the comment keys are, so
+    -- the export keys are reachable from either surface). Read there, the
+    -- sidebar's ROW is not a diff line: the cursor jumped to an arbitrary row,
+    -- and with `preview.hover_opens_files` on by default that fired the hover
+    -- preview and re-rendered the panes to whatever intent that row belongs to.
+    describe("navigation outside a diff pane", function()
+      before_each(function()
+        st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
+      end)
+
+      it("moves the cursor when it IS in a diff pane", function()
+        focus(win_mod, 1)
+        comments.next(tab)
+        assert.equals(3, vim.api.nvim_win_get_cursor(win_mod)[1],
+          "the guard must not refuse in the pane the keys are meant for")
+      end)
+
+      it("refuses ]n in the sidebar, leaving the sidebar cursor alone", function()
+        focus(win_sidebar, 1)
+
+        comments.next(tab)
+
+        assert.equals(1, vim.api.nvim_win_get_cursor(win_sidebar)[1])
+      end)
+
+      it("refuses [n in the sidebar, leaving the sidebar cursor alone", function()
+        focus(win_sidebar, 5)
+
+        comments.prev(tab)
+
+        assert.equals(5, vim.api.nvim_win_get_cursor(win_sidebar)[1])
+      end)
+
+      -- The same flag M.context, M.list and marks.refresh all check: a preview
+      -- buffer holds a whole intent's files concatenated, so its rows are not
+      -- the shown file's lines either.
+      it("refuses in a hover preview", function()
+        view._preview_active[tab] = { title = "An intent" }
+        focus(win_mod, 1)
+
+        comments.next(tab)
+
+        assert.equals(1, vim.api.nvim_win_get_cursor(win_mod)[1])
+      end)
+    end)
   end)
 end)

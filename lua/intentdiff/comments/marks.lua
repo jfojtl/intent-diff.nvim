@@ -80,22 +80,51 @@ function M.build_box(text, type_name, hl_group)
   return out
 end
 
---- The 0-indexed (first, final) anchor rows for a line/range comment,
---- clamped into `[0, last - 1]`. `last` is the buffer's line count
---- (`nvim_buf_line_count`, always >= 1), so this always returns somewhere
---- renderable — a persisted comment that drifted past EOF (in `line`,
---- `line_end`, or both) clamps onto the last line rather than being
---- dropped, so it stays visible and exportable. Shared by `render_buffer`
---- and `align`'s `heights()` so the two can never disagree about where a
---- drifted comment's box actually landed.
-local function clamp_rows(c, last)
-  local max_row = math.max(last - 1, 0)
-  local first = math.min(c.line - 1, max_row)
-  local final = math.min((c.line_end or c.line) - 1, max_row)
+--- The 1-indexed (first, final) LINES a line/range comment actually occupies
+--- in a buffer of `last` lines, clamped into `[1, last]`. A persisted comment
+--- that drifted past EOF (in `line`, `line_end`, or both) clamps onto the last
+--- line rather than being dropped, so it stays visible and exportable.
+---
+--- This is the ONE definition of "where did that comment end up", and it is
+--- public because the action layer needs the same answer: `marks` clamps the
+--- box onto the last line while `store.get_at_line` matches on the RAW stored
+--- line, so edit/delete/jump used to miss a drifted comment entirely — visible,
+--- but un-editable, un-deletable and un-jumpable. Everything that has to agree
+--- about a drifted comment's position (render_buffer, align's heights(),
+--- comments/init.lua's at_cursor / jump / place_cursor) goes through here, so
+--- they cannot drift apart again.
+--- @return integer first, integer final
+function M.clamped_span(c, last)
+  local max_line = math.max(last or 1, 1)
+  local line = c.line or 1
+  local first = math.min(line, max_line)
+  local final = math.min(c.line_end or line, max_line)
   if final < first then
     final = first
   end
   return first, final
+end
+
+--- `clamped_span` against a live buffer's current line count, or nil when the
+--- buffer is gone (a pane can be torn down between a keypress and this call).
+--- @return integer|nil first, integer|nil final
+function M.clamped_span_in_buf(c, bufnr)
+  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+    return nil
+  end
+  local ok, last = pcall(vim.api.nvim_buf_line_count, bufnr)
+  if not ok then
+    return nil
+  end
+  return M.clamped_span(c, last)
+end
+
+--- The 0-indexed anchor rows, for the extmark API. A thin adapter over
+--- `clamped_span` so the rendering path and the action layer can never
+--- disagree about where a drifted comment's box landed.
+local function clamp_rows(c, last)
+  local first, final = M.clamped_span(c, last)
+  return first - 1, final - 1
 end
 
 --- Rendered height of a comment's box, and the 0-indexed row it hangs from,
