@@ -31,7 +31,10 @@ function M.cycle(index, count)
 end
 
 --- The selector row. The selected type is bracketed; the row is truncated
---- with … when the configured types do not fit the float's width.
+--- with … when the configured types do not fit the float's width. Truncation
+--- walks characters summing DISPLAY width (not codepoint count): the default
+--- icons are double-width, so cutting by codepoint (strcharpart) can still
+--- overflow the float once a user's type list is long enough to trigger it.
 function M.type_line(list, index)
   local parts = {}
   for i, t in ipairs(list) do
@@ -40,7 +43,17 @@ function M.type_line(list, index)
   end
   local line = table.concat(parts, " ")
   if vim.fn.strdisplaywidth(line) > WIDTH - 2 then
-    line = vim.fn.strcharpart(line, 0, WIDTH - 3) .. "…"
+    local budget = WIDTH - 3 -- leave room for the trailing "…"
+    local out, width = {}, 0
+    for _, char in ipairs(vim.fn.split(line, [[\zs]])) do
+      local w = vim.fn.strdisplaywidth(char)
+      if width + w > budget then
+        break
+      end
+      out[#out + 1] = char
+      width = width + w
+    end
+    line = table.concat(out) .. "…"
   end
   return line
 end
@@ -61,6 +74,7 @@ local function close_windows()
     end
   end
   M._type_win, M._text_win = nil, nil
+  M._type_buf, M._text_buf = nil, nil
 end
 
 --- Finish the popup exactly once, restoring focus to where it was opened from.
@@ -105,6 +119,19 @@ function M.cycle_type()
   render_type()
 end
 
+--- First lhs of a keymap action spec (a single lhs or a list of them), or
+--- nil when the action is false/nil — used so the float titles can never
+--- show a hint for a key that isn't actually bound.
+local function first_lhs(spec)
+  if not spec then
+    return nil
+  end
+  if type(spec) == "table" then
+    return spec[1]
+  end
+  return spec
+end
+
 local function float(buf, row, height, title)
   return vim.api.nvim_open_win(buf, false, {
     relative = "editor",
@@ -145,27 +172,49 @@ function M.open(opts, callback)
     prev_win = vim.api.nvim_get_current_win(),
   }
 
+  -- Read the popup-local keys once so both the titles and the bindings
+  -- below are built from the SAME config read — a rebound or disabled key
+  -- shows up rebound or not at all, in the title as much as in the buffer.
+  local km = (config.options.keymaps or {}).comments or {}
+  local cycle_hint = first_lhs(km.popup_cycle_type)
+  local submit_hint = first_lhs(km.popup_submit)
+  local type_title = cycle_hint and (" Type (" .. cycle_hint .. " to switch) ") or " Type "
+  local text_title = submit_hint and (" Comment (" .. submit_hint .. " submit) ") or " Comment "
+
   local total = 3 + TEXT_HEIGHT + 2
   local top = math.max(math.floor((vim.o.lines - total) / 2), 0)
-  M._type_win = float(M._type_buf, top, 1, " Type (⇥ to switch) ")
-  M._text_win = float(M._text_buf, top + 3, TEXT_HEIGHT, " Comment (^s submit) ")
+  M._type_win = float(M._type_buf, top, 1, type_title)
+  M._text_win = float(M._text_buf, top + 3, TEXT_HEIGHT, text_title)
   render_type()
 
   if opts.text and opts.text ~= "" then
-    vim.api.nvim_buf_set_lines(M._text_buf, 0, -1, false, vim.split(opts.text, "\n"))
+    -- opts.text is a previously-stored, possibly hand-edited comment (the
+    -- edit_comment path) — user data, so guard it like every other API call
+    -- here that can fail on user input.
+    pcall(function()
+      vim.api.nvim_buf_set_lines(M._text_buf, 0, -1, false, vim.split(opts.text, "\n"))
+    end)
   end
 
-  local km = (config.options.keymaps or {}).comments or {}
-  local function map(modes, lhs, fn)
-    if lhs then
-      pcall(vim.keymap.set, modes, lhs, fn, { buffer = M._text_buf, nowait = true })
-    end
+  -- Bind every key an action is configured with. `spec` is a single lhs, a
+  -- list of them, or false/nil to install nothing — the shared helper is
+  -- what keeps that handling from drifting between call sites (see
+  -- keymaps.lua). No `or "<Tab>"`-style fallback here: M.options is always
+  -- deep-copied from defaults at setup(), so a fallback would be redundant
+  -- when the key is set and actively wrong (unignorable) when it is false.
+  local function bind(modes, spec, fn)
+    require("intentdiff.keymaps").each(spec, function(lhs)
+      for _, mode in ipairs(modes) do
+        pcall(vim.keymap.set, mode, lhs, fn, { buffer = M._text_buf, nowait = true })
+      end
+    end)
   end
-  map({ "i", "n" }, km.popup_cycle_type or "<Tab>", M.cycle_type)
-  map({ "i", "n" }, km.popup_submit or "<C-s>", M.submit)
-  map("n", "<CR>", M.submit)
-  map("n", "<Esc>", M.cancel)
-  map("n", km.popup_cancel or "q", M.cancel)
+  bind({ "i", "n" }, km.popup_cycle_type, M.cycle_type)
+  bind({ "i", "n" }, km.popup_submit, M.submit)
+  pcall(vim.keymap.set, "n", "<CR>", M.submit, { buffer = M._text_buf, nowait = true })
+  -- Unconditional: <Esc> is a hard escape hatch, not a configurable action.
+  pcall(vim.keymap.set, "n", "<Esc>", M.cancel, { buffer = M._text_buf, nowait = true })
+  bind({ "n" }, km.popup_cancel, M.cancel)
 
   vim.api.nvim_set_current_win(M._text_win)
   -- Only enter insert mode for a real interactive session: a headless test
