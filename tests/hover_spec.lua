@@ -721,5 +721,115 @@ describe("sidebar hover preview", function()
         return s and s.file_entry.path == shown.file_entry.path or nil
       end, 10000), "_last_shown must reflect the actually-rendered file")
     end)
+
+    describe("render_seq (deterministic)", function()
+      --- Stub view.show_file to CAPTURE each call (file_entry + opts) instead
+      --- of letting it actually render, mirroring the one synchronous side
+      --- effect same_as_shown depends on (_last_shown). Gives full manual
+      --- control over WHEN a render's on_ready fires — real timing can't
+      --- reliably produce "hover's on_ready fires strictly AFTER a same-row
+      --- <CR> already ran" on demand, and (see integration_spec.lua's
+      --- "does not attach a stale ctx..." test) is sometimes structurally
+      --- unable to produce a required ordering at all.
+      local function stub_show_file()
+        local view = require("intentdiff.view")
+        local real_show_file = view.show_file
+        local pending = {}
+        view.show_file = function(sess, file_entry, opts)
+          view._last_shown[sess.tabpage] = { sess = sess, file_entry = file_entry }
+          pending[#pending + 1] = { file_entry = file_entry, opts = opts }
+        end
+        return pending, function() view.show_file = real_show_file end
+      end
+
+      it("a same-row <CR> wins over a still-pending hover render's own focus restore", function()
+        local pending, restore = stub_show_file()
+        local ok, err = pcall(function()
+          local tab, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
+          -- auto_open_first's own open_file({auto=true}) call is captured
+          -- here too (group 1/file 1); irrelevant to this test, just the
+          -- first entry in `pending`.
+          local lnum = first_file_row(entry)
+          local m = entry.sidebar.meta_at(lnum)
+          local path = entry.model.groups[m.group_i].files[m.file_i].path
+
+          hover(entry, lnum)
+          -- The hover's own open_file(..., {restore_focus = true}) call goes
+          -- through the SAME stub — wait for it to have been captured (the
+          -- real debounce timer still fires for real, just show_file itself
+          -- no longer renders). show_file's own opts (captured here) only
+          -- ever carries on_ready — opts.restore_focus lives on open_file's
+          -- OWN parameter and is only reachable via the on_ready closure, so
+          -- identify the hover's call by path instead.
+          assert.truthy(helpers.wait_for(function()
+            return pending[#pending] and pending[#pending].file_entry.path == path or nil
+          end, 5000), "hover's open_file() call for this row was never captured")
+          local hover_call = pending[#pending]
+
+          -- <CR> on the SAME row: same_as_shown matches (view._last_shown was
+          -- set by the stub above), so this takes the short-circuit —
+          -- bumping entry.render_seq and moving focus into the diff pane
+          -- synchronously, without a new show_file() call.
+          local before_count = #pending
+          press_cr(entry, lnum)
+          assert.equals(before_count, #pending,
+            "the short-circuit must not have called show_file() again")
+
+          local session = require("intentdiff.view").get_session(tab)
+          local win_after_cr = vim.api.nvim_get_current_win()
+          assert.equals(session.modified_win, win_after_cr,
+            "the <CR> short-circuit must have moved focus into the diff pane")
+
+          -- NOW fire the hover's STALE on_ready — simulating it arriving
+          -- late, after the <CR> already made its own, newer focus decision.
+          assert.truthy(hover_call.opts.on_ready, "hover's open_file() call had no on_ready")
+          hover_call.opts.on_ready()
+
+          -- Focus must still be in the diff pane: is_latest must be false
+          -- for this stale call, so it must not have restored focus to the
+          -- sidebar.
+          assert.equals(win_after_cr, vim.api.nvim_get_current_win(),
+            "a stale hover on_ready must not yank focus back to the sidebar "
+              .. "once a newer <CR> has already moved it into the diff pane")
+        end)
+        restore()
+        assert.is_true(ok, tostring(err))
+      end)
+
+      it("a lone in-flight hover render with nothing newer still restores focus to the sidebar", function()
+        local pending, restore = stub_show_file()
+        local ok, err = pcall(function()
+          local tab, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
+          local lnum = first_file_row(entry)
+          local m = entry.sidebar.meta_at(lnum)
+          local path = entry.model.groups[m.group_i].files[m.file_i].path
+
+          hover(entry, lnum)
+          assert.truthy(helpers.wait_for(function()
+            return pending[#pending] and pending[#pending].file_entry.path == path or nil
+          end, 5000), "hover's open_file() call for this row was never captured")
+          local hover_call = pending[#pending]
+
+          -- Nothing newer happens — no <CR>, no second selection. Move focus
+          -- away from the sidebar first so firing on_ready is the only thing
+          -- that could put it back, making the assertion below meaningful.
+          local session = require("intentdiff.view").get_session(tab)
+          vim.api.nvim_set_current_win(session.modified_win)
+          assert.not_equals(entry.sidebar.winid, vim.api.nvim_get_current_win())
+
+          assert.truthy(hover_call.opts.on_ready, "hover's open_file() call had no on_ready")
+          hover_call.opts.on_ready()
+
+          -- is_latest must be TRUE here (render_seq was never bumped by
+          -- anything else) — the restore-to-sidebar tail must still run.
+          -- This is the guard against render_seq gating too much: a fix that
+          -- always skips the tail would also break this.
+          assert.equals(entry.sidebar.winid, vim.api.nvim_get_current_win(),
+            "a hover render with nothing newer must still restore focus to the sidebar")
+        end)
+        restore()
+        assert.is_true(ok, tostring(err))
+      end)
+    end)
   end)
 end)

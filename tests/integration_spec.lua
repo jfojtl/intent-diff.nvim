@@ -743,31 +743,85 @@ describe(":IntentDiff end-to-end", function()
   -- Negative-case counterpart: a newer selection that lands on a DIFFERENT
   -- file (not what the still-in-flight auto-open was rendering) must still
   -- bail out of attaching that stale ctx.
+  --
+  -- Two earlier versions of this test both turned out not to discriminate
+  -- anything:
+  --  1. A ]c-jump-based version inferred the outcome from where the cursor
+  --     landed — but x.lua's superseded on_ready (when it fires at all)
+  --     reliably arrives AFTER a ]c press has already been checked, so it
+  --     passed with or without the `still_current` bail, even with an extra
+  --     1.5s settle inserted first: a behavioral probe only sees whatever
+  --     ctx is attached AT THE MOMENT it fires, not a record of what
+  --     happened over time.
+  --  2. A navigation.attach-spy version that instead waited on REAL timing
+  --     for x.lua's on_ready to fire late *still* didn't discriminate:
+  --     once y.lua's own show_file() runs cd.view.update, codediff's shared
+  --     session only tracks ONE "current" diff target
+  --     (session.modified.absolute) — x.lua's when_diff_ready poll can
+  --     never again match its own path once y.lua has taken over, so it
+  --     just gives up silently after ~3s. x.lua's on_ready never fires AT
+  --     ALL once a different file has been selected; real timing never
+  --     exercises the code path this test exists to guard, no matter how
+  --     long it waits.
+  --
+  -- Stub view.show_file to CAPTURE on_ready instead of letting (as shown
+  -- above, sometimes structurally unreachable) async rendering decide when
+  -- it fires, and invoke the captured callbacks in a chosen order —
+  -- deterministic, independent of codediff's internals or timing.
   it("does not attach a stale ctx when a newer selection lands on a different file "
       .. "while an auto-open is still in flight", function()
     make_two_file_two_group_repo()
-    local session = open_two_file_groups()
-    -- auto_open_first is targeting group 1 / x.lua right now (possibly still
-    -- in flight — same race window as above). select_and_wait drives <CR> on
-    -- a DIFFERENT file/group immediately, without any artificial delay.
-    local win = select_and_wait(session, 2, 1, "y.lua")
+    local view = require("intentdiff.view")
+    local navigation = require("intentdiff.navigation")
+    local real_show_file = view.show_file
+    local real_attach = navigation.attach
+    local pending = {} -- captured show_file() calls, in call order
+    local attach_calls = {}
+    view.show_file = function(sess, file_entry, opts)
+      -- Mirror the one side effect same_as_shown/still_current depend on —
+      -- set synchronously at the top of the real show_file (see view.lua) —
+      -- without doing any real, asynchronous rendering.
+      view._last_shown[sess.tabpage] = { sess = sess, file_entry = file_entry }
+      pending[#pending + 1] = { file_entry = file_entry, on_ready = opts and opts.on_ready }
+    end
+    navigation.attach = function(tabpage, ctx)
+      attach_calls[#attach_calls + 1] = { group_i = ctx.group_i, file_i = ctx.file_i }
+      return real_attach(tabpage, ctx)
+    end
+    local ok, err = pcall(function()
+      local session = open_two_file_groups()
+      assert.equals(1, #pending, "auto-open must have captured exactly one show_file() call")
+      local x_call = pending[1]
+      assert.equals("x.lua", x_call.file_entry.path)
 
-    -- Read the expected jump target from the model rather than hardcoding
-    -- the changed line number: hunks carry surrounding context lines, so a
-    -- hunk's modified.start_line is a few lines before the literal edit.
-    local y_hunk = session.model.groups[2].files[1].hunks[1]
-    local x_hunk = session.model.groups[1].files[1].hunks[1]
-    assert.not_equals(x_hunk.modified.start_line, y_hunk.modified.start_line,
-      "fixture must place x.lua's and y.lua's hunks at different lines "
-      .. "for this test to discriminate a stale ctx")
+      -- Newer selection on a DIFFERENT file: y.lua, group 2. Goes through
+      -- the full open_file() path (not same_as_shown, since the path
+      -- differs), capturing its own show_file() call rather than x.lua's
+      -- being re-used.
+      local y_line = sidebar_line(session.sidebar, "file", 2, 1)
+      assert.truthy(y_line, "no sidebar row for y.lua")
+      focus_row(session, y_line)
+      press(session.sidebar.winid, "<CR>")
+      assert.equals(2, #pending, "selecting y.lua must have called show_file() again")
+      assert.equals("y.lua", pending[2].file_entry.path)
 
-    vim.api.nvim_set_current_win(win)
-    vim.api.nvim_win_set_cursor(win, { 1, 0 })
-    press(win, "]c")
-    -- If x.lua's stale ctx had won the race, this would jump to x_hunk's
-    -- line instead of y.lua's own.
-    assert.equals(y_hunk.modified.start_line, vim.api.nvim_win_get_cursor(win)[1],
-      "]c must use y.lua's own hunk, not a stale ctx left over from x.lua's auto-open")
+      -- Fire x.lua's STALE on_ready now, simulating it arriving late — after
+      -- the newer selection has already moved _last_shown on to y.lua. This
+      -- is exactly the `superseded = true` branch in open_file's on_ready:
+      -- user_selected is true (the <CR> press set it) and this call's own
+      -- opts.auto is true (it came from auto_open_first).
+      assert.truthy(x_call.on_ready, "auto-open's show_file() call had no on_ready")
+      x_call.on_ready()
+
+      for i, c in ipairs(attach_calls) do
+        assert.is_false(c.group_i == 1 and c.file_i == 1,
+          ("navigation.attach call #%d was made with x.lua's stale ctx (group 1/file 1) "
+            .. "after y.lua's own selection had already taken over the panes"):format(i))
+      end
+    end)
+    view.show_file = real_show_file
+    navigation.attach = real_attach
+    assert.is_true(ok, tostring(err))
   end)
 
   it("re-matches a changed diff against the previous classification", function()

@@ -376,15 +376,23 @@ end
 --- entry.render_seq: bumped by every open_file() call AND by select_file's
 --- same_as_shown short-circuit (which decides focus without calling
 --- open_file at all). on_ready captures its own call's number (`my_seq`) and
---- only applies FOCUS-changing effects (cursor jump, opts.focus_diff, the
+--- only applies WINDOW-focus-changing effects (opts.focus_diff, the
 --- restore-to-sidebar tail) if it is still the most recent one — a hover's
 --- open_file(restore_focus=true) can still be in flight when <CR> on that
 --- SAME row takes the short-circuit path; without this, the hover's own
 --- on_ready firing afterward unconditionally restores focus to the sidebar,
---- undoing the short-circuit's focus_diff_pane. navigation.attach is NOT
---- gated on this — see `superseded`/`still_current` below, a different,
---- file-identity-based concern where attaching is idempotent regardless of
---- recency.
+--- undoing the short-circuit's focus_diff_pane.
+---
+--- Deliberately NOT gated: navigation.attach (see `superseded`/
+--- `still_current` below — a different, file-identity-based concern where
+--- attaching is idempotent regardless of recency) and the opts.jump cursor
+--- placement. jump is orthogonal to WHICH window has focus — ]c/[c's
+--- roll-to-next-file (navigation.lua's `move`) opens the new file with
+--- jump="first" specifically so the cursor lands on its first hunk; gating
+--- that on is_latest would silently drop the cursor placement (leaving it at
+--- line 1) whenever a same-row <CR> short-circuit's focus_diff_pane races
+--- ahead of that render's own on_ready, even though the short-circuit itself
+--- has no opinion on cursor position within the file.
 local function open_file(token, group_i, file_i, opts)
   local entry = sessions[token]
   if not entry then
@@ -444,19 +452,21 @@ local function open_file(token, group_i, file_i, opts)
           select_file(token, gi, fi, o)
         end,
       })
-      -- Everything below is a FOCUS-changing effect: skip it once a newer
-      -- render_seq exists, since a newer caller (another open_file, or a
-      -- select_file short-circuit) has already made — and is entitled to
+      local session = require("intentdiff.view").get_session(tabpage)
+      local win = session and session.modified_win
+      -- Cursor placement, NOT gated on is_latest — see entry.render_seq's
+      -- doc comment above.
+      if opts and opts.jump and win and vim.api.nvim_win_is_valid(win) and #file_entry.hunks > 0 then
+        local h = opts.jump == "last" and file_entry.hunks[#file_entry.hunks] or file_entry.hunks[1]
+        pcall(vim.api.nvim_win_set_cursor, win, { h.modified.start_line, 0 })
+      end
+      -- Everything below IS a window-focus-changing effect: skip it once a
+      -- newer render_seq exists, since a newer caller (another open_file, or
+      -- a select_file short-circuit) has already made — and is entitled to
       -- keep — its own, more recent focus decision. See entry.render_seq
       -- above.
       if not is_latest then
         return
-      end
-      local session = require("intentdiff.view").get_session(tabpage)
-      local win = session and session.modified_win
-      if opts and opts.jump and win and vim.api.nvim_win_is_valid(win) and #file_entry.hunks > 0 then
-        local h = opts.jump == "last" and file_entry.hunks[#file_entry.hunks] or file_entry.hunks[1]
-        pcall(vim.api.nvim_win_set_cursor, win, { h.modified.start_line, 0 })
       end
       if opts and opts.focus_diff then
         focus_diff_pane(tabpage)
