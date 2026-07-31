@@ -8,19 +8,28 @@ folded away. Rendering is delegated to
 [codediff.nvim](https://github.com/esmuellert/codediff.nvim); intent-diff only
 adds grouping, a sidebar, and group-scoped navigation on top of it.
 
+The sidebar below is the *real* output of `sidebar.layout()` (generated
+headlessly against a representative model, not hand-drawn — no column
+alignment, no tree-drawing characters, and only the nonzero side of a
+`+A`/`-B` stat is ever shown):
+
 ```
-▾ Rename UserService → AccountService
-  4 hunks · 2 files  +58 -22
-  ▾ src/services
-   M  account.ts                            +40 -10
-   M  account_test.ts                       +18 -12
+▾ Rename UserService to AccountService
+  2 hunks · 2 files  +2 -2
+   ▾ src
+     ▾ api
+ M       routes.ts  +1 -1
+     ▾ services
+ M       account.ts  +1 -1
 ▾ Add retry logic to HTTP client
-  3 hunks · 1 files  +30 -5
-  ▾ src/http
-   M  client.ts                             +30 -5
-▸ Ungrouped
-  1 hunks · 1 files  +3 -0
-9/9 hunks · claude:haiku
+  1 hunks · 1 files  +3
+   ▾ src/http
+ M     client.ts  +3
+▾ Ungrouped
+  1 hunks · 1 files  +3
+   ▾ docs
+ ?     notes.md  +3
+4/4 hunks · claude:haiku
 ```
 
 The LLM never decides *what* changed, only how to *label* it: every hunk in
@@ -281,16 +290,19 @@ not have the model spend time/tokens shelling out).
 
 Each group renders as a wrapped title line (long LLM-generated titles wrap
 onto multiple lines rather than being truncated) followed by a stats line —
-`N hunks · M files` plus `+A -B` when the group has any additions/deletions.
-Below that, when the group is expanded, is a file tree: directories are their
-own rows, and a chain of directories with only one child at each level is
-compressed onto a single row (`src/services/api` instead of three nested
-`src` → `services` → `api` rows) — exactly the compression codediff itself
-uses for the same reason. File rows show a one-character status gutter (`A`,
-`M`, `D`, or `?` for untracked) and, when `icons = true` and
+`N hunks · M files`, then `+A`, `-B`, or both, whichever are nonzero (a zero
+side is never printed — see the real output below). Below that, when the
+group is expanded, is a file tree: directories are their own rows, and a
+chain of directories with only one child at each level is compressed onto a
+single row (`src/services/api` instead of three nested `src` → `services` →
+`api` rows) — exactly the compression codediff itself uses for the same
+reason. File rows show a one-character status gutter (`A`, `M`, `D`, or `?`
+for untracked) and, when `icons = true` and
 [nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons) is
 installed, a file-type icon; both degrade silently (gutter letter still
-shows, icon just omitted) when devicons isn't present.
+shows, icon just omitted) when devicons isn't present. Rows are not
+column-aligned — a file's name butts directly up against its indent, and its
+stats immediately follow its name — exactly as in the real output above.
 
 `za`, `h`, and `l` are interchangeable collapse/expand keys: on a directory
 row they toggle that directory; on any other row in the group — a title
@@ -308,8 +320,9 @@ after `preview.debounce_ms` of the cursor sitting still, so scrolling past
 several rows doesn't thrash the panes:
 
 - **A group row** (any of its title lines or its stats line) previews that
-  group's whole diff: every file it touches, each preceded by a `── path
-  status +A -B` separator line, in file-tree order.
+  group's whole diff: every file it touches, each preceded by a
+  `── path   status   +A -B` separator line (three spaces on either side of
+  `status`), in file-tree order.
 - **A directory row** previews just that subtree — the same rendering,
   restricted to the files under that directory.
 - **A file row does *not* open that file.** Hovering it restores the panes to
@@ -319,6 +332,21 @@ several rows doesn't thrash the panes:
 
 The preview is capped at `preview.max_lines`; a truncated preview's last line
 states how many more lines were omitted rather than silently cutting off.
+
+This is the real output of `preview.render()` (inline layout) for the same
+"Rename UserService to AccountService" group shown above:
+
+```
+── src/api/routes.ts   M   +1 -1
+@@ -4,2 +4,2 @@
+-import { UserService } from './user-service'
++import { AccountService } from './account-service'
+── src/services/account.ts   M   +1 -1
+@@ -12,3 +12,3 @@
+-export class UserService {
++export class AccountService {
+   constructor(private db: Db) {}
+```
 
 Inside the preview, `]c`/`[c` jump the cursor to the next/previous hunk
 header (no wraparound: at the first or last hunk they simply do nothing), and
@@ -346,9 +374,23 @@ has exactly one hunk covering the entire file, so there is nothing to fold.
 
 ## Highlights
 
-Every highlight group below is defined with `default = true`, so a
-definition you set — before or after `setup()`, and even across
-`:colorscheme` changes — always wins:
+Every highlight group below is defined with `default = true`
+(`nvim_set_hl(0, name, { link = target, default = true })`), which only sets
+the link when the group has no definition yet — a definition you set
+*before* the group is first defined (i.e. before the first `:IntentDiff` of
+the session) is never overwritten by that first call, and one you set at any
+later point also takes effect immediately, since a plain `nvim_set_hl` call
+(no `default`) always overwrites unconditionally.
+
+**That protection does not survive `:colorscheme`.** `:colorscheme` clears
+every highlight definition and then reloads them; this plugin's own
+`ColorScheme` autocmd re-establishes its `default = true` link at that point,
+but a plain override you set earlier is gone by then — verified directly:
+set `IntentDiffGroupTitle` with a bare `nvim_set_hl` call, run `:colorscheme
+habamax`, and `nvim_get_hl(0, { name = "IntentDiffGroupTitle" })` reports
+`{ default = true, link = "Title" }` again, not the override. So an override
+wins from the moment you set it until the *next* `:colorscheme`, at which
+point the plugin's default is reasserted and the override must be reapplied.
 
 | Group | Default link | Used for |
 |---|---|---|
@@ -362,16 +404,29 @@ definition you set — before or after `setup()`, and even across
 | `IntentDiffStatusM` | `Changed` | Status-gutter letter for a modified file |
 | `IntentDiffStatusD` | `Removed` | Status-gutter letter for a deleted file |
 | `IntentDiffStatusUntracked` | `Added` | Status-gutter letter for an untracked file |
-| `IntentDiffPreviewFile` | `Title` | A preview's per-file `── path status +A -B` separator |
+| `IntentDiffPreviewFile` | `Title` | A preview's per-file `── path   status   +A -B` separator |
 | `IntentDiffPreviewHunk` | `Comment` | A preview's `@@ ... @@` hunk headers |
 | `IntentDiffFiller` | `Comment` | Filler rows padding the shorter side of a side-by-side preview |
 
-To override one, define it yourself (order relative to `setup()` doesn't
-matter):
+The reliable way to keep an override across colorscheme changes is to set it
+from your own `ColorScheme` autocmd rather than a one-off call. It doesn't
+matter whether you register it before or after intent-diff's own (which is
+only registered lazily, on the first `:IntentDiff` of the session) — a plain
+`nvim_set_hl` call always beats a `default = true` one, whichever order the
+two end up running in on a given `:colorscheme`:
 
 ```lua
-vim.api.nvim_set_hl(0, "IntentDiffGroupTitle", { fg = "#c4a7e7", bold = true })
+vim.api.nvim_create_autocmd("ColorScheme", {
+  callback = function()
+    vim.api.nvim_set_hl(0, "IntentDiffGroupTitle", { fg = "#c4a7e7", bold = true })
+  end,
+})
 ```
+
+A bare `vim.api.nvim_set_hl(0, "IntentDiffGroupTitle", { fg = "#c4a7e7", bold
+= true })` with no autocmd works too, right up until the next
+`:colorscheme` — which is exactly what makes it a trap: it looks like it
+worked (and does, until the theme changes) rather than failing loudly.
 
 ## Keymaps
 
