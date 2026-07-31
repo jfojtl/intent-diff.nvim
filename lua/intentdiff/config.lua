@@ -42,6 +42,11 @@ M.defaults = {
   added_file_split = { enabled = true, min_lines = 60, target_lines = 40 },
   cache_dir = vim.fn.stdpath("cache") .. "/intentdiff",
   log_file = vim.fn.stdpath("cache") .. "/intentdiff/intentdiff.log", -- diagnostics log; see :IntentDiffLog
+  -- Whole-intent preview: putting the cursor on a group or directory row in the
+  -- sidebar shows that intent's complete diff in the diff panes, with a
+  -- separator per file. debounce_ms keeps scrolling the sidebar from thrashing
+  -- the panes; max_lines caps a very large intent, stating what it omitted.
+  preview = { enabled = true, debounce_ms = 120, max_lines = 20000 },
 }
 
 M.options = vim.deepcopy(M.defaults)

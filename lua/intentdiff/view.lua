@@ -51,6 +51,11 @@ end
 
 local visible_by_win = {}
 
+-- Forward-declared: M.cleanup_tab_state (defined below, well before this is
+-- assigned) also calls it, so it must be an upvalue in scope from the top of
+-- the file rather than a `local function` declared at its point of use.
+local retire_preview_bufs
+
 --- `{ hunks, context }` currently applied per tabpage via M.apply_group_folds,
 --- so the TabEnter handler below can re-assert them with the same context
 --- override. Set on success in apply_group_folds, cleared in M.close_tab.
@@ -64,6 +69,15 @@ M._active_folds = {}
 ---     tab" marker, so it also fires for whole-file statuses that never
 ---     applied group folds.
 M._last_shown = {}
+
+--- Group currently previewed per tabpage, or nil. Set by M.show_preview,
+--- cleared by M.restore. The TabEnter re-assert and the fold machinery both
+--- consult it: preview buffers must never be folded to a group filter.
+M._preview_active = {}
+
+--- The session behind each tabpage's active preview, so the preview's own
+--- keymaps (which only capture a tabpage) can restore and re-render.
+M._preview_sess = {}
 
 local folds_augroup
 
@@ -91,6 +105,9 @@ local folds_augroup
 --- the tab silently downgraded ]c/[c to codediff's all-hunks navigation and
 --- `t` to codediff's explorer-only toggle. Re-assert both here.
 local function reassert(tab)
+  if M._preview_active[tab] then
+    return -- preview buffers carry no group folds
+  end
   local active = M._active_folds[tab]
   if active then
     M.apply_group_folds(tab, active.hunks, { context = active.context })
@@ -231,6 +248,12 @@ end
 function M.cleanup_tab_state(tabpage)
   M._active_folds[tabpage] = nil
   M._last_shown[tabpage] = nil
+  M._preview_active[tabpage] = nil
+  M._preview_sess[tabpage] = nil
+  if M._preview_bufs[tabpage] then
+    retire_preview_bufs(M._preview_bufs[tabpage])
+    M._preview_bufs[tabpage] = nil
+  end
   for win in pairs(visible_by_win) do
     if not vim.api.nvim_win_is_valid(win) then
       visible_by_win[win] = nil
@@ -565,6 +588,175 @@ function M.show_file(sess, file_entry, opts)
   end)
 end
 
+--- Preview buffers currently installed per tabpage, so a later call can wipe
+--- the previous generation out from under nobody. See `retire_preview_bufs`
+--- below for why bufhidden isn't just "wipe".
+M._preview_bufs = {}
+
+--- Put `lines` into a fresh scratch buffer and apply `highlights`.
+--- A span with col_end == -1 covers the whole line.
+---
+--- bufhidden is deliberately "hide", not "wipe": codediff's own cd.view.update
+--- (M.show_file's real-file path) calls nvim_win_set_buf to swap a pane's
+--- window onto the restored file's buffer SYNCHRONOUSLY, but only writes the
+--- new bufnr into session.modified_bufnr/original_bufnr from a callback it
+--- schedules for the next event-loop tick (side_by_side.lua render_everything,
+--- invoked via vim.schedule). "wipe" would delete this buffer the instant that
+--- nvim_win_set_buf runs, leaving session.modified_bufnr pointing at an
+--- already-invalid buffer for that one tick — and vim.wait's first condition
+--- check (as helpers.wait_for's callers do right after M.restore) lands
+--- exactly there, hard-erroring nvim_buf_line_count on a dead buffer id.
+--- "hide" leaves the vacated buffer valid (just unlisted and windowless)
+--- through that gap; retire_preview_bufs cleans it up afterward instead.
+local function preview_buf(pane)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "hide"
+  vim.bo[buf].swapfile = false
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, pane.lines)
+  vim.bo[buf].modifiable = false
+  local ns = vim.api.nvim_create_namespace("intentdiff_preview")
+  for _, s in ipairs(pane.highlights) do
+    if s.col_end == -1 then
+      pcall(vim.api.nvim_buf_set_extmark, buf, ns, s.line - 1, 0,
+        { line_hl_group = s.hl })
+    else
+      pcall(vim.api.nvim_buf_set_extmark, buf, ns, s.line - 1, s.col_start,
+        { end_col = s.col_end, hl_group = s.hl })
+    end
+  end
+  return buf
+end
+
+--- Delete `bufs` (a tabpage's previous-generation preview buffers, or nil)
+--- one event-loop tick from now — after codediff's own scheduled
+--- render_everything (see preview_buf above) has had a chance to move
+--- session.*_bufnr off of them, so deleting them can never leave that field
+--- dangling mid-tick for a caller that reads it in between.
+function retire_preview_bufs(bufs)
+  if not bufs or #bufs == 0 then
+    return
+  end
+  vim.schedule(function()
+    for _, buf in ipairs(bufs) do
+      if buf and vim.api.nvim_buf_is_valid(buf) then
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+      end
+    end
+  end)
+end
+
+--- Drop any group-fold state for `tabpage`'s panes, so a preview buffer is
+--- never filtered through a foldexpr computed for a different buffer.
+local function clear_folds(tabpage)
+  M._active_folds[tabpage] = nil
+  local session = cd.lifecycle.get_session(tabpage)
+  if not session then
+    return
+  end
+  for _, win in ipairs({ session.original_win, session.modified_win }) do
+    if win and vim.api.nvim_win_is_valid(win) then
+      visible_by_win[win] = nil
+      vim.wo[win].foldenable = false
+      vim.wo[win].foldmethod = "manual"
+    end
+  end
+end
+
+--- Show `group`'s whole diff in the session's diff panes.
+---
+--- Injects buffers into the windows the session ALREADY owns — one in inline
+--- layout, two in side-by-side — and never creates or closes a window. Probe 2
+--- (docs/superpowers/specs/2026-07-30-ux-probes/probe_preview2.lua) shows that
+--- building a pane by hand leaves an orphan window behind and corrupts the
+--- following restore; probe 3 shows this injection surviving a full round trip
+--- in both layouts.
+--- @return boolean whether the preview was rendered
+function M.show_preview(sess, group)
+  local tabpage = sess.tabpage
+  local session = cd.lifecycle.get_session(tabpage)
+  if not session then
+    return false
+  end
+  local original_win, modified_win = session.original_win, session.modified_win
+  local single = original_win == modified_win
+    or not (original_win and vim.api.nvim_win_is_valid(original_win))
+    or not (modified_win and vim.api.nvim_win_is_valid(modified_win))
+  local layout = single and "inline" or "side-by-side"
+  local rendered = require("intentdiff.preview").render(group, layout,
+    { max_lines = require("intentdiff.config").options.preview.max_lines })
+
+  local prior_bufs = M._preview_bufs[tabpage]
+  clear_folds(tabpage)
+  if single then
+    local win = (modified_win and vim.api.nvim_win_is_valid(modified_win))
+      and modified_win or original_win
+    if not (win and vim.api.nvim_win_is_valid(win)) then
+      return false
+    end
+    local buf = preview_buf(rendered.modified)
+    vim.api.nvim_win_set_buf(win, buf)
+    vim.wo[win].scrollbind = false
+    vim.wo[win].cursorbind = false
+    cd.lifecycle.update_buffers(tabpage, buf, buf)
+    M._preview_bufs[tabpage] = { buf }
+  else
+    local original_buf = preview_buf(rendered.original)
+    local modified_buf = preview_buf(rendered.modified)
+    vim.api.nvim_win_set_buf(original_win, original_buf)
+    vim.api.nvim_win_set_buf(modified_win, modified_buf)
+    -- Equal line counts by construction (preview.render pads with fillers), so
+    -- scrollbind keeps the two sides aligned.
+    for _, win in ipairs({ original_win, modified_win }) do
+      vim.wo[win].scrollbind = true
+      vim.wo[win].cursorbind = true
+    end
+    cd.lifecycle.update_buffers(tabpage, original_buf, modified_buf)
+    M._preview_bufs[tabpage] = { original_buf, modified_buf }
+  end
+  cd.lifecycle.update_paths(tabpage, cd.path.empty(), cd.path.empty())
+  cd.lifecycle.update_revisions(tabpage, nil, nil)
+  cd.lifecycle.update_diff_result(tabpage, { changes = {}, moves = {} })
+  -- The old preview buffers are already fully replaced in the session/panes
+  -- above (unlike M.restore, nothing async needs to catch up), so retiring
+  -- them can happen right away.
+  retire_preview_bufs(prior_bufs)
+
+  M._preview_active[tabpage] = group
+  M.install_preview_keymaps(tabpage, sess, rendered.hunk_lines)
+  return true
+end
+
+--- Leave the preview and re-render the file that was last shown, folds and all.
+--- @return boolean whether a file was restored
+function M.restore(sess)
+  local tabpage = sess.tabpage
+  M._preview_active[tabpage] = nil
+  local prior_bufs = M._preview_bufs[tabpage]
+  M._preview_bufs[tabpage] = nil
+  local session = cd.lifecycle.get_session(tabpage)
+  if session then
+    for _, win in ipairs({ session.original_win, session.modified_win }) do
+      if win and vim.api.nvim_win_is_valid(win) then
+        vim.wo[win].scrollbind = false
+        vim.wo[win].cursorbind = false
+      end
+    end
+  end
+  local shown = M._last_shown[tabpage]
+  if not shown then
+    retire_preview_bufs(prior_bufs)
+    return false
+  end
+  M.show_file(shown.sess, shown.file_entry)
+  -- M.show_file's real-file path (cd.view.update) only finishes moving
+  -- session.*_bufnr off of the panes' old buffers on a tick it schedules
+  -- itself; retiring the vacated preview buffers here (also deferred, see
+  -- preview_buf) queues strictly after that, so it never races it.
+  retire_preview_bufs(prior_bufs)
+  return true
+end
+
 --- Install our buffer-local overrides on the diff panes of `tabpage`.
 ---
 --- Currently just codediff's layout-toggle key (`t` by default). codediff
@@ -601,6 +793,77 @@ function M.install_keymaps(tabpage)
   end
 end
 
+--- Buffer-local keymaps for preview buffers. They are fresh scratch buffers, so
+--- they inherit nothing from codediff: without this, codediff's toggle key and
+--- ]c/[c would fall through to their global meanings.
+function M.install_preview_keymaps(tabpage, sess, hunk_lines)
+  local session = cd.lifecycle.get_session(tabpage)
+  if not session then
+    return
+  end
+  local cd_config = try("codediff.config")
+  local keys = cd_config and cd_config.options and cd_config.options.keymaps
+  local toggle_key = keys and keys.view and keys.view.toggle_layout
+  local seen = {}
+  for _, buf in ipairs({ session.original_bufnr, session.modified_bufnr }) do
+    if buf and vim.api.nvim_buf_is_valid(buf) and not seen[buf] then
+      seen[buf] = true
+      if toggle_key then
+        pcall(vim.keymap.set, "n", toggle_key, function()
+          M.toggle_preview_layout(tabpage)
+        end, { buffer = buf, nowait = true, desc = "intent-diff: toggle preview layout" })
+      end
+      pcall(vim.keymap.set, "n", "q", function()
+        require("intentdiff").close(tabpage)
+      end, { buffer = buf, nowait = true, desc = "intent-diff: close" })
+      for key, step in pairs({ ["]c"] = 1, ["[c"] = -1 }) do
+        pcall(vim.keymap.set, "n", key, function()
+          local win = vim.api.nvim_get_current_win()
+          local cursor = vim.api.nvim_win_get_cursor(win)[1]
+          local target
+          if step == 1 then
+            for _, lnum in ipairs(hunk_lines) do
+              if lnum > cursor then target = lnum break end
+            end
+          else
+            for i = #hunk_lines, 1, -1 do
+              if hunk_lines[i] < cursor then target = hunk_lines[i] break end
+            end
+          end
+          if target then
+            pcall(vim.api.nvim_win_set_cursor, win, { target, 0 })
+          end
+        end, { buffer = buf, nowait = true, desc = "intent-diff: hunk in preview" })
+      end
+    end
+  end
+  M._preview_sess[tabpage] = sess
+end
+
+--- Toggle inline ↔ side-by-side while previewing.
+---
+--- codediff's toggle re-renders from the session's own path/revision fields,
+--- which a preview deliberately blanks — so restore the last file first, toggle
+--- on that (the only state codediff supports), then re-render the preview in
+--- the new layout. Probe 3 steps 4-8 exercise exactly this sequence.
+--- @return boolean whether a toggle was started
+function M.toggle_preview_layout(tabpage)
+  local group = M._preview_active[tabpage]
+  local sess = M._preview_sess[tabpage]
+  if not (group and sess) then
+    return false
+  end
+  if not M.restore(sess) then
+    return false
+  end
+  M.toggle_layout(tabpage, {
+    on_done = function()
+      M.show_preview(sess, group)
+    end,
+  })
+  return true
+end
+
 --- Toggle inline ↔ side-by-side for an intent-diff tab, then re-apply the
 --- group filter to whatever panes the new layout ended up with.
 ---
@@ -621,9 +884,19 @@ end
 --- re-render directly through show_whole_file_in_layout instead, which calls
 --- the same single-file codediff entry points show_file uses (just picking
 --- the one matching the NEW layout) — never codediff's two-sided rerender.
+---
+--- opts.on_done fires once the new layout has rendered (and, for a "real"
+--- file, folds are re-applied) — M.toggle_preview_layout uses it to re-render
+--- the preview only after the toggle it rode in on has actually finished.
 --- @return boolean whether a toggle was performed
-function M.toggle_layout(tabpage)
+function M.toggle_layout(tabpage, opts)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+  opts = opts or {}
+  local function done()
+    if opts.on_done then
+      opts.on_done()
+    end
+  end
   local shown = M._last_shown[tabpage]
   local session = cd.lifecycle.get_session(tabpage)
   if not session then
@@ -641,6 +914,7 @@ function M.toggle_layout(tabpage)
           if shown.file_entry.status ~= "D" and shown.file_entry.hunks then
             M.apply_group_folds(tabpage, shown.file_entry.hunks, { context = 0 })
           end
+          done()
         end)
       return true
     end
@@ -650,6 +924,7 @@ function M.toggle_layout(tabpage)
     return false
   end
   if not shown then
+    done()
     return true
   end
   local file_entry = shown.file_entry
@@ -657,6 +932,7 @@ function M.toggle_layout(tabpage)
   when_diff_ready(tabpage, abs_path, function()
     M.apply_group_folds(tabpage, file_entry.hunks)
     M.install_keymaps(tabpage)
+    done()
   end)
   return true
 end
