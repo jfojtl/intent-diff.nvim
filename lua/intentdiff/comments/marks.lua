@@ -233,7 +233,35 @@ function M.clear_all()
   end
 end
 
--- M.refresh(tabpage) is deliberately absent here — it needs view's
--- pane/session lookup and is added in Task 7, where the wiring lives.
+--- Re-render every surface of a review tab. Called after any pane rebuild and
+--- after every store mutation.
+function M.refresh(tabpage)
+  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+  local view = require("intentdiff.view")
+  local shown = view._last_shown[tabpage]
+  local session = view.get_session(tabpage)
+  if not (shown and shown.file_entry and session) then
+    return
+  end
+  local file = shown.file_entry.path
+  -- A preview buffer concatenates many files; comments do not belong there.
+  if view._preview_active[tabpage] then
+    return
+  end
+  local orig_buf = session.original_win and vim.api.nvim_win_is_valid(session.original_win)
+    and vim.api.nvim_win_get_buf(session.original_win) or nil
+  local mod_buf = session.modified_win and vim.api.nvim_win_is_valid(session.modified_win)
+    and vim.api.nvim_win_get_buf(session.modified_win) or nil
+  -- Inline layout puts one buffer in both windows; render it once, as "new".
+  if orig_buf and orig_buf ~= mod_buf then
+    M.render_buffer(orig_buf, file, "old")
+  end
+  if mod_buf then
+    M.render_buffer(mod_buf, file, "new")
+  end
+  if orig_buf and mod_buf and orig_buf ~= mod_buf then
+    M.align(orig_buf, mod_buf, file)
+  end
+end
 
 return M
