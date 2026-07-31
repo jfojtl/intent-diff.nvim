@@ -65,8 +65,29 @@ describe("comments.store", function()
     store.add({ file = "a.lua", line = 2, side = "old", type = "note", text = "o" })
     store.add({ file = "a.lua", line = 0, type = "note", text = "f" })
     store.add({ file = "b.lua", line = 1, side = "new", type = "note", text = "other" })
-    local got = store.get_for_file("a.lua", "new")
-    assert.equals(2, #got)
+
+    -- Test with "new" side: should get new-side comment and file-level comment
+    local got_new = store.get_for_file("a.lua", "new")
+    assert.equals(2, #got_new)
+    local texts_new = {}
+    for _, c in ipairs(got_new) do
+      texts_new[c.text] = true
+    end
+    assert.is_true(texts_new["n"])
+    assert.is_true(texts_new["f"])
+    assert.is_nil(texts_new["o"])
+
+    -- Test with nil side: should get all three a.lua comments
+    local got_both = store.get_for_file("a.lua", nil)
+    assert.equals(3, #got_both)
+    local texts_both = {}
+    for _, c in ipairs(got_both) do
+      texts_both[c.text] = true
+    end
+    assert.is_true(texts_both["n"])
+    assert.is_true(texts_both["o"])
+    assert.is_true(texts_both["f"])
+    assert.is_nil(texts_both["other"])
   end)
 
   it("stores and retrieves intent comments by title", function()
