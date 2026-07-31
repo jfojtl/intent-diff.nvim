@@ -925,16 +925,23 @@ function M.install_keymaps(tabpage)
   local cd_config = try("codediff.config")
   local keys = cd_config and cd_config.options and cd_config.options.keymaps
   local key = keys and keys.view and keys.view.toggle_layout
-  if not key then
-    return -- user disabled codediff's toggle key; don't invent one
+  -- Read BEFORE the "no toggle_layout key" early return below: the sidebar
+  -- toggle must still be installed on the pane buffers even when codediff's
+  -- own toggle_layout key is disabled — it's the only in-pane way back once
+  -- the sidebar itself is hidden (a sidebar-local key is unreachable then).
+  -- An early return gated only on `key` used to skip this block entirely.
+  local sidebar_key = require("intentdiff.config").options.keymaps
+    and require("intentdiff.config").options.keymaps.toggle_sidebar
+  if not key and not sidebar_key then
+    return -- nothing to install
   end
   for _, buf in ipairs({ session.original_bufnr, session.modified_bufnr }) do
     if buf and vim.api.nvim_buf_is_valid(buf) then
-      pcall(vim.keymap.set, "n", key, function()
-        M.toggle_layout(tabpage)
-      end, { buffer = buf, nowait = true, desc = "intent-diff: toggle layout (keeps group folds)" })
-      local sidebar_key = require("intentdiff.config").options.keymaps
-        and require("intentdiff.config").options.keymaps.toggle_sidebar
+      if key then
+        pcall(vim.keymap.set, "n", key, function()
+          M.toggle_layout(tabpage)
+        end, { buffer = buf, nowait = true, desc = "intent-diff: toggle layout (keeps group folds)" })
+      end
       if sidebar_key then
         pcall(vim.keymap.set, "n", sidebar_key, function()
           require("intentdiff").toggle_sidebar(tabpage)
@@ -955,10 +962,20 @@ function M.install_preview_keymaps(tabpage, sess, hunk_lines)
   local cd_config = try("codediff.config")
   local keys = cd_config and cd_config.options and cd_config.options.keymaps
   local toggle_key = keys and keys.view and keys.view.toggle_layout
+  -- Computed once, unconditionally, alongside toggle_key: this key must be
+  -- installed regardless of whether codediff's own toggle_layout key is
+  -- enabled — see the matching note in M.install_keymaps.
+  local sidebar_key = require("intentdiff.config").options.keymaps
+    and require("intentdiff.config").options.keymaps.toggle_sidebar
   local seen = {}
   for _, buf in ipairs({ session.original_bufnr, session.modified_bufnr }) do
     if buf and vim.api.nvim_buf_is_valid(buf) and not seen[buf] then
       seen[buf] = true
+      if sidebar_key then
+        pcall(vim.keymap.set, "n", sidebar_key, function()
+          require("intentdiff").toggle_sidebar(tabpage)
+        end, { buffer = buf, nowait = true, desc = "intent-diff: show/hide the sidebar" })
+      end
       if toggle_key then
         pcall(vim.keymap.set, "n", toggle_key, function()
           M.toggle_preview_layout(tabpage)
@@ -967,13 +984,6 @@ function M.install_preview_keymaps(tabpage, sess, hunk_lines)
       pcall(vim.keymap.set, "n", "q", function()
         require("intentdiff").close(tabpage)
       end, { buffer = buf, nowait = true, desc = "intent-diff: close" })
-      local sidebar_key = require("intentdiff.config").options.keymaps
-        and require("intentdiff.config").options.keymaps.toggle_sidebar
-      if sidebar_key then
-        pcall(vim.keymap.set, "n", sidebar_key, function()
-          require("intentdiff").toggle_sidebar(tabpage)
-        end, { buffer = buf, nowait = true, desc = "intent-diff: show/hide the sidebar" })
-      end
       for key, step in pairs({ ["]c"] = 1, ["[c"] = -1 }) do
         pcall(vim.keymap.set, "n", key, function()
           local win = vim.api.nvim_get_current_win()
