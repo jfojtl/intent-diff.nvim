@@ -146,4 +146,28 @@ function M.replace(loaded)
   comments = loaded or {}
 end
 
+--- Storage key this review persists under, or nil for a non-persisting one.
+local key = nil
+local hooked = false
+
+--- Load `key`'s stored comments and persist every later change to it.
+function M.attach(storage_key)
+  local storage = require("intentdiff.comments.storage")
+  key = storage_key
+  M.replace(storage.load(key))
+  if not hooked then
+    hooked = true
+    M.on_change(function()
+      if key then
+        storage.save(key, comments)
+      end
+    end)
+  end
+end
+
+--- Stop persisting. The in-memory comments are left alone.
+function M.detach()
+  key = nil
+end
+
 return M
