@@ -36,6 +36,13 @@ function M.build_box(text, type_name, hl_group)
     width = math.max(width, vim.fn.strdisplaywidth(line))
   end
   local header = ("[%s]"):format(tostring(type_name):upper())
+  -- `comments.types[].name` is free user text: a header longer than
+  -- `width + 1` would otherwise make the `string.rep` count below negative.
+  -- Lua's string.rep silently returns "" for n <= 0 (no error, so the pcalls
+  -- around every extmark call downstream never see it) and the top border
+  -- comes out shorter than every other line. Clamp width up first so the
+  -- rep count floors at 0, never below.
+  width = math.max(width, vim.fn.strdisplaywidth(header) - 1)
   local out = {}
   out[#out + 1] = { { "╭─" .. header .. string.rep("─", width - vim.fn.strdisplaywidth(header) + 1) .. "╮", hl_group } }
   for _, line in ipairs(lines) do
@@ -46,9 +53,29 @@ function M.build_box(text, type_name, hl_group)
   return out
 end
 
---- Rendered height of a comment's box, and the 0-indexed row it hangs from.
-local function box_height(c)
-  return #vim.split(c.text or "", "\n") + 2, math.max((c.line_end or c.line or 1) - 1, 0)
+--- The 0-indexed (first, final) anchor rows for a line/range comment,
+--- clamped into `[0, last - 1]`. `last` is the buffer's line count
+--- (`nvim_buf_line_count`, always >= 1), so this always returns somewhere
+--- renderable — a persisted comment that drifted past EOF (in `line`,
+--- `line_end`, or both) clamps onto the last line rather than being
+--- dropped, so it stays visible and exportable. Shared by `render_buffer`
+--- and `align`'s `heights()` so the two can never disagree about where a
+--- drifted comment's box actually landed.
+local function clamp_rows(c, last)
+  local max_row = math.max(last - 1, 0)
+  local first = math.min(c.line - 1, max_row)
+  local final = math.min((c.line_end or c.line) - 1, max_row)
+  if final < first then
+    final = first
+  end
+  return first, final
+end
+
+--- Rendered height of a comment's box, and the 0-indexed row it hangs from,
+--- clamped exactly as `render_buffer` clamps the extmark itself.
+local function box_height(c, last)
+  local _, final = clamp_rows(c, last)
+  return #vim.split(c.text or "", "\n") + 2, final
 end
 
 --- After anchoring a file-level comment's box above line 0 with
@@ -95,33 +122,30 @@ function M.render_buffer(bufnr, file, side)
         nudge_topfill(bufnr, #box)
       end
     else
-      local first = c.line - 1
-      local final = (c.line_end or c.line) - 1
-      -- A persisted comment can outlive the lines it pointed at; clamp rather
-      -- than dropping it, so it stays visible and exportable.
-      if first < last then
-        final = math.min(final, last - 1)
-        if final == first then
-          pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, first, 0, {
-            sign_text = info.icon,
-            sign_hl_group = sign_hl,
-            line_hl_group = line_hl,
-            virt_lines = box,
-          })
-        else
-          pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, first, 0, {
-            sign_text = info.icon,
-            sign_hl_group = sign_hl,
-            line_hl_group = line_hl,
-          })
-          for row = first + 1, final - 1 do
-            pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, row, 0, { line_hl_group = line_hl })
-          end
-          pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, final, 0, {
-            line_hl_group = line_hl,
-            virt_lines = box,
-          })
+      -- A persisted comment can outlive the lines it pointed at (in `line`,
+      -- `line_end`, or both); clamp_rows clamps rather than dropping it, so
+      -- it stays visible and exportable.
+      local first, final = clamp_rows(c, last)
+      if final == first then
+        pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, first, 0, {
+          sign_text = info.icon,
+          sign_hl_group = sign_hl,
+          line_hl_group = line_hl,
+          virt_lines = box,
+        })
+      else
+        pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, first, 0, {
+          sign_text = info.icon,
+          sign_hl_group = sign_hl,
+          line_hl_group = line_hl,
+        })
+        for row = first + 1, final - 1 do
+          pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, row, 0, { line_hl_group = line_hl })
         end
+        pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, final, 0, {
+          line_hl_group = line_hl,
+          virt_lines = box,
+        })
       end
     end
   end
@@ -139,20 +163,29 @@ function M.align(orig_buf, mod_buf, file)
     return
   end
 
-  --- row → total box height on that side. File-level comments render
-  --- identically on both sides, so they never contribute a difference.
-  local function heights(side)
+  --- row → total box height on that side. `get_for_file(file, side)` already
+  --- filters to that side, so no side check belongs here. What excludes a
+  --- file-level comment (line 0) is `(c.line or 0) ~= 0` below: it renders
+  --- identically on both panes via render_buffer's own branch, not through
+  --- this alignment path, and has no single row of its own to key padding
+  --- on. Do not reintroduce a `(c.side or "new") == side` clause here — a
+  --- file-level comment has no `side` field, so it defaults to `"new"` and
+  --- such a clause would pass it through on the new-side pass rather than
+  --- excluding it; the `(c.line or 0) ~= 0` check is the only thing doing
+  --- that job.
+  local function heights(side, buf)
     local map = {}
+    local last = vim.api.nvim_buf_line_count(buf)
     for _, c in ipairs(store.get_for_file(file, side)) do
-      if (c.line or 0) ~= 0 and (c.side or "new") == side then
-        local h, row = box_height(c)
+      if (c.line or 0) ~= 0 then
+        local h, row = box_height(c, last)
         map[row] = (map[row] or 0) + h
       end
     end
     return map
   end
 
-  local old_h, new_h = heights("old"), heights("new")
+  local old_h, new_h = heights("old", orig_buf), heights("new", mod_buf)
   local rows = {}
   for row in pairs(old_h) do rows[row] = true end
   for row in pairs(new_h) do rows[row] = true end

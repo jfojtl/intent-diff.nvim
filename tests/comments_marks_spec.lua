@@ -33,7 +33,23 @@ describe("comments.marks", function()
   end)
 
   it("keeps every box line the same display width", function()
-    local box = marks.build_box("short\na much longer line here", "Note", "IntentDiffCommentNote")
+    -- Multi-byte content: strdisplaywidth("日本語のコメント") is 16 (wide
+    -- CJK characters), but its BYTE length is 24. Padding by byte count
+    -- instead of display width (e.g. swapping strdisplaywidth for #) would
+    -- pad this line differently from the others; plain ASCII text cannot
+    -- catch that, since width and byte count always agree there.
+    local box = marks.build_box("日本語のコメント\nshort", "Note", "IntentDiffCommentNote")
+    local width = vim.fn.strdisplaywidth(box[1][1][1])
+    for _, line in ipairs(box) do
+      assert.equals(width, vim.fn.strdisplaywidth(line[1][1]))
+    end
+  end)
+
+  it("keeps the top border full width when the type name is long", function()
+    -- A header longer than `width + 1` used to drive string.rep's count
+    -- negative; Lua silently returns "" for n <= 0 (no error to catch), so
+    -- the top border came out shorter than every other line.
+    local box = marks.build_box("hi", "AVeryLongTypeNameThatExceedsMinimumWidth", "IntentDiffCommentNote")
     local width = vim.fn.strdisplaywidth(box[1][1][1])
     for _, line in ipairs(box) do
       assert.equals(width, vim.fn.strdisplaywidth(line[1][1]))
@@ -62,6 +78,12 @@ describe("comments.marks", function()
     assert.is_truthy(got[1][4].sign_text)
     assert.is_nil(got[1][4].virt_lines)
     assert.is_truthy(got[#got][4].virt_lines)
+    assert.is_nil(got[#got][4].sign_text) -- only the first row carries a sign
+    -- Interior rows (lines 4 and 5) carry the line highlight and nothing else.
+    for i = 2, #got - 1 do
+      assert.is_nil(got[i][4].sign_text)
+      assert.is_nil(got[i][4].virt_lines)
+    end
     for _, m in ipairs(got) do
       assert.equals("IntentDiffCommentNoteLine", m[4].line_hl_group)
     end
@@ -111,7 +133,9 @@ describe("comments.marks", function()
     -- later tests in this file.
     pcall(vim.api.nvim_win_close, win, true)
 
-    assert.is_true(topfill > 0)
+    -- Exact height (top border + one text line + bottom border = 3), not
+    -- just "> 0" — a nudge hard-coded to a constant 1 would otherwise pass.
+    assert.equals(3, topfill)
   end)
 
   it("keeps an old-side comment off the new-side pane", function()
@@ -132,12 +156,18 @@ describe("comments.marks", function()
     assert.equals(0, #extmarks(buf))
   end)
 
-  it("survives a line number past the end of the buffer", function()
+  it("clamps a line number past the end of the buffer to the last line", function()
     local buf = scratch(3)
     store.add({ file = "a.lua", line = 99, side = "new", type = "note", text = "drifted" })
     assert.has_no.errors(function()
       marks.render_buffer(buf, "a.lua", "new")
     end)
+    local got = extmarks(buf)
+    -- Genuinely clamped, not dropped: exactly one extmark, anchored on the
+    -- last row of the buffer (row 2 of 3), still carrying its box.
+    assert.equals(1, #got)
+    assert.equals(2, got[1][2])
+    assert.is_truthy(got[1][4].virt_lines)
   end)
 
   it("pads the shorter side so boxes do not desync the panes", function()
@@ -148,13 +178,32 @@ describe("comments.marks", function()
     marks.align(old_buf, new_buf, "a.lua")
     local pad = vim.api.nvim_buf_get_extmarks(old_buf, marks.ns_padding, 0, -1, { details = true })
     assert.equals(1, #pad)
+    assert.equals(2, pad[1][2]) -- anchored at row 2 (line 3), not just any row
     assert.equals(4, #pad[1][4].virt_lines) -- 2 text lines + 2 borders
+    -- The taller (new) side gets no padding of its own.
+    assert.equals(0, #vim.api.nvim_buf_get_extmarks(new_buf, marks.ns_padding, 0, -1, {}))
   end)
 
   it("adds no padding when both sides carry the same box height", function()
     local old_buf, new_buf = scratch(10), scratch(10)
     store.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
     store.add({ file = "a.lua", line = 3, side = "old", type = "note", text = "y" })
+    marks.render_buffer(old_buf, "a.lua", "old")
+    marks.render_buffer(new_buf, "a.lua", "new")
+    marks.align(old_buf, new_buf, "a.lua")
+    assert.equals(0, #vim.api.nvim_buf_get_extmarks(old_buf, marks.ns_padding, 0, -1, {}))
+    assert.equals(0, #vim.api.nvim_buf_get_extmarks(new_buf, marks.ns_padding, 0, -1, {}))
+  end)
+
+  it("clears its own stale padding on re-align, not just on fresh buffers", function()
+    local old_buf, new_buf = scratch(10), scratch(10)
+    local c = store.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "one\ntwo" })
+    marks.render_buffer(old_buf, "a.lua", "old")
+    marks.render_buffer(new_buf, "a.lua", "new")
+    marks.align(old_buf, new_buf, "a.lua")
+    assert.equals(1, #vim.api.nvim_buf_get_extmarks(old_buf, marks.ns_padding, 0, -1, {}))
+
+    store.delete(c)
     marks.render_buffer(old_buf, "a.lua", "old")
     marks.render_buffer(new_buf, "a.lua", "new")
     marks.align(old_buf, new_buf, "a.lua")
