@@ -66,7 +66,14 @@ local function move(tabpage, dir)
     if cur_win ~= win then
       vim.api.nvim_set_current_win(win)
     end
-    vim.api.nvim_win_set_cursor(win, { plan.line, 0 })
+    -- pcall, matching the equivalent jump in init.lua's open_file on_ready: a
+    -- ctx that has gone stale relative to what the pane holds plans a line
+    -- past the end of the buffer, and nvim_win_set_cursor THROWS
+    -- ("Invalid cursor line: out of range") rather than clamping — surfacing
+    -- as an E5108 out of a plain ]c press. Defence in depth only: the ctx is
+    -- kept in sync by open_file's on_ready and refold_shown_file (init.lua);
+    -- this makes the residue a no-op instead of an error.
+    pcall(vim.api.nvim_win_set_cursor, win, { plan.line, 0 })
   else
     ctx.file_i = plan.file_i
     ctx.select_file(ctx.group_i, plan.file_i, { jump = plan.jump })

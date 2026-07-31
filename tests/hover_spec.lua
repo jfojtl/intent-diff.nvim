@@ -832,4 +832,283 @@ describe("sidebar hover preview", function()
       end)
     end)
   end)
+
+  --- Every file row of the sidebar, in buffer order, resolved against the
+  --- CURRENT model (the loading model's rows and the classified model's rows
+  --- are both valid inputs — meta_at is regenerated on every redraw).
+  local function file_rows_with_paths(entry)
+    local rows = {}
+    for l = 1, vim.api.nvim_buf_line_count(entry.sidebar.bufnr) do
+      local m = entry.sidebar.meta_at(l)
+      if m and m.kind == "file" then
+        local f = entry.model.groups[m.group_i].files[m.file_i]
+        rows[#rows + 1] = { lnum = l, group_i = m.group_i, file_i = m.file_i, path = f.path }
+      end
+    end
+    return rows
+  end
+
+  --- The sidebar row for a file OTHER than the one auto-open has already put
+  --- in the panes — i.e. one whose flat-model file_i is not 1, which is what
+  --- makes navigation.update_model's clamp-to-1 observable.
+  local function other_file_row(entry, shown_path)
+    for _, r in ipairs(file_rows_with_paths(entry)) do
+      if r.path ~= shown_path then
+        return r
+      end
+    end
+  end
+
+  --- Split the diff into one group per file, with `path`'s hunks in the
+  --- SECOND group — so the hovered file moves from (group 1, file 2) in the
+  --- flat "All changes" model to (group 2, file 1) in the classified one.
+  local function two_groups_isolating(path)
+    return function(request)
+      local mine, theirs = {}, {}
+      for _, h in ipairs(request.hunks) do
+        local into = h.file == path and mine or theirs
+        into[#into + 1] = h.n
+      end
+      assert.is_true(#mine > 0 and #theirs > 0, "fixture must span two files")
+      return {
+        { title = "Other file", ids = table.concat(theirs, ",") },
+        { title = "Hovered file", ids = table.concat(mine, ",") },
+      }
+    end
+  end
+
+  describe("the navigation context follows the cursor", function()
+    --- Two files whose hunks sit at unmistakably different lines AND whose
+    --- lengths differ: the short file's buffer cannot even hold the long
+    --- file's second hunk line, so a ]c driven from the wrong file's hunk list
+    --- either lands on a visibly wrong line or cannot move at all.
+    ---   long.lua  — 200 lines, hunks at 5 and 150
+    ---   short.lua —  60 lines, hunks at 10 and 50
+    local function make_two_file_repo()
+      local long, short = {}, {}
+      for i = 1, 200 do long[i] = "long " .. i end
+      for i = 1, 60 do short[i] = "short " .. i end
+      local r = helpers.make_repo({
+        ["long.lua"] = table.concat(long, "\n"),
+        ["short.lua"] = table.concat(short, "\n"),
+      })
+      long[5], long[150] = "CHANGED 5", "CHANGED 150"
+      short[10], short[50] = "CHANGED 10", "CHANGED 50"
+      helpers.write_file(r, "long.lua", table.concat(long, "\n"))
+      helpers.write_file(r, "short.lua", table.concat(short, "\n"))
+      vim.cmd("cd " .. r)
+      return r
+    end
+
+    --- The buffer-local ]c installed on `buf`, asserted to be OURS: codediff
+    --- reinstalls its own all-hunks version at the end of every render, and
+    --- that one would happily jump to the right line for the wrong reason.
+    local function our_next_hunk(buf)
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+        if m.lhs == "]c" then
+          assert.truthy((m.desc or ""):find("intent-diff", 1, true),
+            "]c is not intent-diff's group-scoped mapping: " .. tostring(m.desc))
+          assert.truthy(m.callback, "]c has no Lua callback")
+          return m.callback
+        end
+      end
+      error("no ]c mapping on the modified pane")
+    end
+
+    it("drives ]c from the file the cursor opened, after classification re-groups it", function()
+      -- The whole reported sequence, on default settings, cursor only, no
+      -- <CR>: moving onto a file row during the loading phase renders it AND
+      -- sets user_selected (apply_hover), which routes classification
+      -- completion through refold_shown_file. That branch re-folds the shown
+      -- file; navigation.update_model, which ran just before it, has already
+      -- clamped the stale flat-model file_i to 1. Without refold_shown_file
+      -- also re-pointing the ctx, ]c then plans against a file the panes are
+      -- not showing.
+      make_two_file_repo()
+      local provider, release = gated_provider()
+      local tab, entry = open_loading({
+        provider = provider,
+        preview = { enabled = true, debounce_ms = 10 },
+      })
+      local view = require("intentdiff.view")
+      local row = other_file_row(entry, view._last_shown[tab].file_entry.path)
+      assert.truthy(row, "no sidebar row for a second file")
+      local hovered = row.path
+
+      hover(entry, row.lnum)
+      assert.truthy(helpers.wait_for(function()
+        local s = view._last_shown[tab]
+        return s and s.file_entry.path == hovered or nil
+      end, 15000), "the hovered file was never rendered")
+      -- Let the hover's own render SETTLE before releasing the provider (its
+      -- on_ready is what restores focus to the sidebar). That pins the
+      -- ordering this test is about: the ctx is attached against the flat
+      -- model first, and the classification then has to fix it up — rather
+      -- than the render landing afterwards and fixing itself up.
+      assert.truthy(helpers.wait_for(function()
+        return vim.api.nvim_get_current_win() == entry.sidebar.winid or nil
+      end, 15000), "the hover render never settled")
+      assert.is_true(entry.user_selected == true,
+        "hovering a file row must mark the selection (the branch under test)")
+
+      release(two_groups_isolating(hovered))
+      assert.truthy(helpers.wait_for(function()
+        return entry.model.state == "ready" or nil
+      end, 15000), "classification never completed")
+      vim.wait(300, function() return false end, 20)
+      assert.equals(hovered, entry.model.groups[2].files[1].path,
+        "the classified model must put the hovered file at group 2 / file 1")
+
+      local session = view.get_session(tab)
+      local win = session.modified_win
+      assert.truthy(vim.api.nvim_buf_get_name(session.modified_bufnr):find(hovered, 1, true),
+        "the panes must still be showing the hovered file")
+
+      -- Line 20 sits after each file's first hunk and before its second (hunk
+      -- start lines carry git's 3 lines of leading context, so they are a few
+      -- lines below the changed line itself — read them from the model rather
+      -- than hard-coding). The correct answer is the SHOWN file's next hunk;
+      -- the stale ctx names the other file, whose next hunk is either past
+      -- the end of this buffer (short.lua shown) or simply a different line
+      -- (long.lua shown).
+      local function next_after(file_entry, line)
+        for _, h in ipairs(file_entry.hunks) do
+          if h.modified.start_line > line then
+            return h.modified.start_line
+          end
+        end
+      end
+      local expected = next_after(entry.model.groups[2].files[1], 20)
+      local stale = next_after(entry.model.groups[1].files[1], 20)
+      assert.truthy(expected, "the shown file must have a hunk below line 20")
+      assert.not_equals(stale, expected,
+        "fixture is not discriminating: both files' next hunk is the same line")
+
+      local next_hunk = our_next_hunk(session.modified_bufnr)
+      vim.api.nvim_set_current_win(win)
+      vim.api.nvim_win_set_cursor(win, { 20, 0 })
+      local ok, err = pcall(next_hunk)
+      assert.is_true(ok, "]c errored: " .. tostring(err))
+      assert.equals(expected, vim.api.nvim_win_get_cursor(win)[1])
+    end)
+
+    --- Capture show_file() calls instead of rendering, mirroring the one
+    --- synchronous side effect the identity gate reads (_last_shown), so a
+    --- render's on_ready can be fired at a chosen moment. Real timing cannot
+    --- produce "an older render lands after a newer one has taken the panes"
+    --- on demand — codediff's when_diff_ready stops matching once the
+    --- session's paths move on, so the older poll just gives up silently
+    --- (see integration_spec's "does not attach a stale ctx" for the full
+    --- account).
+    local function stub_show_file()
+      local view = require("intentdiff.view")
+      local real = view.show_file
+      local pending = {}
+      view.show_file = function(sess, file_entry, opts)
+        view._last_shown[sess.tabpage] = { sess = sess, file_entry = file_entry }
+        pending[#pending + 1] = { file_entry = file_entry, opts = opts }
+      end
+      return pending, function() view.show_file = real end
+    end
+
+    local function spy_attach()
+      local navigation = require("intentdiff.navigation")
+      local real = navigation.attach
+      local calls = {}
+      navigation.attach = function(tabpage, ctx)
+        calls[#calls + 1] = { group_i = ctx.group_i, file_i = ctx.file_i, model = ctx.model }
+        return real(tabpage, ctx)
+      end
+      return calls, function() navigation.attach = real end
+    end
+
+    it("ignores a hover render whose on_ready lands after a newer hover took the panes", function()
+      -- A hover render is not an auto-open, so the old opts.auto-only
+      -- superseded/still_current bail never applied to it and its attach ran
+      -- unconditionally — installing indices for a file that is no longer on
+      -- screen. Widest for "A"/"D" virtual files, whose on_ready fires from a
+      -- buffer-scoped User autocmd rather than from a path-matched poll.
+      local pending, restore_show = stub_show_file()
+      local attach_calls, restore_attach = spy_attach()
+      local ok, err = pcall(function()
+        local _, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
+        local rows = file_rows_with_paths(entry)
+        assert.is_true(#rows >= 2, "fixture must have two file rows")
+        assert.not_equals(rows[1].path, rows[2].path)
+
+        hover(entry, rows[1].lnum)
+        assert.truthy(helpers.wait_for(function()
+          return pending[#pending] and pending[#pending].file_entry.path == rows[1].path or nil
+        end, 5000), "the first hover's show_file() call was never captured")
+        local older = pending[#pending]
+
+        hover(entry, rows[2].lnum)
+        assert.truthy(helpers.wait_for(function()
+          return pending[#pending] and pending[#pending].file_entry.path == rows[2].path or nil
+        end, 5000), "the second hover's show_file() call was never captured")
+        local newer = pending[#pending]
+
+        local before = #attach_calls
+        older.opts.on_ready()
+        assert.equals(before, #attach_calls,
+          "a hover render the panes have moved on from must not attach its ctx")
+
+        -- ...and the render that IS on screen still attaches, so the
+        -- assertion above cannot be satisfied by never attaching at all.
+        newer.opts.on_ready()
+        assert.equals(before + 1, #attach_calls,
+          "the render that is on screen must attach its ctx")
+        assert.equals(rows[2].group_i, attach_calls[#attach_calls].group_i)
+        assert.equals(rows[2].file_i, attach_calls[#attach_calls].file_i)
+      end)
+      restore_show()
+      restore_attach()
+      assert.is_true(ok, tostring(err))
+    end)
+
+    it("attaches the shown file's position in the model that exists when the render lands", function()
+      -- The other half of the same hazard: nothing newer took the panes, but
+      -- a classification replaced the model between show_file() and its
+      -- on_ready. The group_i/file_i the call was made with index into a
+      -- model that no longer exists.
+      local provider, release = gated_provider()
+      local pending, restore_show = stub_show_file()
+      local attach_calls, restore_attach = spy_attach()
+      local ok, err = pcall(function()
+        local tab, entry = open_loading({
+          provider = provider,
+          preview = { enabled = true, debounce_ms = 10 },
+        })
+        local view = require("intentdiff.view")
+        local row = other_file_row(entry, view._last_shown[tab].file_entry.path)
+        assert.truthy(row, "no sidebar row for a second file")
+        assert.equals(2, row.file_i, "the hovered file must be file 2 of the flat group")
+
+        hover(entry, row.lnum)
+        assert.truthy(helpers.wait_for(function()
+          return pending[#pending] and pending[#pending].file_entry.path == row.path or nil
+        end, 5000), "the hover's show_file() call was never captured")
+        local in_flight = pending[#pending]
+
+        release(two_groups_isolating(row.path))
+        assert.truthy(helpers.wait_for(function()
+          return entry.model.state == "ready" or nil
+        end, 15000), "classification never completed")
+        assert.equals(row.path, entry.model.groups[2].files[1].path)
+
+        local before = #attach_calls
+        in_flight.opts.on_ready()
+        assert.equals(before + 1, #attach_calls, "the render on screen must attach its ctx")
+        local last = attach_calls[#attach_calls]
+        assert.equals(entry.model, last.model, "the ctx must carry the current model")
+        assert.equals(2, last.group_i,
+          "the ctx must name the shown file's position in the CURRENT model, "
+            .. "not the flat model's (group 1, file 2)")
+        assert.equals(1, last.file_i)
+      end)
+      restore_show()
+      restore_attach()
+      assert.is_true(ok, tostring(err))
+    end)
+  end)
 end)

@@ -168,6 +168,23 @@ describe("navigation integration (move/attach/detach/set_position)", function()
     assert.equals(1, vim.api.nvim_win_get_cursor(win2)[1])
   end)
 
+  it("a ctx that plans a line past the end of the pane is a no-op, not an error", function()
+    -- Defence in depth for the E5108 class. init.lua keeps the ctx in step
+    -- with what the panes hold (open_file's on_ready identity gate,
+    -- refold_shown_file's set_position), but any residue must degrade to
+    -- doing nothing rather than throwing "Invalid cursor line: out of range"
+    -- out of a plain ]c press: nvim_win_set_cursor rejects an out-of-range
+    -- line instead of clamping. The panes here are 200 lines.
+    ctx.model.groups[1].files = {
+      { path = "stale.lua", hunks = { mk_hunk(5), mk_hunk(500) } },
+    }
+    navigation.attach(tabpage, ctx)
+    vim.api.nvim_set_current_win(win2)
+    vim.api.nvim_win_set_cursor(win2, { 10, 0 })
+    assert.has_no.errors(function() navigation.next_hunk(tabpage) end)
+    assert.equals(10, vim.api.nvim_win_get_cursor(win2)[1])
+  end)
+
   it("detach clears state so next_hunk is a no-op afterwards", function()
     navigation.attach(tabpage, ctx)
     navigation.detach(tabpage)

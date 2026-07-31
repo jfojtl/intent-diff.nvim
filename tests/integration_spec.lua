@@ -705,9 +705,9 @@ describe(":IntentDiff end-to-end", function()
     return session, tab
   end
 
-  -- Direct, isolated coverage for the `superseded` / `still_current`
-  -- handling added to open_file's on_ready (task 2 review fix). Previously
-  -- this was exercised only incidentally, as a side effect of the "keeps ]c
+  -- Direct, isolated coverage for the IDENTITY gate in open_file's on_ready
+  -- (`view._last_shown[tab].file_entry == file_entry`). Previously this was
+  -- exercised only incidentally, as a side effect of the "keeps ]c
   -- group-scoped" test's setup above. Positive case: a <CR> that lands on the
   -- SAME file a still-in-flight auto-open is rendering must still end up with
   -- OUR navigation attached, not codediff's default.
@@ -720,8 +720,8 @@ describe(":IntentDiff end-to-end", function()
     -- below reliably (though not necessarily) lands inside that gap. Either
     -- way the assertions below must hold: settled-before-<CR> takes
     -- select_file's plain open_file() path, in-flight takes the
-    -- same_as_shown short-circuit + the superseded/still_current path in
-    -- on_ready — both must end up with OUR ]c attached.
+    -- same_as_shown short-circuit and leaves the auto-open's own on_ready to
+    -- pass the identity gate — both must end up with OUR ]c attached.
     make_two_group_repo()
     local session = open_two_groups()
     local win = select_and_wait(session, 1, 1, "a.lua", 5, 55)
@@ -806,10 +806,8 @@ describe(":IntentDiff end-to-end", function()
       assert.equals("y.lua", pending[2].file_entry.path)
 
       -- Fire x.lua's STALE on_ready now, simulating it arriving late — after
-      -- the newer selection has already moved _last_shown on to y.lua. This
-      -- is exactly the `superseded = true` branch in open_file's on_ready:
-      -- user_selected is true (the <CR> press set it) and this call's own
-      -- opts.auto is true (it came from auto_open_first).
+      -- the newer selection has already moved _last_shown on to y.lua —
+      -- exactly what open_file's on_ready IDENTITY gate has to reject.
       assert.truthy(x_call.on_ready, "auto-open's show_file() call had no on_ready")
       x_call.on_ready()
 
