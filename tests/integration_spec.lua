@@ -1290,4 +1290,37 @@ describe(":IntentDiff end-to-end", function()
     assert.truthy(closed, "expected the opened tab to close for an empty diff")
     assert.equals(tabs_before, #vim.api.nvim_list_tabpages())
   end)
+
+  it("toggles every intent collapsed and back, keeping directory state", function()
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      log_file = vim.fn.tempname() .. "/l.log",
+      provider = fake_provider({
+        { title = "First", ids = "1" },
+        { title = "Second", ids = "2-99" },
+      }),
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local entry = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model and s.model.state == "ready" and s or nil
+    end, 15000)
+    assert.truthy(entry)
+    assert.is_true(#entry.model.groups >= 2)
+
+    entry.model.groups[1].collapsed_dirs = { ["src"] = true }
+
+    require("intentdiff").toggle_all(tab)
+    for _, g in ipairs(entry.model.groups) do
+      assert.is_true(g.collapsed, "every intent must collapse")
+    end
+
+    require("intentdiff").toggle_all(tab)
+    for _, g in ipairs(entry.model.groups) do
+      assert.is_falsy(g.collapsed, "every intent must expand again")
+    end
+    assert.is_true(entry.model.groups[1].collapsed_dirs["src"],
+      "per-directory state must survive the round trip")
+  end)
 end)

@@ -278,6 +278,12 @@ function M.create(callbacks)
       end
     end)
   end
+  local keys = require("intentdiff.config").options.keymaps or {}
+  if keys.toggle_all then
+    map(keys.toggle_all, function()
+      callbacks.on_toggle_all()
+    end)
+  end
   map("r", callbacks.on_reclassify)
   map("q", callbacks.on_close)
   map("<Tab>", callbacks.on_next_group)

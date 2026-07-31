@@ -52,6 +52,13 @@ M.defaults = {
   -- tree never settles, so it renders once, at rest. Set false to go back to
   -- restoring the last selection on a file row and requiring <CR> to open.
   preview = { enabled = true, debounce_ms = 120, max_lines = 20000, hover_opens_files = true },
+  -- Buffer-local keys the plugin installs inside a review tab. Set any of them
+  -- to false to install nothing, exactly as the plugin already handles
+  -- codediff's toggle_layout key being disabled.
+  keymaps = {
+    toggle_sidebar = "<leader>gVt", -- installed on the sidebar AND the diff panes
+    toggle_all = "zA",              -- sidebar only
+  },
 }
 
 M.options = vim.deepcopy(M.defaults)

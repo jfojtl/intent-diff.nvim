@@ -10,3 +10,7 @@ end, { nargs = "*", desc = "Grouped-by-reason diff review" })
 vim.api.nvim_create_user_command("IntentDiffLog", function()
   require("intentdiff").show_log()
 end, { desc = "Show the intent-diff diagnostics log" })
+
+vim.api.nvim_create_user_command("IntentDiffToggleAll", function()
+  require("intentdiff").toggle_all()
+end, { desc = "Collapse or expand every intent in the sidebar" })

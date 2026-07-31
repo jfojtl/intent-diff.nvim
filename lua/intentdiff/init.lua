@@ -719,6 +719,31 @@ function M.close(tabpage)
   end
 end
 
+--- :IntentDiffToggleAll and the toggle_all key — collapse every intent, or
+--- expand every intent.
+---
+--- Any expanded intent ⇒ collapse everything; otherwise expand everything.
+--- Per-directory state (g.collapsed_dirs) is deliberately untouched, so
+--- re-expanding restores the tree the user had arranged.
+function M.toggle_all(tabpage)
+  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+  local entry = M._session(tabpage)
+  if not (entry and entry.model and entry.model.groups) then
+    return
+  end
+  local any_expanded = false
+  for _, g in ipairs(entry.model.groups) do
+    if not g.collapsed then
+      any_expanded = true
+      break
+    end
+  end
+  for _, g in ipairs(entry.model.groups) do
+    g.collapsed = any_expanded or nil
+  end
+  entry.sidebar.update(entry.model)
+end
+
 --- Sessions whose tab was closed behind our back (`:tabclose`, `:q` of the
 --- last window in the tab, codediff's own `q` keymap) used to linger in
 --- `sessions` forever: the entry kept the (dead) model, navigation kept its
@@ -940,6 +965,12 @@ function M.open(argline)
         g.collapsed_dirs = g.collapsed_dirs or {}
         g.collapsed_dirs[dir_path] = not g.collapsed_dirs[dir_path] or nil
         entry.sidebar.update(entry.model)
+      end
+    end,
+    on_toggle_all = function()
+      local entry = sessions[token]
+      if entry then
+        M.toggle_all(entry.sess.tabpage)
       end
     end,
     on_reclassify = function()

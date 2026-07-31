@@ -352,3 +352,23 @@ describe("sidebar.create", function()
     vim.api.nvim_win_close(handle.winid, true)
   end)
 end)
+
+describe("sidebar toggle-all", function()
+  it("invokes on_toggle_all from the configured key", function()
+    require("intentdiff.config").setup({})
+    local called = 0
+    local handle = sidebar.create({
+      on_select = function() end, on_toggle_group = function() end,
+      on_toggle_dir = function() end, on_toggle_all = function() called = called + 1 end,
+      on_reclassify = function() end, on_close = function() end,
+      on_next_group = function() end, on_prev_group = function() end,
+      on_goto_file = function() end,
+    })
+    handle.update(mk_model())
+    vim.api.nvim_set_current_win(handle.winid)
+    vim.api.nvim_win_set_cursor(handle.winid, { 1, 0 })
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("zA", true, false, true), "x", false)
+    assert.equals(1, called)
+    pcall(vim.api.nvim_win_close, handle.winid, true)
+  end)
+end)
