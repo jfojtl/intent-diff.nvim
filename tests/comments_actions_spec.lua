@@ -1,12 +1,18 @@
 local comments = require("intentdiff.comments")
 local store = require("intentdiff.comments.store")
 local config = require("intentdiff.config")
+local helpers = require("tests.helpers")
 
 describe("comments actions", function()
+  --- The store of the review under test. The action layer resolves it from the
+  --- tabpage's session entry, so tests that go through an action (edit,
+  --- delete, list) install a fake session carrying this store; the pure
+  --- helpers (next_line, prev_line, list_entries) take it directly.
+  local st
+
   before_each(function()
     config.setup({ cache_dir = vim.fn.tempname() })
-    store.detach()
-    store.clear()
+    st = store.new()
   end)
 
   describe("side_for_win", function()
@@ -40,18 +46,18 @@ describe("comments actions", function()
 
   describe("next/prev targets", function()
     it("finds the next comment line after the cursor", function()
-      store.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
-      store.add({ file = "a.lua", line = 9, side = "new", type = "note", text = "y" })
-      assert.equals(9, comments.next_line("a.lua", 3, "new"))
-      assert.equals(3, comments.next_line("a.lua", 1, "new"))
-      assert.is_nil(comments.next_line("a.lua", 9, "new"))
+      st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
+      st.add({ file = "a.lua", line = 9, side = "new", type = "note", text = "y" })
+      assert.equals(9, comments.next_line(st, "a.lua", 3, "new"))
+      assert.equals(3, comments.next_line(st, "a.lua", 1, "new"))
+      assert.is_nil(comments.next_line(st, "a.lua", 9, "new"))
     end)
 
     it("finds the previous comment line before the cursor", function()
-      store.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
-      store.add({ file = "a.lua", line = 9, side = "new", type = "note", text = "y" })
-      assert.equals(3, comments.prev_line("a.lua", 9, "new"))
-      assert.is_nil(comments.prev_line("a.lua", 3, "new"))
+      st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
+      st.add({ file = "a.lua", line = 9, side = "new", type = "note", text = "y" })
+      assert.equals(3, comments.prev_line(st, "a.lua", 9, "new"))
+      assert.is_nil(comments.prev_line(st, "a.lua", 3, "new"))
     end)
 
     it("returns the NEAREST previous comment, not the earliest", function()
@@ -59,25 +65,25 @@ describe("comments actions", function()
       -- correct "nearest" implementation and a mutant that just returns the
       -- first match found. A third comment at 5 pins down which one it is:
       -- only "nearest" answers 5 here.
-      store.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
-      store.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "z" })
-      store.add({ file = "a.lua", line = 9, side = "new", type = "note", text = "y" })
-      assert.equals(5, comments.prev_line("a.lua", 9, "new"))
-      assert.is_nil(comments.prev_line("a.lua", 3, "new"))
+      st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
+      st.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "z" })
+      st.add({ file = "a.lua", line = 9, side = "new", type = "note", text = "y" })
+      assert.equals(5, comments.prev_line(st, "a.lua", 9, "new"))
+      assert.is_nil(comments.prev_line(st, "a.lua", 3, "new"))
     end)
 
     it("ignores file-level comments when navigating", function()
-      store.add({ file = "a.lua", line = 0, type = "note", text = "f" })
-      store.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "x" })
-      assert.equals(5, comments.next_line("a.lua", 1, "new"))
+      st.add({ file = "a.lua", line = 0, type = "note", text = "f" })
+      st.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "x" })
+      assert.equals(5, comments.next_line(st, "a.lua", 1, "new"))
     end)
   end)
 
   describe("list entries", function()
     it("labels each comment with type, location and first text line", function()
-      store.add({ file = "a.lua", line = 3, side = "new", type = "issue", text = "bad thing\nmore" })
-      store.add({ intent_title = "Rename", type = "note", text = "whole intent" })
-      local entries = comments.list_entries()
+      st.add({ file = "a.lua", line = 3, side = "new", type = "issue", text = "bad thing\nmore" })
+      st.add({ intent_title = "Rename", type = "note", text = "whole intent" })
+      local entries = comments.list_entries(st)
       assert.equals(2, #entries)
       assert.is_truthy(entries[1].label:match("ISSUE"))
       assert.is_truthy(entries[1].label:match("a%.lua:3"))
@@ -87,15 +93,15 @@ describe("comments actions", function()
     end)
 
     it("labels a range comment with both endpoints", function()
-      store.add({ file = "b.lua", line = 4, line_end = 8, side = "new", type = "suggestion", text = "range" })
-      local entries = comments.list_entries()
+      st.add({ file = "b.lua", line = 4, line_end = 8, side = "new", type = "suggestion", text = "range" })
+      local entries = comments.list_entries(st)
       assert.equals(1, #entries)
       assert.is_truthy(entries[1].label:match("b%.lua:4%-8"))
     end)
 
     it("labels a file-level comment with just the file path", function()
-      store.add({ file = "c.lua", line = 0, type = "praise", text = "nice file" })
-      local entries = comments.list_entries()
+      st.add({ file = "c.lua", line = 0, type = "praise", text = "nice file" })
+      local entries = comments.list_entries(st)
       assert.equals(1, #entries)
       assert.is_truthy(entries[1].label:match("PRAISE"))
       assert.is_truthy(entries[1].label:match("c%.lua"))
@@ -103,23 +109,42 @@ describe("comments actions", function()
     end)
   end)
 
+  --- `attach_session` now gives the session entry its own store and returns
+  --- it, so each of these attaches yields a distinct store — exactly what a
+  --- second review tab gets. Every assertion is against the store of the
+  --- attach it is about.
   describe("session attach", function()
     it("keys a working-tree session by branch", function()
       local repo = require("tests.helpers").make_repo({ ["a.lua"] = "x" })
-      comments.attach_session({ sess = { git_root = repo } })
-      store.add({ file = "a.lua", line = 1, side = "new", type = "note", text = "x" })
+      local first = comments.attach_session({ sess = { git_root = repo } })
+      first.add({ file = "a.lua", line = 1, side = "new", type = "note", text = "x" })
       -- Re-attaching the same session must find the comment on disk.
-      store.replace({})
-      comments.attach_session({ sess = { git_root = repo } })
-      assert.equals(1, store.count())
+      local again = comments.attach_session({ sess = { git_root = repo } })
+      assert.are_not.equals(first, again, "each attach must get its own store")
+      assert.equals(1, again.count())
+    end)
+
+    it("hangs the store off the session entry it was given", function()
+      local repo = require("tests.helpers").make_repo({ ["a.lua"] = "x" })
+      local entry = { sess = { git_root = repo } }
+      local returned = comments.attach_session(entry)
+      assert.equals(returned, entry.comment_store)
+      -- And the tabpage lookup the action layer uses finds exactly that store.
+      local tab = 900010
+      entry.sess.tabpage = tab
+      local restore = helpers.fake_session(tab, entry)
+      assert.equals(returned, comments.store_for(tab))
+      restore()
     end)
 
     it("keeps two revision ranges of one repo apart", function()
       local repo = require("tests.helpers").make_repo({ ["a.lua"] = "x" })
-      comments.attach_session({ sess = { git_root = repo, base_revision = "aaa", target_revision = "bbb" } })
-      store.add({ file = "a.lua", line = 1, side = "new", type = "note", text = "one" })
-      comments.attach_session({ sess = { git_root = repo, base_revision = "ccc", target_revision = "ddd" } })
-      assert.equals(0, store.count())
+      local a = comments.attach_session({
+        sess = { git_root = repo, base_revision = "aaa", target_revision = "bbb" } })
+      a.add({ file = "a.lua", line = 1, side = "new", type = "note", text = "one" })
+      local b = comments.attach_session({
+        sess = { git_root = repo, base_revision = "ccc", target_revision = "ddd" } })
+      assert.equals(0, b.count())
     end)
 
     -- Regression for the bug in the original brief: init.lua ALWAYS populates
@@ -133,18 +158,17 @@ describe("comments actions", function()
     -- opened. The moment the user commits, HEAD moves, the key changes, and
     -- every comment the review holds silently vanishes.
     it("survives a new commit for a working-tree review, and keeps a HEAD~1-pinned review separate", function()
-      local helpers = require("tests.helpers")
       local repo = helpers.make_repo({ ["a.lua"] = "x" })
       local base_before = vim.trim(helpers.git(repo, "rev-parse", "HEAD"))
 
       -- Attach exactly as init.lua does once the FIRST review of a plain
       -- `:IntentDiff` resolves: base_revision = the resolved HEAD hash,
       -- target_revision = "WORKING".
-      comments.attach_session({
+      local first = comments.attach_session({
         sess = { git_root = repo, base_revision = base_before, target_revision = "WORKING" },
       })
-      store.add({ file = "a.lua", line = 1, side = "new", type = "note", text = "worktree comment" })
-      assert.equals(1, store.count())
+      first.add({ file = "a.lua", line = 1, side = "new", type = "note", text = "worktree comment" })
+      assert.equals(1, first.count())
 
       -- The user commits. HEAD moves.
       helpers.write_file(repo, "b.lua", "y")
@@ -156,21 +180,21 @@ describe("comments actions", function()
       -- A SECOND `:IntentDiff` now resolves against the NEW HEAD: init.lua
       -- would populate base_revision = head_after, target_revision =
       -- "WORKING" again. This must land on the SAME storage key as before —
-      -- the comment must still be there.
-      store.replace({})
-      comments.attach_session({
+      -- the comment must still be there. A brand-new store, loaded from disk:
+      -- nothing can be inherited in memory.
+      local second = comments.attach_session({
         sess = { git_root = repo, base_revision = head_after, target_revision = "WORKING" },
       })
-      assert.equals(1, store.count())
-      assert.equals("worktree comment", store.get_all()[1].text)
+      assert.equals(1, second.count())
+      assert.equals("worktree comment", second.get_all()[1].text)
 
       -- A `:IntentDiff HEAD~1`-shaped review — base pinned away from HEAD,
       -- target still "WORKING" — must NOT share that key: it is reviewing a
       -- fixed, explicit revision range, not "whatever the branch is now".
-      comments.attach_session({
+      local pinned = comments.attach_session({
         sess = { git_root = repo, base_revision = base_before, target_revision = "WORKING" },
       })
-      assert.equals(0, store.count())
+      assert.equals(0, pinned.count())
     end)
   end)
 
@@ -184,7 +208,7 @@ describe("comments actions", function()
   describe("edit/delete disambiguation for multiple intent comments", function()
     local popup = require("intentdiff.comments.popup")
     local view = require("intentdiff.view")
-    local real_context, real_select, real_open, real_get_session
+    local real_context, real_select, real_open, real_get_session, restore_session
 
     before_each(function()
       real_context = comments.context
@@ -198,6 +222,10 @@ describe("comments actions", function()
       -- tab's pane rendering.
       real_get_session = view.get_session
       view.get_session = function() return nil end
+      -- edit/delete take no tabpage here, so they resolve the CURRENT one; the
+      -- store they act on is the one on that tab's session entry.
+      restore_session = helpers.fake_session(vim.api.nvim_get_current_tabpage(),
+        { comment_store = st })
     end)
 
     after_each(function()
@@ -205,11 +233,12 @@ describe("comments actions", function()
       vim.ui.select = real_select
       popup.open = real_open
       view.get_session = real_get_session
+      restore_session()
     end)
 
     it("edits a single intent comment directly, without opening a picker", function()
       comments.context = function() return { intent_title = "Rename" } end
-      local c = store.add({ intent_title = "Rename", type = "note", text = "only one" })
+      local c = st.add({ intent_title = "Rename", type = "note", text = "only one" })
 
       local select_called = false
       vim.ui.select = function() select_called = true end
@@ -224,8 +253,8 @@ describe("comments actions", function()
 
     it("opens a picker to disambiguate several intent comments, and edits only the chosen one", function()
       comments.context = function() return { intent_title = "Rename" } end
-      local first = store.add({ intent_title = "Rename", type = "note", text = "first" })
-      local second = store.add({ intent_title = "Rename", type = "note", text = "second" })
+      local first = st.add({ intent_title = "Rename", type = "note", text = "first" })
+      local second = st.add({ intent_title = "Rename", type = "note", text = "second" })
 
       vim.ui.select = function(entries, _, cb)
         for _, e in ipairs(entries) do
@@ -246,8 +275,8 @@ describe("comments actions", function()
 
     it("opens a picker to disambiguate on delete, removing only the chosen one", function()
       comments.context = function() return { intent_title = "Rename" } end
-      local first = store.add({ intent_title = "Rename", type = "note", text = "first" })
-      local second = store.add({ intent_title = "Rename", type = "note", text = "second" })
+      local first = st.add({ intent_title = "Rename", type = "note", text = "first" })
+      local second = st.add({ intent_title = "Rename", type = "note", text = "second" })
 
       -- Picks SECOND, not first: get_for_intent returns comments in creation
       -- order, so a mutant that skips the picker and always acts on
@@ -263,8 +292,8 @@ describe("comments actions", function()
 
       comments.delete()
 
-      assert.equals(1, store.count())
-      assert.equals(first, store.get_all()[1])
+      assert.equals(1, st.count())
+      assert.equals(first, st.get_all()[1])
     end)
   end)
 
@@ -280,7 +309,7 @@ describe("comments actions", function()
     local view = require("intentdiff.view")
     local tab
     local real_select, real_get_session, real_diff_wins, real_open_path
-    local win_orig, win_mod
+    local win_orig, win_mod, restore_session
 
     before_each(function()
       tab = 900002 -- sentinel key, never a real tabpage id
@@ -302,6 +331,8 @@ describe("comments actions", function()
       view.get_session = function() return { original_win = win_orig, modified_win = win_mod } end
       view.diff_wins = function() return { win_orig, win_mod } end
       view._last_shown[tab] = { file_entry = { path = "a.lua" } }
+      -- `list` resolves the review's store from this tab's session entry.
+      restore_session = helpers.fake_session(tab, { comment_store = st })
     end)
 
     after_each(function()
@@ -309,6 +340,7 @@ describe("comments actions", function()
       view.get_session = real_get_session
       view.diff_wins = real_diff_wins
       require("intentdiff").open_path = real_open_path
+      restore_session()
       view._last_shown[tab] = nil
       view._preview_active[tab] = nil
       pcall(vim.api.nvim_win_close, win_orig, true)
@@ -316,7 +348,7 @@ describe("comments actions", function()
     end)
 
     it("opens the comment's file, then jumps, when it is not the one on screen", function()
-      store.add({ file = "b.lua", line = 5, side = "new", type = "note", text = "x" })
+      st.add({ file = "b.lua", line = 5, side = "new", type = "note", text = "x" })
       vim.ui.select = function(entries, _, cb) cb(entries[1]) end
 
       local asked_tab, asked_path
@@ -338,7 +370,7 @@ describe("comments actions", function()
     end)
 
     it("refuses to jump when the review cannot open the comment's file", function()
-      store.add({ file = "b.lua", line = 5, side = "new", type = "note", text = "x" })
+      st.add({ file = "b.lua", line = 5, side = "new", type = "note", text = "x" })
       vim.ui.select = function(entries, _, cb) cb(entries[1]) end
       require("intentdiff").open_path = function() return false end
 
@@ -350,7 +382,7 @@ describe("comments actions", function()
     end)
 
     it("jumps straight in when the comment's file is already shown", function()
-      store.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "x" })
+      st.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "x" })
       vim.ui.select = function(entries, _, cb) cb(entries[1]) end
       local opened = false
       require("intentdiff").open_path = function()
@@ -371,7 +403,7 @@ describe("comments actions", function()
     -- on an arbitrary line of an unrelated file — the same wrong-file hazard
     -- this function refuses to take when the file simply isn't open.
     it("does not jump into a hover preview's buffers, even for the last-shown file", function()
-      store.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "x" })
+      st.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "x" })
       vim.ui.select = function(entries, _, cb) cb(entries[1]) end
       view._preview_active[tab] = { title = "An intent" }
       local asked_path
@@ -391,7 +423,7 @@ describe("comments actions", function()
     end)
 
     it("jumps only the pane whose side matches an old-side comment", function()
-      store.add({ file = "a.lua", line = 5, side = "old", type = "note", text = "x" })
+      st.add({ file = "a.lua", line = 5, side = "old", type = "note", text = "x" })
       vim.ui.select = function(entries, _, cb) cb(entries[1]) end
 
       comments.list(tab)

@@ -17,10 +17,14 @@ local function extmarks(buf)
 end
 
 describe("comments.marks", function()
+  --- The store under test. Rendering takes the store explicitly now: with two
+  --- review tabs open, the store handed in is the only thing that says which
+  --- comments belong in this buffer.
+  local st
+
   before_each(function()
     config.setup({})
-    store.detach()
-    store.clear()
+    st = store.new()
   end)
 
   it("draws a box sized to the widest line with a minimum width", function()
@@ -58,8 +62,8 @@ describe("comments.marks", function()
 
   it("places a sign, a line highlight and a box for a single-line comment", function()
     local buf = scratch(10)
-    store.add({ file = "a.lua", line = 3, side = "new", type = "issue", text = "bad" })
-    marks.render_buffer(buf, "a.lua", "new")
+    st.add({ file = "a.lua", line = 3, side = "new", type = "issue", text = "bad" })
+    marks.render_buffer(st, buf, "a.lua", "new")
     local got = extmarks(buf)
     assert.equals(1, #got)
     assert.equals(2, got[1][2]) -- 0-indexed row for line 3
@@ -71,8 +75,8 @@ describe("comments.marks", function()
 
   it("highlights every line of a range and boxes only the last", function()
     local buf = scratch(10)
-    store.add({ file = "a.lua", line = 3, line_end = 6, side = "new", type = "note", text = "r" })
-    marks.render_buffer(buf, "a.lua", "new")
+    st.add({ file = "a.lua", line = 3, line_end = 6, side = "new", type = "note", text = "r" })
+    marks.render_buffer(st, buf, "a.lua", "new")
     local got = extmarks(buf)
     assert.equals(4, #got) -- rows 3,4,5,6
     assert.is_truthy(got[1][4].sign_text)
@@ -91,8 +95,8 @@ describe("comments.marks", function()
 
   it("anchors a file-level comment above the first line", function()
     local buf = scratch(5)
-    store.add({ file = "a.lua", line = 0, type = "praise", text = "nice" })
-    marks.render_buffer(buf, "a.lua", "new")
+    st.add({ file = "a.lua", line = 0, type = "praise", text = "nice" })
+    marks.render_buffer(st, buf, "a.lua", "new")
     local got = extmarks(buf)
     assert.equals(1, #got)
     assert.equals(0, got[1][2])
@@ -101,9 +105,9 @@ describe("comments.marks", function()
 
   it("renders a file-level comment on both sides", function()
     local old_buf, new_buf = scratch(5), scratch(5)
-    store.add({ file = "a.lua", line = 0, type = "praise", text = "nice" })
-    marks.render_buffer(old_buf, "a.lua", "old")
-    marks.render_buffer(new_buf, "a.lua", "new")
+    st.add({ file = "a.lua", line = 0, type = "praise", text = "nice" })
+    marks.render_buffer(st, old_buf, "a.lua", "old")
+    marks.render_buffer(st, new_buf, "a.lua", "new")
     assert.equals(1, #extmarks(old_buf))
     assert.equals(1, #extmarks(new_buf))
   end)
@@ -118,10 +122,10 @@ describe("comments.marks", function()
       height = 5,
       style = "minimal",
     })
-    store.add({ file = "a.lua", line = 0, type = "praise", text = "nice" })
+    st.add({ file = "a.lua", line = 0, type = "praise", text = "nice" })
 
     assert.has_no.errors(function()
-      marks.render_buffer(buf, "a.lua", "new")
+      marks.render_buffer(st, buf, "a.lua", "new")
     end)
 
     local topfill
@@ -140,27 +144,27 @@ describe("comments.marks", function()
 
   it("keeps an old-side comment off the new-side pane", function()
     local buf = scratch(10)
-    store.add({ file = "a.lua", line = 3, side = "old", type = "note", text = "o" })
-    marks.render_buffer(buf, "a.lua", "new")
+    st.add({ file = "a.lua", line = 3, side = "old", type = "note", text = "o" })
+    marks.render_buffer(st, buf, "a.lua", "new")
     assert.equals(0, #extmarks(buf))
-    marks.render_buffer(buf, "a.lua", "old")
+    marks.render_buffer(st, buf, "a.lua", "old")
     assert.equals(1, #extmarks(buf))
   end)
 
   it("clears previous marks before re-rendering", function()
     local buf = scratch(10)
-    local c = store.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
-    marks.render_buffer(buf, "a.lua", "new")
-    store.delete(c)
-    marks.render_buffer(buf, "a.lua", "new")
+    local c = st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
+    marks.render_buffer(st, buf, "a.lua", "new")
+    st.delete(c)
+    marks.render_buffer(st, buf, "a.lua", "new")
     assert.equals(0, #extmarks(buf))
   end)
 
   it("clamps a line number past the end of the buffer to the last line", function()
     local buf = scratch(3)
-    store.add({ file = "a.lua", line = 99, side = "new", type = "note", text = "drifted" })
+    st.add({ file = "a.lua", line = 99, side = "new", type = "note", text = "drifted" })
     assert.has_no.errors(function()
-      marks.render_buffer(buf, "a.lua", "new")
+      marks.render_buffer(st, buf, "a.lua", "new")
     end)
     local got = extmarks(buf)
     -- Genuinely clamped, not dropped: exactly one extmark, anchored on the
@@ -172,10 +176,10 @@ describe("comments.marks", function()
 
   it("pads the shorter side so boxes do not desync the panes", function()
     local old_buf, new_buf = scratch(10), scratch(10)
-    store.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "one\ntwo" })
-    marks.render_buffer(old_buf, "a.lua", "old")
-    marks.render_buffer(new_buf, "a.lua", "new")
-    marks.align(old_buf, new_buf, "a.lua")
+    st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "one\ntwo" })
+    marks.render_buffer(st, old_buf, "a.lua", "old")
+    marks.render_buffer(st, new_buf, "a.lua", "new")
+    marks.align(st, old_buf, new_buf, "a.lua")
     local pad = vim.api.nvim_buf_get_extmarks(old_buf, marks.ns_padding, 0, -1, { details = true })
     assert.equals(1, #pad)
     assert.equals(2, pad[1][2]) -- anchored at row 2 (line 3), not just any row
@@ -186,27 +190,27 @@ describe("comments.marks", function()
 
   it("adds no padding when both sides carry the same box height", function()
     local old_buf, new_buf = scratch(10), scratch(10)
-    store.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
-    store.add({ file = "a.lua", line = 3, side = "old", type = "note", text = "y" })
-    marks.render_buffer(old_buf, "a.lua", "old")
-    marks.render_buffer(new_buf, "a.lua", "new")
-    marks.align(old_buf, new_buf, "a.lua")
+    st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
+    st.add({ file = "a.lua", line = 3, side = "old", type = "note", text = "y" })
+    marks.render_buffer(st, old_buf, "a.lua", "old")
+    marks.render_buffer(st, new_buf, "a.lua", "new")
+    marks.align(st, old_buf, new_buf, "a.lua")
     assert.equals(0, #vim.api.nvim_buf_get_extmarks(old_buf, marks.ns_padding, 0, -1, {}))
     assert.equals(0, #vim.api.nvim_buf_get_extmarks(new_buf, marks.ns_padding, 0, -1, {}))
   end)
 
   it("clears its own stale padding on re-align, not just on fresh buffers", function()
     local old_buf, new_buf = scratch(10), scratch(10)
-    local c = store.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "one\ntwo" })
-    marks.render_buffer(old_buf, "a.lua", "old")
-    marks.render_buffer(new_buf, "a.lua", "new")
-    marks.align(old_buf, new_buf, "a.lua")
+    local c = st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "one\ntwo" })
+    marks.render_buffer(st, old_buf, "a.lua", "old")
+    marks.render_buffer(st, new_buf, "a.lua", "new")
+    marks.align(st, old_buf, new_buf, "a.lua")
     assert.equals(1, #vim.api.nvim_buf_get_extmarks(old_buf, marks.ns_padding, 0, -1, {}))
 
-    store.delete(c)
-    marks.render_buffer(old_buf, "a.lua", "old")
-    marks.render_buffer(new_buf, "a.lua", "new")
-    marks.align(old_buf, new_buf, "a.lua")
+    st.delete(c)
+    marks.render_buffer(st, old_buf, "a.lua", "old")
+    marks.render_buffer(st, new_buf, "a.lua", "new")
+    marks.align(st, old_buf, new_buf, "a.lua")
     assert.equals(0, #vim.api.nvim_buf_get_extmarks(old_buf, marks.ns_padding, 0, -1, {}))
     assert.equals(0, #vim.api.nvim_buf_get_extmarks(new_buf, marks.ns_padding, 0, -1, {}))
   end)
@@ -214,17 +218,21 @@ describe("comments.marks", function()
   describe("refresh", function()
     local view = require("intentdiff.view")
     local tab
-    local real_get_session, real_diff_wins
+    local real_get_session, real_diff_wins, restore_session
 
     before_each(function()
       tab = 900001 -- a sentinel key, never a real tabpage id
       real_get_session = view.get_session
       real_diff_wins = view.diff_wins
+      -- refresh resolves the store from the tab's session entry, so the tab
+      -- needs one: this is exactly the lookup that keeps two review tabs apart.
+      restore_session = require("tests.helpers").fake_session(tab, { comment_store = st })
     end)
 
     after_each(function()
       view.get_session = real_get_session
       view.diff_wins = real_diff_wins
+      restore_session()
       view._last_shown[tab] = nil
       view._preview_active[tab] = nil
     end)
@@ -246,10 +254,10 @@ describe("comments.marks", function()
       local buf_orig = vim.api.nvim_win_get_buf(win_orig)
       local buf_mod = vim.api.nvim_win_get_buf(win_mod)
 
-      store.add({ file = "a.lua", line = 3, side = "old", type = "note", text = "one\ntwo" })
-      marks.render_buffer(buf_orig, "a.lua", "old")
-      marks.render_buffer(buf_mod, "a.lua", "new")
-      marks.align(buf_orig, buf_mod, "a.lua")
+      st.add({ file = "a.lua", line = 3, side = "old", type = "note", text = "one\ntwo" })
+      marks.render_buffer(st, buf_orig, "a.lua", "old")
+      marks.render_buffer(st, buf_mod, "a.lua", "new")
+      marks.align(st, buf_orig, buf_mod, "a.lua")
       -- Old side is taller (2-line box vs. no comment on new) — padding lands
       -- on the shorter, new side.
       assert.equals(1, #vim.api.nvim_buf_get_extmarks(buf_mod, marks.ns_padding, 0, -1, {}))
@@ -275,8 +283,8 @@ describe("comments.marks", function()
 
   it("signs a sidebar group row that has an intent comment", function()
     local buf = scratch(6)
-    store.add({ intent_title = "Rename things", type = "issue", text = "wrong" })
-    marks.render_sidebar(buf, { { lnum = 1, title = "Rename things" }, { lnum = 4, title = "Other" } })
+    st.add({ intent_title = "Rename things", type = "issue", text = "wrong" })
+    marks.render_sidebar(st, buf, { { lnum = 1, title = "Rename things" }, { lnum = 4, title = "Other" } })
     local got = extmarks(buf)
     assert.equals(1, #got)
     assert.equals(0, got[1][2])

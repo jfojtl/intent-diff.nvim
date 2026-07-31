@@ -28,6 +28,25 @@ function M.make_repo(files)
   return repo
 end
 
+--- Make `require("intentdiff")._session(tab)` answer `entry`, so code that
+--- resolves a review from a tabpage (comments.store_for, marks.refresh) can be
+--- tested against a sentinel tab id with no real review behind it. Any other
+--- tabpage still reaches the real registry. Returns a restore function; call it
+--- from after_each.
+function M.fake_session(tab, entry)
+  local intentdiff = require("intentdiff")
+  local real = intentdiff._session
+  intentdiff._session = function(t)
+    if t == tab then
+      return entry
+    end
+    return real(t)
+  end
+  return function()
+    intentdiff._session = real
+  end
+end
+
 --- Wait until fn() is truthy or timeout (ms). Returns fn()'s value.
 function M.wait_for(fn, timeout)
   local result

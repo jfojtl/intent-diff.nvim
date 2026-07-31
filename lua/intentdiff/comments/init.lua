@@ -1,6 +1,13 @@
 -- The action layer: everything the keymaps call. Turns a cursor position into
 -- a comment, and drives popup → store → marks.
 --
+-- Every review session owns its own store (`entry.comment_store`, created by
+-- attach_session), so two review tabs never see each other's comments and
+-- never write under each other's storage key. The keymaps already pass the
+-- tabpage they were installed for; `store_for` turns that into the right
+-- store via the plugin's own session registry, which is the one lookup that
+-- keeps working when codediff moves a session's tabpage under us.
+--
 -- The pure decision functions (side_for_win, visual_range, next_line,
 -- prev_line, list_entries) are separated from the Neovim plumbing so they can
 -- be tested without a review tab.
@@ -36,9 +43,9 @@ function M.visual_range(a, b)
   return first, last
 end
 
-local function line_comments(file, side)
+local function line_comments(st, file, side)
   local out = {}
-  for _, c in ipairs(store.get_for_file(file, side)) do
+  for _, c in ipairs(st.get_for_file(file, side)) do
     if (c.line or 0) ~= 0 then
       out[#out + 1] = c
     end
@@ -48,8 +55,8 @@ local function line_comments(file, side)
 end
 
 --- @return integer|nil
-function M.next_line(file, from, side)
-  for _, c in ipairs(line_comments(file, side)) do
+function M.next_line(st, file, from, side)
+  for _, c in ipairs(line_comments(st, file, side)) do
     if c.line > from then
       return c.line
     end
@@ -58,9 +65,9 @@ function M.next_line(file, from, side)
 end
 
 --- @return integer|nil
-function M.prev_line(file, from, side)
+function M.prev_line(st, file, from, side)
   local best
-  for _, c in ipairs(line_comments(file, side)) do
+  for _, c in ipairs(line_comments(st, file, side)) do
     if c.line < from then
       best = c.line
     end
@@ -88,9 +95,9 @@ local function label_for(c)
 end
 
 --- One selectable row per comment, for the list picker.
-function M.list_entries()
+function M.list_entries(st)
   local out = {}
-  for _, c in ipairs(store.get_all()) do
+  for _, c in ipairs(st.get_all()) do
     out[#out + 1] = { comment = c, label = label_for(c) }
   end
   return out
@@ -99,6 +106,23 @@ end
 --- The intent-diff session entry for a tabpage, via the plugin's own registry.
 local function entry_for(tabpage)
   return require("intentdiff")._session(tabpage or vim.api.nvim_get_current_tabpage())
+end
+
+--- The comment store of the review shown in `tabpage`, or nil when that tab is
+--- not a review tab, its review has been torn down, or comments are disabled
+--- (in which case attach_session never ran and no store was ever created — so
+--- `comments.enabled = false` stays a genuine no-op here too).
+---
+--- Not written as `entry and entry.comment_store or nil`: `and/or` collapses a
+--- legitimately-nil middle term, and this codebase has already paid for that
+--- idiom three times.
+--- @return table|nil
+function M.store_for(tabpage)
+  local entry = entry_for(tabpage)
+  if not entry then
+    return nil
+  end
+  return entry.comment_store
 end
 
 --- `git -C git_root <...>`'s first output line, or nil on any failure —
@@ -157,27 +181,47 @@ local function is_worktree(sess)
   return sess.base_revision == head_hash(sess.git_root)
 end
 
---- Point the store at this review's storage key and load what it has.
+--- Give this review its OWN store, pointed at this review's storage key, and
+--- load what that key has. The store hangs off the session entry, so it lives
+--- and dies with the session and is reachable from any tabpage lookup — two
+--- concurrent reviews get two stores and two keys.
+---
+--- Called after init.lua assigns base_revision/target_revision, because
+--- is_worktree reads exactly those two fields.
+--- @return table|nil store
 function M.attach_session(entry)
   local sess = entry and entry.sess
   if not (sess and sess.git_root) then
-    return
+    return nil
   end
+  local st = store.new()
+  entry.comment_store = st
   local key
   if is_worktree(sess) then
     key = storage.key(sess.git_root, nil, nil, branch_of(sess.git_root))
   else
     key = storage.key(sess.git_root, sess.base_revision, sess.target_revision, nil)
   end
+  -- No derivable key (no git root, or a working-tree review on a detached
+  -- HEAD): the review still takes comments, they just do not persist.
   if key then
-    store.attach(key)
+    st.attach(key)
   end
+  return st
 end
 
-function M.detach_session()
-  store.detach()
-  store.replace({})
-  marks.clear_all()
+--- Tear down ONE review's comments: stop persisting, drop the store, and wipe
+--- the extmarks THIS review drew — in the buffers it drew them in. Takes the
+--- entry rather than a tabpage because init.lua's forget_entry has already
+--- removed the session from the registry by the time it calls this.
+function M.detach_session(entry)
+  local st = entry and entry.comment_store
+  if not st then
+    return
+  end
+  entry.comment_store = nil
+  st.detach()
+  marks.clear_for(st)
 end
 
 --- What the cursor is pointing at: a line in a pane, or an intent in the
@@ -246,11 +290,24 @@ local function notify(msg, level)
   vim.notify("intent-diff: " .. msg, level or vim.log.levels.INFO)
 end
 
+--- Every action needs the review's store; there is no global one to fall back
+--- on, and inventing one would be the singleton again. A tab with no store is
+--- one that is not a review tab, whose review has been torn down, or whose
+--- review has not attached yet (comments are attached the moment the revisions
+--- resolve, just before the first render).
+local NO_STORE = "no comments available in this tab"
+
 --- Add a comment at the cursor. `comment_type` nil opens the type picker.
 function M.add(tabpage, comment_type, opts)
+  -- Context first: it gives the precise reason ("no file open", "comments
+  -- cannot be added in an intent preview") where there is one.
   local ctx, err = M.context(tabpage, opts)
   if not ctx then
     return notify(err, vim.log.levels.WARN)
+  end
+  local st = M.store_for(tabpage)
+  if not st then
+    return notify(NO_STORE, vim.log.levels.WARN)
   end
   popup.open({ type = comment_type }, function(chosen, text)
     if not (chosen and text) then
@@ -258,7 +315,7 @@ function M.add(tabpage, comment_type, opts)
     end
     ctx.type = chosen
     ctx.text = text
-    local added, add_err = store.add(ctx)
+    local added, add_err = st.add(ctx)
     if not added then
       return notify(add_err, vim.log.levels.WARN)
     end
@@ -279,13 +336,13 @@ end
 --- even though every other branch answers synchronously (cb is still called
 --- before returning in those cases). A file-level comment never needs
 --- disambiguation: `store.collides` enforces exactly one per file.
-local function at_cursor(tabpage, cb)
+local function at_cursor(tabpage, st, cb)
   local ctx = M.context(tabpage)
   if not ctx then
     return cb(nil)
   end
   if ctx.intent_title then
-    local candidates = store.get_for_intent(ctx.intent_title)
+    local candidates = st.get_for_intent(ctx.intent_title)
     if #candidates == 0 then
       return cb(nil)
     end
@@ -304,18 +361,22 @@ local function at_cursor(tabpage, cb)
     end)
   end
   if (ctx.line or 0) == 0 then
-    for _, c in ipairs(store.get_for_file(ctx.file)) do
+    for _, c in ipairs(st.get_for_file(ctx.file)) do
       if (c.line or 0) == 0 then
         return cb(c)
       end
     end
     return cb(nil)
   end
-  return cb(store.get_at_line(ctx.file, ctx.line, ctx.side))
+  return cb(st.get_at_line(ctx.file, ctx.line, ctx.side))
 end
 
 function M.edit(tabpage)
-  at_cursor(tabpage, function(comment)
+  local st = M.store_for(tabpage)
+  if not st then
+    return notify(NO_STORE, vim.log.levels.WARN)
+  end
+  at_cursor(tabpage, st, function(comment)
     if not comment then
       return notify("no comment here", vim.log.levels.WARN)
     end
@@ -323,7 +384,7 @@ function M.edit(tabpage)
       if not (chosen and text) then
         return
       end
-      store.update(comment, chosen, text)
+      st.update(comment, chosen, text)
       marks.refresh(tabpage)
       M.refresh_sidebar(tabpage)
     end)
@@ -331,11 +392,15 @@ function M.edit(tabpage)
 end
 
 function M.delete(tabpage)
-  at_cursor(tabpage, function(comment)
+  local st = M.store_for(tabpage)
+  if not st then
+    return notify(NO_STORE, vim.log.levels.WARN)
+  end
+  at_cursor(tabpage, st, function(comment)
     if not comment then
       return notify("no comment here", vim.log.levels.WARN)
     end
-    store.delete(comment)
+    st.delete(comment)
     marks.refresh(tabpage)
     M.refresh_sidebar(tabpage)
     notify("deleted comment")
@@ -344,6 +409,10 @@ end
 
 local function jump(tabpage, finder)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+  local st = M.store_for(tabpage)
+  if not st then
+    return
+  end
   local view = require("intentdiff.view")
   local shown = view._last_shown[tabpage]
   if not (shown and shown.file_entry) then
@@ -353,7 +422,7 @@ local function jump(tabpage, finder)
   local session = view.get_session(tabpage)
   local side = M.side_for_win(win, session)
   local cur = vim.api.nvim_win_get_cursor(win)[1]
-  local target = finder(shown.file_entry.path, cur, side)
+  local target = finder(st, shown.file_entry.path, cur, side)
   if not target then
     return notify("no more comments in this file")
   end
@@ -399,7 +468,11 @@ end
 --- guessing.
 function M.list(tabpage)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
-  local entries = M.list_entries()
+  local st = M.store_for(tabpage)
+  if not st then
+    return notify(NO_STORE, vim.log.levels.WARN)
+  end
+  local entries = M.list_entries(st)
   if #entries == 0 then
     return notify("no comments yet")
   end
@@ -447,14 +520,22 @@ local function model_of(tabpage)
 end
 
 function M.export_clipboard(tabpage)
-  export.to_clipboard(store.get_all(), model_of(tabpage))
+  local st = M.store_for(tabpage)
+  if not st then
+    return notify(NO_STORE, vim.log.levels.WARN)
+  end
+  export.to_clipboard(st.get_all(), model_of(tabpage))
 end
 
 --- Path last used this session, so the prompt is pre-filled with it.
 local last_path = nil
 
 function M.export_file(tabpage, path)
-  if store.count() == 0 then
+  local st = M.store_for(tabpage)
+  if not st then
+    return notify(NO_STORE, vim.log.levels.WARN)
+  end
+  if st.count() == 0 then
     return notify("no comments to export", vim.log.levels.WARN)
   end
   local entry = entry_for(tabpage)
@@ -469,12 +550,12 @@ function M.export_file(tabpage, path)
     -- git root instead of writing under the user's home.
     local expanded = vim.fn.expand(chosen)
     local abs = expanded:sub(1, 1) == "/" and expanded or (root .. "/" .. expanded)
-    local ok, err = export.to_file(store.get_all(), model_of(tabpage), abs)
+    local ok, err = export.to_file(st.get_all(), model_of(tabpage), abs)
     if not ok then
       return notify(err, vim.log.levels.ERROR)
     end
     last_path = chosen
-    notify(("wrote %d comment(s) to %s"):format(store.count(), abs))
+    notify(("wrote %d comment(s) to %s"):format(st.count(), abs))
   end
   if path and path ~= "" then
     return write(path)
@@ -484,16 +565,22 @@ function M.export_file(tabpage, path)
 end
 
 function M.clear(tabpage)
-  if store.count() == 0 then
+  local st = M.store_for(tabpage)
+  if not st then
+    return notify(NO_STORE, vim.log.levels.WARN)
+  end
+  if st.count() == 0 then
     return notify("no comments to clear")
   end
   local answer = vim.fn.confirm(
-    ("Delete all %d comment(s) in this review?"):format(store.count()), "&Yes\n&No", 2)
+    ("Delete all %d comment(s) in this review?"):format(st.count()), "&Yes\n&No", 2)
   if answer ~= 1 then
     return
   end
-  store.clear()
-  marks.clear_all()
+  st.clear()
+  -- Only THIS review's marks: clear_all() used to blank a second review tab's
+  -- boxes as well.
+  marks.clear_for(st)
   marks.refresh(tabpage)
   M.refresh_sidebar(tabpage)
   notify("cleared all comments")
@@ -504,7 +591,10 @@ end
 --- an empty export.
 function M.export_and_close(tabpage)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
-  if store.count() > 0 then
+  local st = M.store_for(tabpage)
+  -- No store (comments disabled, or a review that never attached) still
+  -- closes: refusing to close would be worse than a missing export.
+  if st and st.count() > 0 then
     M.export_clipboard(tabpage)
   else
     notify("no comments to export")
@@ -516,8 +606,8 @@ end
 --- handle, which knows its own layout.
 function M.refresh_sidebar(tabpage)
   local entry = entry_for(tabpage)
-  if entry and entry.sidebar and entry.sidebar.comment_rows then
-    marks.render_sidebar(entry.sidebar.bufnr, entry.sidebar.comment_rows())
+  if entry and entry.comment_store and entry.sidebar and entry.sidebar.comment_rows then
+    marks.render_sidebar(entry.comment_store, entry.sidebar.bufnr, entry.sidebar.comment_rows())
   end
 end
 

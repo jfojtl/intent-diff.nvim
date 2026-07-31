@@ -1400,11 +1400,6 @@ end)
 describe("comments in a review tab", function()
   local store = require("intentdiff.comments.store")
 
-  before_each(function()
-    store.detach()
-    store.clear()
-  end)
-
   after_each(function()
     require("intentdiff.config").setup({})
   end)
@@ -1622,11 +1617,14 @@ describe("comments in a review tab", function()
     assert.truthy(displayed,
       "the comment keys never reached the buffer the diff pane displays")
 
-    -- The store is attached to this review, so a comment persists and renders.
+    -- This review owns a store of its own, attached to its key, so a comment
+    -- persists and renders.
     local marks = require("intentdiff.comments.marks")
+    local st = entry.comment_store
+    assert.truthy(st, "the review never got a comment store")
     local shown = view._last_shown[tab]
     assert.truthy(shown and shown.file_entry, "no file was ever shown")
-    store.add({ file = shown.file_entry.path, line = 2, side = "new",
+    st.add({ file = shown.file_entry.path, line = 2, side = "new",
       type = "issue", text = "live comment" })
     marks.refresh(tab)
     assert.is_true(#vim.api.nvim_buf_get_extmarks(displayed, marks.ns, 0, -1, {}) > 0,
@@ -1634,15 +1632,135 @@ describe("comments in a review tab", function()
 
     -- An intent comment signs the sidebar's group head row, and survives a
     -- re-render of the sidebar.
-    store.add({ intent_title = entry.model.groups[1].title, type = "praise", text = "nice" })
+    st.add({ intent_title = entry.model.groups[1].title, type = "praise", text = "nice" })
     entry.sidebar.update(entry.model)
     assert.is_true(#vim.api.nvim_buf_get_extmarks(entry.sidebar.bufnr, marks.ns, 0, -1, {}) > 0,
       "the intent comment left no sign on the sidebar")
 
-    -- Closing the review detaches the store: the comments are on disk, not in
-    -- memory, so the next review does not inherit them.
+    -- Closing the review drops its store and wipes the marks it drew: the
+    -- comments are on disk, not in memory, and nothing is left rendered.
     require("intentdiff").close(tab)
-    assert.equals(0, store.count())
+    assert.is_nil(entry.comment_store, "closing must drop the review's store")
+    assert.is_nil(require("intentdiff.comments").store_for(tab))
+    if vim.api.nvim_buf_is_valid(displayed) then
+      assert.equals(0, #vim.api.nvim_buf_get_extmarks(displayed, marks.ns, 0, -1, {}),
+        "the review's comment extmarks outlived it")
+    end
+  end)
+
+  -- Two review tabs open at once, through the real `:IntentDiff` path — the
+  -- scenario the singleton store corrupted. The second review used to re-key
+  -- and re-load the ONE shared store, so a comment added AFTERWARDS in the
+  -- first tab was written under the second review's key, and closing either tab
+  -- blanked the other.
+  it("keeps two concurrent review tabs' comments apart, on disk and on screen", function()
+    local repo = helpers.make_repo({ ["a.lua"] = table.concat(vim.fn.range(1, 40), "\n") })
+    helpers.write_file(repo, "a.lua", "SECOND\n" .. table.concat(vim.fn.range(2, 40), "\n"))
+    helpers.git(repo, "add", "-A")
+    helpers.git(repo, "commit", "-q", "-m", "second")
+    helpers.write_file(repo, "a.lua", "THIRD\n" .. table.concat(vim.fn.range(2, 40), "\n"))
+    vim.cmd("cd " .. repo)
+
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      provider = function(_, cb)
+        vim.schedule(function()
+          cb({ groups = { { title = "Only intent", hunk_ids = { "a.lua:1" } } } })
+        end)
+        return { cancel = function() end }
+      end,
+    })
+
+    local opened = {}
+
+    --- Open a review and wait until its comments have attached. codediff picks
+    --- the tab (and view.bootstrap records it a scheduled callback later), so
+    --- the review's tab is found by looking for a tab that did not exist before
+    --- rather than by reading the current one.
+    local function open(args)
+      local before = {}
+      for _, t in ipairs(vim.api.nvim_list_tabpages()) do
+        before[t] = true
+      end
+      require("intentdiff").open(args)
+      local found_tab, found_entry
+      helpers.wait_for(function()
+        for _, t in ipairs(vim.api.nvim_list_tabpages()) do
+          if not before[t] then
+            local s = require("intentdiff")._session(t)
+            if s and s.comment_store then
+              found_tab, found_entry = t, s
+              return true
+            end
+          end
+        end
+        return false
+      end, 10000)
+      assert.truthy(found_entry, "the review never attached its comments: " .. args)
+      opened[#opened + 1] = found_tab
+      return found_tab, found_entry
+    end
+
+    -- Closing both reviews must happen even when an assertion below fails:
+    -- a leaked review tab (and its session) breaks every later test in this
+    -- file.
+    local ok, err = pcall(function()
+
+    -- A plain working-tree review (branch-keyed) and a HEAD~1-pinned one
+    -- (revision-pair-keyed): two tabs, two keys.
+    local tab_a, entry_a = open("")
+    -- The second `:IntentDiff` is issued from an ordinary tab, as a user does.
+    -- Issuing it from inside the first review's pane cannot work at all:
+    -- M.open resolves the git root from the current buffer's name, and a
+    -- codediff pane's name is a `codediff://` URI — a pre-existing limitation,
+    -- unrelated to comment scoping.
+    vim.cmd("tabnew")
+    local scratch_tab = vim.api.nvim_get_current_tabpage()
+    local tab_b, entry_b = open("HEAD~1")
+    pcall(vim.api.nvim_win_close, vim.api.nvim_tabpage_list_wins(scratch_tab)[1], true)
+    assert.are_not.equals(tab_a, tab_b, "the second review must open its own tab")
+    assert.are_not.equals(entry_a.comment_store, entry_b.comment_store)
+
+    local storage = require("intentdiff.comments.storage")
+    local root = entry_a.sess.git_root
+    local branch = vim.trim(helpers.git(root, "rev-parse", "--abbrev-ref", "HEAD"))
+    local key_a = storage.key(root, nil, nil, branch)
+    local key_b = storage.key(root, entry_b.sess.base_revision, entry_b.sess.target_revision, nil)
+    assert.are_not.equals(key_a, key_b, "the two keys must differ for this to mean anything")
+
+    -- The corruption case: a comment added in tab A *after* tab B opened.
+    entry_a.comment_store.add({ file = "a.lua", line = 3, side = "new", type = "issue", text = "for A" })
+    entry_b.comment_store.add({ file = "a.lua", line = 9, side = "new", type = "note", text = "for B" })
+
+    local on_disk_a, on_disk_b = storage.load(key_a), storage.load(key_b)
+    assert.equals(1, #on_disk_a)
+    assert.equals("for A", on_disk_a[1].text)
+    assert.equals(1, #on_disk_b)
+    assert.equals("for B", on_disk_b[1].text)
+
+    assert.equals(1, entry_a.comment_store.count())
+    assert.equals(1, entry_b.comment_store.count())
+
+    -- Closing A leaves B's comments in memory, still persisting, and still
+    -- rendered.
+    local marks = require("intentdiff.comments.marks")
+    local b_store = entry_b.comment_store
+    marks.refresh(tab_b)
+    require("intentdiff").close(tab_a)
+
+    assert.is_nil(require("intentdiff.comments").store_for(tab_a))
+    assert.equals(b_store, require("intentdiff.comments").store_for(tab_b),
+      "closing one review must not detach the other")
+    assert.equals(1, b_store.count())
+    assert.equals("for B", b_store.get_all()[1].text)
+    b_store.add({ file = "a.lua", line = 20, side = "new", type = "praise", text = "later in B" })
+    assert.equals(2, #storage.load(key_b), "B must still be persisting under its own key")
+
+    end) -- pcall
+    for _, tab in ipairs(opened) do
+      pcall(require("intentdiff").close, tab)
+    end
+    assert(ok, err)
   end)
 
   -- Correction B, pinned by its CONSEQUENCE rather than by where the call
@@ -1679,8 +1797,10 @@ describe("comments in a review tab", function()
     assert.truthy(entry, "the review never resolved its base revision")
     assert.equals("WORKING", entry.sess.target_revision)
 
-    -- Adding a comment persists it under whatever key the store attached to.
-    store.add({ file = "a.lua", line = 2, side = "new", type = "note", text = "pinned" })
+    -- Adding a comment persists it under whatever key this review's store
+    -- attached to.
+    assert.truthy(entry.comment_store, "the review never got a comment store")
+    entry.comment_store.add({ file = "a.lua", line = 2, side = "new", type = "note", text = "pinned" })
 
     local storage = require("intentdiff.comments.storage")
     local root = entry.sess.git_root -- codediff's resolved root, symlinks and all
@@ -1780,8 +1900,9 @@ describe("comments in a review tab", function()
           original = { start_line = 1, end_line = 5 },
           modified = { start_line = 1, end_line = 5 } } } } },
     }
-    store.add({ file = "a.lua", line = 2, side = "new", type = "issue", text = "x" })
-    assert.is_truthy(export.generate(store.get_all(), before_model):match("## First pass"))
-    assert.is_truthy(export.generate(store.get_all(), after_model):match("## Second pass"))
+    local st = store.new()
+    st.add({ file = "a.lua", line = 2, side = "new", type = "issue", text = "x" })
+    assert.is_truthy(export.generate(st.get_all(), before_model):match("## First pass"))
+    assert.is_truthy(export.generate(st.get_all(), after_model):match("## Second pass"))
   end)
 end)

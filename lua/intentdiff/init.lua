@@ -801,16 +801,19 @@ local function forget_entry(token)
   end
   require("intentdiff.classify").cancel(token) -- kill any in-flight provider
   require("intentdiff.navigation").detach(entry.sess.tabpage)
-  -- Stop persisting to this review's key, drop its comments from memory and
-  -- wipe their marks. Anything the user added is already on disk (the store
-  -- saves on every change), so the next review of the same range loads it back.
+  -- Stop persisting to THIS review's key, drop its store, and wipe the marks
+  -- IT drew — passing the entry, because this session is already out of
+  -- `sessions` above, so a tabpage lookup would find nothing. Anything the user
+  -- added is already on disk (the store saves on every change), so the next
+  -- review of the same range loads it back. Another review tab open at the same
+  -- time keeps its own store, its own key and its own extmarks.
   -- pcall'd like every other teardown step here: detach_session touches disk
-  -- state and every buffer's extmarks, and a throw would abort forget_entry
-  -- before the sidebar buffer is deleted AND before close_entry's close_tab —
-  -- so `q` would leak a buffer and leave the review tab open.
+  -- state and buffer extmarks, and a throw would abort forget_entry before the
+  -- sidebar buffer is deleted AND before close_entry's close_tab — so `q` would
+  -- leak a buffer and leave the review tab open.
   if require("intentdiff.config").comments_enabled() then
     pcall(function()
-      require("intentdiff.comments").detach_session()
+      require("intentdiff.comments").detach_session(entry)
     end)
   end
   -- The sidebar buffer is bufhidden="hide" so it can survive being hidden;

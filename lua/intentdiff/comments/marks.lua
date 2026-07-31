@@ -4,9 +4,12 @@
 -- virt_lines that keep the two panes the same height. A box on one side makes
 -- that side taller, and codediff's scroll sync aligns by filler count — without
 -- the padding the panes drift apart as soon as you comment on one side.
+--
+-- Every render takes the STORE it is rendering, never a global one: with two
+-- review tabs open there are two stores, and the only thing that says which
+-- comments belong in this buffer is which store was handed in.
 local M = {}
 
-local store = require("intentdiff.comments.store")
 local config = require("intentdiff.config")
 local hl = require("intentdiff.highlight")
 
@@ -14,6 +17,30 @@ M.ns = vim.api.nvim_create_namespace("intentdiff_comments")
 M.ns_padding = vim.api.nvim_create_namespace("intentdiff_comments_padding")
 
 local MIN_BOX_WIDTH = 20
+
+--- store → set of buffers that store has drawn comment extmarks into, so a
+--- review's teardown clears exactly what IT rendered and nothing else.
+--- `clear_all()` used to walk every buffer in the editor, which wiped the other
+--- review tab's boxes the moment either tab closed.
+---
+--- Weak KEYS: when a session entry drops its store, this record goes with it —
+--- a strong table here would pin every store of every review ever opened.
+local touched = setmetatable({}, { __mode = "k" })
+
+--- Note this store drew into `bufnr`. Recorded even when the render placed no
+--- extmark: render_buffer CLEARS the namespace first, so a buffer it touched
+--- is one whose marks this review owns and must clean up.
+local function remember(store, bufnr)
+  if not (store and bufnr) then
+    return
+  end
+  local bufs = touched[store]
+  if not bufs then
+    bufs = {}
+    touched[store] = bufs
+  end
+  bufs[bufnr] = true
+end
 
 --- Type metadata by key, from the configured list.
 local function type_info(key)
@@ -98,12 +125,14 @@ local function nudge_topfill(bufnr, box_lines)
   end
 end
 
---- Clear and re-render every comment for `file` on `side` into `bufnr`.
-function M.render_buffer(bufnr, file, side)
-  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr) and file) then
+--- Clear and re-render every comment for `file` on `side` into `bufnr`, from
+--- `store` — the store of the review this buffer belongs to.
+function M.render_buffer(store, bufnr, file, side)
+  if not (store and bufnr and vim.api.nvim_buf_is_valid(bufnr) and file) then
     return
   end
   vim.api.nvim_buf_clear_namespace(bufnr, M.ns, 0, -1)
+  remember(store, bufnr)
   local last = vim.api.nvim_buf_line_count(bufnr)
 
   for _, c in ipairs(store.get_for_file(file, side)) do
@@ -152,13 +181,20 @@ function M.render_buffer(bufnr, file, side)
 end
 
 --- Blank-line padding so a box on one side does not make the panes drift.
-function M.align(orig_buf, mod_buf, file)
-  for _, buf in ipairs({ orig_buf, mod_buf }) do
+function M.align(store, orig_buf, mod_buf, file)
+  -- Not `ipairs({ orig_buf, mod_buf })`: with orig_buf nil that literal has a
+  -- hole at index 1 and ipairs stops before ever reaching mod_buf, leaving the
+  -- one buffer there IS uncleared. Same nil-hole trap M.refresh's own comment
+  -- below calls out.
+  local function reset(buf)
     if buf and vim.api.nvim_buf_is_valid(buf) then
       vim.api.nvim_buf_clear_namespace(buf, M.ns_padding, 0, -1)
+      remember(store, buf)
     end
   end
-  if not (orig_buf and mod_buf and file
+  reset(orig_buf)
+  reset(mod_buf)
+  if not (store and orig_buf and mod_buf and file
     and vim.api.nvim_buf_is_valid(orig_buf) and vim.api.nvim_buf_is_valid(mod_buf)) then
     return
   end
@@ -206,11 +242,12 @@ end
 --- Sign the sidebar rows whose intent carries a comment. No box: the sidebar
 --- is a dense navigation surface and boxes would push rows around.
 --- @param rows { lnum: integer, title: string }[] group head rows, 1-indexed
-function M.render_sidebar(bufnr, rows)
-  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+function M.render_sidebar(store, bufnr, rows)
+  if not (store and bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
     return
   end
   vim.api.nvim_buf_clear_namespace(bufnr, M.ns, 0, -1)
+  remember(store, bufnr)
   for _, row in ipairs(rows or {}) do
     local comments = store.get_for_intent(row.title)
     if #comments > 0 then
@@ -224,23 +261,36 @@ function M.render_sidebar(bufnr, rows)
   end
 end
 
-function M.clear_all()
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_valid(buf) then
-      vim.api.nvim_buf_clear_namespace(buf, M.ns, 0, -1)
-      vim.api.nvim_buf_clear_namespace(buf, M.ns_padding, 0, -1)
+--- Wipe the comment and padding extmarks `store` drew, in the buffers IT drew
+--- them in — a review's own teardown, not the editor-wide `clear_all()` this
+--- replaces. Buffers can die between being recorded and being cleared, hence
+--- the validity check and the pcalls.
+function M.clear_for(store)
+  local bufs = store and touched[store]
+  if not bufs then
+    return
+  end
+  touched[store] = nil
+  for bufnr in pairs(bufs) do
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      pcall(vim.api.nvim_buf_clear_namespace, bufnr, M.ns, 0, -1)
+      pcall(vim.api.nvim_buf_clear_namespace, bufnr, M.ns_padding, 0, -1)
     end
   end
 end
 
 --- Re-render every surface of a review tab. Called after any pane rebuild and
 --- after every store mutation.
+---
+--- Resolves the store from the tabpage's session, so a caller that only knows
+--- "this tab changed" (view.lua) still renders the right review's comments.
 function M.refresh(tabpage)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+  local store = require("intentdiff.comments").store_for(tabpage)
   local view = require("intentdiff.view")
   local shown = view._last_shown[tabpage]
   local session = view.get_session(tabpage)
-  if not (shown and shown.file_entry and session) then
+  if not (store and shown and shown.file_entry and session) then
     return
   end
   local file = shown.file_entry.path
@@ -262,13 +312,13 @@ function M.refresh(tabpage)
   -- avoid exactly that mis-positioned render, not merely to avoid rendering
   -- the same buffer twice.
   if orig_buf and orig_buf ~= mod_buf then
-    M.render_buffer(orig_buf, file, "old")
+    M.render_buffer(store, orig_buf, file, "old")
   end
   if mod_buf then
-    M.render_buffer(mod_buf, file, "new")
+    M.render_buffer(store, mod_buf, file, "new")
   end
   if orig_buf and mod_buf and orig_buf ~= mod_buf then
-    M.align(orig_buf, mod_buf, file)
+    M.align(store, orig_buf, mod_buf, file)
   else
     -- M.align is the ONLY place that clears ns_padding. Skipping it here
     -- (inline layout, or a whole-file pane with only one side populated)
