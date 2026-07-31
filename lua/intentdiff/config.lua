@@ -140,6 +140,12 @@ M.defaults = {
       -- The review.nvim end-of-review flow: copy, then close. Plain `q` still
       -- closes without touching the clipboard.
       export_and_close = "<localleader>q",
+      -- Popup-local keys for the comment entry float (comments/popup.lua),
+      -- buffer-local to its text area rather than installed tab-wide. Not
+      -- listed in the g? cheatsheet, which only covers tab-wide surfaces.
+      popup_cycle_type = "<Tab>",
+      popup_submit = "<C-s>",
+      popup_cancel = "q",
     },
   },
 }
