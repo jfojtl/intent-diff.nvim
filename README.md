@@ -193,6 +193,35 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
                                -- and just restores the last-opened file
   },
 
+  -- Review comments attached to diff lines and to whole intents, exported as
+  -- Markdown for an agent to act on. See "Review comments" above and
+  -- :IntentDiffCommentsYank / …Write / …List / …Clear.
+  comments = {
+    enabled = true,
+
+    -- Comment types, in the order the popup cycles them. Each needs a name
+    -- and an icon; its highlight groups are derived from `key`, not listed
+    -- here — see "Highlights" above. A type added beyond the built-in four
+    -- gets working (if unstyled) highlight defaults for free.
+    types = {
+      { key = "note",       name = "Note",       icon = "✍" },
+      { key = "suggestion", name = "Suggestion", icon = "💡" },
+      { key = "issue",      name = "Issue",       icon = "⚠" },
+      { key = "praise",     name = "Praise",     icon = "✨" },
+    },
+
+    -- Days before a stored review is swept, so a review left over from a
+    -- long-abandoned branch doesn't accumulate under cache_dir forever. Runs
+    -- at most once per session, deferred so it never blocks the first
+    -- render. false disables the sweep entirely.
+    expire_days = 7,
+
+    -- Default path :IntentDiffCommentsWrite offers (and pre-fills with on
+    -- repeat use within a session), resolved against the git root when
+    -- relative.
+    export_path = ".intentdiff-review.md",
+  },
+
   -- Buffer-local keys the plugin installs inside a review tab, namespaced by
   -- surface the way codediff namespaces its own (keymaps.view / .explorer /
   -- .history / .conflict). Set any action to `false` to install nothing,
@@ -240,6 +269,35 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       -- else expand every one. `zA` now means fold_toggle_recursive, so this
       -- is unbound by default and reachable as :IntentDiffToggleAll.
       fold_toggle_all = false,
+    },
+    -- Review comments. Cross-surface by nature: an intent comment is added
+    -- from a sidebar group row, a line comment from a diff pane, and both
+    -- surfaces need the export keys — so this is installed on BOTH, not one.
+    comments = {
+      add_comment = "<localleader>cc", -- pick the type in the popup
+      add_note = "<localleader>cn",
+      add_suggestion = "<localleader>cs",
+      add_issue = "<localleader>ci",
+      add_praise = "<localleader>cp",
+      add_file_comment = "<localleader>cf", -- file-level; an intent comment on a sidebar group row
+      edit_comment = "<localleader>ce",
+      delete_comment = "<localleader>cd",
+      list_comments = "<localleader>cl",
+      next_comment = "]n",
+      prev_comment = "[n",
+      export_clipboard = "<localleader>cy",
+      export_file = "<localleader>cw",
+      clear_comments = "<localleader>cx",
+      -- The review.nvim end-of-review flow: copy, then close. Plain `q`
+      -- still closes without touching the clipboard — the two differ in
+      -- their first keystroke, so this costs `q` no timeoutlen delay.
+      export_and_close = "<localleader>q",
+      -- Popup-local keys for the comment entry float (comments/popup.lua),
+      -- buffer-local to its text area rather than tab-wide — not listed in
+      -- the g? cheatsheet, which only covers tab-wide surfaces.
+      popup_cycle_type = "<Tab>",
+      popup_submit = "<C-s>",
+      popup_cancel = "q",
     },
   },
 }
@@ -436,6 +494,169 @@ the last-selected file, performs the ordinary layout toggle on it, and then
 re-renders the preview in the new layout. `q` closes the review tab from
 inside the preview too, same as from the sidebar.
 
+## Review comments
+
+Put comments directly on a diff, in the style of
+[review.nvim](https://github.com/georgeguimaraes/review.nvim), then export
+them as Markdown to hand to an agent. The difference from review.nvim: intent-
+diff knows *why* each change was made, so the export files every comment under
+the intent its line belongs to — an agent reads "here is the intent, and here
+is what's wrong with it" instead of an undifferentiated list of file:line
+notes.
+
+### Adding a comment
+
+Four types — Note (`✍`), Suggestion (`💡`), Issue (`⚠`), Praise (`✨`) —
+cycled with `<Tab>` in the popup, and reachable directly without it:
+
+| Key | Adds |
+|---|---|
+| `<localleader>cc` | Pick the type in the popup |
+| `<localleader>cn` | Note |
+| `<localleader>cs` | Suggestion |
+| `<localleader>ci` | Issue |
+| `<localleader>cp` | Praise |
+
+Which *shape* of comment one of these produces depends on where the cursor
+is, not on which key was pressed:
+
+- **Line** — cursor on a line in a diff pane.
+- **Range** — a visual selection (`'<`/`'>`) in a diff pane.
+- **File-level** — `<localleader>cf` (`add_file_comment`) in a diff pane, or
+  on a sidebar **file** row.
+- **Whole-intent** — `<localleader>cf`, or in fact any of the five add keys
+  above, on a sidebar **group** row: there is no line to attach to there, so
+  every add action produces an intent comment. This is the only case where
+  the row, not the key, decides the shape.
+
+An intent comment anchors to the group's *title*, not an index, so
+re-classifying under a differently-named group leaves the comment surfacing
+as unattached — in the export's "Unmatched comments" section — rather than
+silently landing on whatever group now occupies that slot.
+
+### Old side vs. new side
+
+A comment's side is derived from which window the cursor is in when it's
+created — the original pane → `"old"`, the modified pane → `"new"`. Inline
+layout only ever has one window (the modified buffer; deletions render as
+virtual lines), so **an old-side comment can only be created in side-by-side
+layout.**
+
+Once created, it renders whenever the original pane is visible — but
+deliberately not in inline layout. This is not a bug to route around: inline
+shows only the modified file's buffer, and an old-side line number addresses
+a row of the *original* file that simply has no corresponding row in that
+buffer to hang a box off. Toggle back to side-by-side and the comment is
+exactly where it was left; toggle to inline and it is invisible and
+unreachable until you toggle back.
+
+### The popup
+
+`<Tab>` cycles the type (in both insert and normal mode); `<C-s>` submits.
+Focus starts in the text area, in insert mode — so the first `<Esc>` only
+leaves insert mode, same as it always does; a second `<Esc>`, or `q`,
+cancels. Submitting empty text is treated exactly like cancelling: nothing is
+saved. Editing an existing comment (`<localleader>ce`) opens the same popup,
+pre-filled with its current type and text.
+
+### Persistence
+
+Comments are stored as JSON under `cache_dir .. "/comments/"`, one file per
+review, keyed by git root plus **what is being reviewed** — deliberately
+*not* the diff-text hash the classification cache uses, because that hash
+changes the moment a file is edited, which would discard comments exactly
+when they are still relevant.
+
+- A **working-tree review** (plain `:IntentDiff`) keys by **branch**, so the
+  review survives new commits made on that branch.
+- An **explicit revision or revision range** (`:IntentDiff HEAD~1`,
+  `:IntentDiff main...`) keys by the **revision pair** instead.
+
+Files older than `comments.expire_days` (7 by default) are swept once per
+Neovim session, deferred so it never blocks the first render; set
+`expire_days = false` to disable the sweep.
+
+### Exporting
+
+| Key | Command | Does |
+|---|---|---|
+| `<localleader>cy` | `:IntentDiffCommentsYank` | Copy the Markdown to `+`/`*`, notify with the count |
+| `<localleader>cw` | `:IntentDiffCommentsWrite [path]` | Write the Markdown to `path` (prompted when omitted, pre-filled with the last path used this session, default `.intentdiff-review.md` relative to the git root) |
+| `<localleader>q` | — | Copy the Markdown, **then close the review tab** |
+
+`<localleader>q` is the review.nvim end-of-review flow: finish, copy, paste
+into the agent. Plain `q` still means exactly what it means everywhere else
+in this plugin — close the tab, touch nothing else — so the clipboard is
+only ever written by a key that says it writes the clipboard. With no
+comments, `<localleader>q` notifies and still closes rather than refusing to.
+
+This is the real output of `export.generate()` — generated headlessly against
+a small model and five comments (an intent comment, a new-side issue, an
+old-side suggestion, a range, and a file-level comment), not hand-typed — for
+the same two groups shown in the sidebar at the top of this file:
+
+```markdown
+I reviewed your code and have the following comments. Please address them.
+
+Comment types: ISSUE (problems to fix), SUGGESTION (improvements),
+NOTE (observations), PRAISE (positive feedback)
+Lines prefixed with ~ refer to the old (left) side of the diff.
+
+## Rename UserService to AccountService
+
+This rename missed the DI container entirely — see below.
+
+1. **[ISSUE]** `src/api/routes.ts:5`
+   This import still points at the old module.
+
+2. **[SUGGESTION]** `src/services/account.ts:~41`
+   The old implementation was cleaner.
+
+## Add retry logic to HTTP client
+
+3. **[PRAISE]** `src/http/client.ts`
+   Good call keeping the timeout separate.
+
+4. **[NOTE]** `src/http/client.ts:44-51`
+   No jitter here — fine for now.
+```
+
+Numbering runs continuously across groups, not restarting per group. A
+group's own comment (the whole-intent one) is emitted as a plain paragraph
+before its numbered entries, not as a numbered entry itself. Within a group,
+a file's file-level comment sorts before its line comments — that's why
+`## Add retry logic to HTTP client`'s `[PRAISE]` (a file-level comment on
+`client.ts`) is entry 3 and its `[NOTE]` range comment on the same file is
+entry 4, even though the range comment was added first. The `~` legend line
+is only emitted when the export actually contains an old-side comment — there
+is never a legend for notation the document doesn't use. While classification
+is still running (or failed), there is no grouping to hang headings off, and
+the export degrades to one flat numbered list with no `##` headings; a
+comment whose line lands in no hunk at all — typically one that outlived the
+working-tree edit it pointed at — is emitted under a trailing
+`## Unmatched comments` heading, flagged rather than dropped.
+
+### Two review tabs on the same file
+
+Two review tabs of the same repo, both showing the modified side of the same
+working-tree file, share **one** underlying buffer: codediff resolves a real
+working-tree file with `vim.fn.bufadd`, which always hands back the same
+buffer number for the same path regardless of which tab asked. Comments
+render into a single shared extmark namespace in that buffer, so each tab's
+render clears the *other* tab's comment boxes there, and closing either tab
+clears both. This self-heals the next time either tab is switched into —
+`TabEnter` re-asserts that tab's state and re-renders its own comments — but
+between those two events the other tab's boxes are genuinely gone from the
+screen, not merely stale.
+
+The same collision shows up in persistence: two tabs reviewing the same
+working tree derive the **same branch key** (see "Persistence" above), so
+they read and write the same JSON file. Whichever tab saves last wins — a
+comment added in one tab can be silently dropped from disk by the other tab's
+next save. This is arguably degenerate usage — why review the same working
+tree in two tabs at once? — but it is real, and there is no cross-tab locking
+to prevent it.
+
 ## Added and untracked files
 
 Added (git status `A`) and untracked (`??`) files render their real file
@@ -487,6 +708,25 @@ point the plugin's default is reasserted and the override must be reapplied.
 | `IntentDiffPreviewFile` | `Title` | A preview's per-file `── path   status   +A -B` separator |
 | `IntentDiffPreviewHunk` | `Comment` | A preview's `@@ ... @@` hunk headers |
 | `IntentDiffFiller` | `Comment` | Filler rows padding the shorter side of a side-by-side preview |
+| `IntentDiffCommentNote` | `DiagnosticHint` | Note sign and comment-box border |
+| `IntentDiffCommentSuggestion` | `DiagnosticInfo` | Suggestion sign and comment-box border |
+| `IntentDiffCommentIssue` | `DiagnosticWarn` | Issue sign and comment-box border |
+| `IntentDiffCommentPraise` | `DiagnosticOk` | Praise sign and comment-box border |
+| `IntentDiffCommentNoteLine` | `CursorLine` | Commented-line background, note |
+| `IntentDiffCommentSuggestionLine` | `CursorLine` | …suggestion |
+| `IntentDiffCommentIssueLine` | `CursorLine` | …issue |
+| `IntentDiffCommentPraiseLine` | `CursorLine` | …praise |
+
+The eight comment groups are derived from each type's `key`, not hand-listed
+per type: `IntentDiffComment` plus the key with its first letter capitalised,
+and the same again with a `Line` suffix — `comments.types[].key = "note"`
+therefore always produces `IntentDiffCommentNote` /
+`IntentDiffCommentNoteLine`, whatever the type's configured `name` or `icon`
+is. A type configured beyond the built-in four (say, `key = "question"`) gets
+`IntentDiffCommentQuestion` / `IntentDiffCommentQuestionLine` — not listed
+above, since it doesn't exist until configured — but the plugin defines both
+anyway, linked to the note defaults (`DiagnosticHint` / `CursorLine`), so an
+unstyled custom type still renders instead of erroring.
 
 The reliable way to keep an override across colorscheme changes is to set it
 from your own `ColorScheme` autocmd rather than a one-off call. It doesn't
@@ -552,6 +792,25 @@ not just on the sidebar — since a sidebar-only key would be unreachable once
 the sidebar is hidden, the toggle works even when codediff's own layout-toggle
 key is disabled. Both work inside a whole-intent preview too — see "Previewing
 an intent" above.
+
+**Comments:** cross-surface by nature, installed on both the diff panes and
+the sidebar — an intent comment is added from a sidebar group row, a line
+comment from a pane, and both surfaces need the export keys (see "Review
+comments" above).
+
+| Key | Action |
+|---|---|
+| `<localleader>cc` | Add a comment, picking the type in the popup (normal and visual) |
+| `<localleader>cn` `cs` `ci` `cp` | Add a note / suggestion / issue / praise directly (normal and visual) |
+| `<localleader>cf` | File-level comment on a diff pane or sidebar file row; a whole-intent comment on a sidebar group row |
+| `<localleader>ce` | Edit the comment at the cursor |
+| `<localleader>cd` | Delete the comment at the cursor |
+| `<localleader>cl` | List every comment in the review and jump to one (`:IntentDiffCommentsList`) |
+| `]n` / `[n` | Next / previous comment in this file |
+| `<localleader>cy` | Copy the review as Markdown (`:IntentDiffCommentsYank`) |
+| `<localleader>cw` | Write the review to a file (`:IntentDiffCommentsWrite`) |
+| `<localleader>cx` | Delete every comment in this review, after confirmation (`:IntentDiffCommentsClear`) |
+| `<localleader>q` | Copy the review as Markdown, then close the review tab |
 
 ## Diagnostics
 

@@ -324,11 +324,11 @@ This rename missed the DI container entirely — see below.
 
 ## Add retry logic to HTTP client
 
-3. **[NOTE]** `src/http/client.ts:44-51`
-   No jitter here — fine for now.
-
-4. **[PRAISE]** `src/http/client.ts`
+3. **[PRAISE]** `src/http/client.ts`
    Good call keeping the timeout separate.
+
+4. **[NOTE]** `src/http/client.ts:44-51`
+   No jitter here — fine for now.
 ```
 
 Details that matter:
@@ -378,8 +378,12 @@ comments = {
 }
 ```
 
-Setting `comments.enabled = false` installs no keymaps, no commands, and no
-autocmds — the plugin behaves exactly as it does today.
+Setting `comments.enabled = false` installs no keymaps and no autocmds, and
+the feature never loads its modules. The four `:IntentDiffCommentsYank` /
+`…Write` / `…List` / `…Clear` commands ARE still registered, because
+`plugin/` runs before `setup()` and so cannot know the user's setting yet;
+each one refuses with a notice while comments are disabled. Either way the
+feature is inert — the plugin behaves exactly as it does today.
 
 ## Error handling
 
