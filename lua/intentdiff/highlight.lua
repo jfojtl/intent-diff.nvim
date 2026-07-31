@@ -69,8 +69,15 @@ local function define()
   for _, t in ipairs(types) do
     local sign, line = M.comment_groups(t.key)
     if not M.links[sign] then
-      vim.api.nvim_set_hl(0, sign, { link = "DiagnosticHint", default = true })
-      vim.api.nvim_set_hl(0, line, { link = "CursorLine", default = true })
+      local ok_sign = pcall(vim.api.nvim_set_hl, 0, sign, { link = "DiagnosticHint", default = true })
+      local ok_line = pcall(vim.api.nvim_set_hl, 0, line, { link = "CursorLine", default = true })
+      -- Both calls succeeded or both failed; log a warning if either fails, but continue.
+      if not (ok_sign and ok_line) then
+        vim.notify(
+          "intent-diff: custom comment type '" .. tostring(t.key) .. "' has invalid group name",
+          vim.log.levels.WARN
+        )
+      end
     end
   end
 end

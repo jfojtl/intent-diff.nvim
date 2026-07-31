@@ -64,4 +64,39 @@ describe("highlight comments", function()
     assert.is_true(got.default)
     assert.equals("DiagnosticWarn", got.link)
   end)
+
+  it("registers fallback groups for custom well-formed comment types", function()
+    local hl = require("intentdiff.highlight")
+    local config = require("intentdiff.config")
+    config.setup({
+      comments = {
+        types = {
+          { key = "question", name = "Question", icon = "?" },
+        },
+      },
+    })
+    hl.ensure()
+    local sign = vim.api.nvim_get_hl(0, { name = "IntentDiffCommentQuestion" })
+    local line = vim.api.nvim_get_hl(0, { name = "IntentDiffCommentQuestionLine" })
+    assert.is_true(sign.default)
+    assert.equals("DiagnosticHint", sign.link)
+    assert.is_true(line.default)
+    assert.equals("CursorLine", line.link)
+  end)
+
+  it("does not error when a custom type has a malformed key", function()
+    local hl = require("intentdiff.highlight")
+    local config = require("intentdiff.config")
+    config.setup({
+      comments = {
+        types = {
+          { key = "bad type", name = "Bad Type", icon = "X" },
+        },
+      },
+    })
+    -- This should not raise an error, even though the key has a space
+    assert.has_no_errors(function()
+      hl.ensure()
+    end)
+  end)
 end)
