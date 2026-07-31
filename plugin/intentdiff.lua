@@ -14,3 +14,7 @@ end, { desc = "Show the intent-diff diagnostics log" })
 vim.api.nvim_create_user_command("IntentDiffToggleAll", function()
   require("intentdiff").toggle_all()
 end, { desc = "Collapse or expand every intent in the sidebar" })
+
+vim.api.nvim_create_user_command("IntentDiffSidebar", function()
+  require("intentdiff").toggle_sidebar()
+end, { desc = "Show or hide the intent-diff sidebar" })

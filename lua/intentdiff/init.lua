@@ -700,6 +700,13 @@ local function forget_entry(token)
   end
   require("intentdiff.classify").cancel(token) -- kill any in-flight provider
   require("intentdiff.navigation").detach(entry.sess.tabpage)
+  -- The sidebar buffer is bufhidden="hide" so it can survive being hidden;
+  -- nothing reclaims it automatically, so the session that created it owns
+  -- deleting it. Without this the plugin leaks one buffer per review.
+  if entry.sidebar and entry.sidebar.bufnr
+      and vim.api.nvim_buf_is_valid(entry.sidebar.bufnr) then
+    pcall(vim.api.nvim_buf_delete, entry.sidebar.bufnr, { force = true })
+  end
   return entry
 end
 
@@ -742,6 +749,21 @@ function M.toggle_all(tabpage)
     g.collapsed = any_expanded or nil
   end
   entry.sidebar.update(entry.model)
+end
+
+--- :IntentDiffSidebar / the toggle_sidebar key — show or hide the sidebar.
+--- Hiding keeps the buffer and the session; only the window goes away.
+function M.toggle_sidebar(tabpage)
+  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+  local entry = M._session(tabpage)
+  if not (entry and entry.sidebar) then
+    return
+  end
+  if entry.sidebar.visible then
+    entry.sidebar.hide()
+  else
+    entry.sidebar.show(entry.model)
+  end
 end
 
 --- Sessions whose tab was closed behind our back (`:tabclose`, `:q` of the
@@ -802,7 +824,7 @@ local function apply_hover(token)
   if not entry or not entry.sidebar then
     return
   end
-  if not vim.api.nvim_win_is_valid(entry.sidebar.winid) then
+  if not (entry.sidebar.winid and vim.api.nvim_win_is_valid(entry.sidebar.winid)) then
     return
   end
   local lnum = vim.api.nvim_win_get_cursor(entry.sidebar.winid)[1]
@@ -973,6 +995,12 @@ function M.open(argline)
         M.toggle_all(entry.sess.tabpage)
       end
     end,
+    on_toggle_sidebar = function()
+      local entry = sessions[token]
+      if entry then
+        M.toggle_sidebar(entry.sess.tabpage)
+      end
+    end,
     on_reclassify = function()
       local entry = sessions[token]
       if entry and entry.inventory then
@@ -983,7 +1011,11 @@ function M.open(argline)
     on_close = function() close_entry(token) end,
     on_next_group = function()
       local entry = sessions[token]
-      if entry and entry.model.groups[1] then
+      if not (entry and entry.sidebar.winid
+          and vim.api.nvim_win_is_valid(entry.sidebar.winid)) then
+        return
+      end
+      if entry.model.groups[1] then
         -- jump cursor to next group header line
         local cur = vim.api.nvim_win_get_cursor(entry.sidebar.winid)[1]
         for l = cur + 1, vim.api.nvim_buf_line_count(entry.sidebar.bufnr) do
@@ -996,13 +1028,15 @@ function M.open(argline)
     end,
     on_prev_group = function()
       local entry = sessions[token]
-      if entry then
-        local cur = vim.api.nvim_win_get_cursor(entry.sidebar.winid)[1]
-        for l = cur - 1, 1, -1 do
-          if (entry.sidebar.meta_at(l) or {}).group_head then
-            vim.api.nvim_win_set_cursor(entry.sidebar.winid, { l, 0 })
-            break
-          end
+      if not (entry and entry.sidebar.winid
+          and vim.api.nvim_win_is_valid(entry.sidebar.winid)) then
+        return
+      end
+      local cur = vim.api.nvim_win_get_cursor(entry.sidebar.winid)[1]
+      for l = cur - 1, 1, -1 do
+        if (entry.sidebar.meta_at(l) or {}).group_head then
+          vim.api.nvim_win_set_cursor(entry.sidebar.winid, { l, 0 })
+          break
         end
       end
     end,

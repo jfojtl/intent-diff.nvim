@@ -208,6 +208,13 @@ function M.layout(model)
   return lines, meta, highlights
 end
 
+local function apply_win_opts(win)
+  vim.wo[win].number = false
+  vim.wo[win].relativenumber = false
+  vim.wo[win].winfixwidth = true
+  vim.wo[win].wrap = false
+end
+
 --- Open the sidebar split and wire keymaps. Returns a handle.
 function M.create(callbacks)
   hl.ensure()
@@ -217,14 +224,11 @@ function M.create(callbacks)
   local bufnr = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_win_set_buf(winid, bufnr)
   vim.bo[bufnr].buftype = "nofile"
-  vim.bo[bufnr].bufhidden = "wipe"
+  vim.bo[bufnr].bufhidden = "hide" -- survives hiding; init.lua's forget_entry deletes it
   vim.bo[bufnr].filetype = "intentdiff"
-  vim.wo[winid].number = false
-  vim.wo[winid].relativenumber = false
-  vim.wo[winid].winfixwidth = true
-  vim.wo[winid].wrap = false
+  apply_win_opts(winid)
 
-  local handle = { winid = winid, bufnr = bufnr, meta = {} }
+  local handle = { winid = winid, bufnr = bufnr, meta = {}, visible = true }
 
   function handle.meta_at(lnum)
     return handle.meta[lnum]
@@ -252,11 +256,52 @@ function M.create(callbacks)
     end
   end
 
+  --- Close the sidebar window, keeping the buffer (and therefore the model,
+  --- the meta table and every keymap) intact. Refuses to close the last window
+  --- in the tab, which would take the review tab with it.
+  function handle.hide()
+    if not handle.visible then
+      return false
+    end
+    if handle.winid and vim.api.nvim_win_is_valid(handle.winid) then
+      local tabpage = vim.api.nvim_win_get_tabpage(handle.winid)
+      if #vim.api.nvim_tabpage_list_wins(tabpage) <= 1 then
+        return false
+      end
+      pcall(vim.api.nvim_win_close, handle.winid, true)
+    end
+    handle.winid = nil
+    handle.visible = false
+    return true
+  end
+
+  --- Re-open the sidebar window with the same buffer and re-render `model`.
+  function handle.show(model)
+    if handle.visible and handle.winid and vim.api.nvim_win_is_valid(handle.winid) then
+      return false
+    end
+    if not vim.api.nvim_buf_is_valid(handle.bufnr) then
+      return false -- caller degrades; the session is being torn down
+    end
+    vim.cmd("topleft " .. width .. "vsplit")
+    handle.winid = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(handle.winid, handle.bufnr)
+    apply_win_opts(handle.winid)
+    handle.visible = true
+    if model then
+      handle.update(model)
+    end
+    return true
+  end
+
   local function map(lhs, fn)
     vim.keymap.set("n", lhs, fn, { buffer = bufnr, nowait = true })
   end
   local function cursor_meta()
-    return handle.meta_at(vim.api.nvim_win_get_cursor(winid)[1]) or {}
+    if not (handle.winid and vim.api.nvim_win_is_valid(handle.winid)) then
+      return {}
+    end
+    return handle.meta_at(vim.api.nvim_win_get_cursor(handle.winid)[1]) or {}
   end
   map("<CR>", function()
     local m = cursor_meta()
@@ -282,6 +327,11 @@ function M.create(callbacks)
   if keys.toggle_all then
     map(keys.toggle_all, function()
       callbacks.on_toggle_all()
+    end)
+  end
+  if keys.toggle_sidebar then
+    map(keys.toggle_sidebar, function()
+      callbacks.on_toggle_sidebar()
     end)
   end
   map("r", callbacks.on_reclassify)

@@ -933,6 +933,13 @@ function M.install_keymaps(tabpage)
       pcall(vim.keymap.set, "n", key, function()
         M.toggle_layout(tabpage)
       end, { buffer = buf, nowait = true, desc = "intent-diff: toggle layout (keeps group folds)" })
+      local sidebar_key = require("intentdiff.config").options.keymaps
+        and require("intentdiff.config").options.keymaps.toggle_sidebar
+      if sidebar_key then
+        pcall(vim.keymap.set, "n", sidebar_key, function()
+          require("intentdiff").toggle_sidebar(tabpage)
+        end, { buffer = buf, nowait = true, desc = "intent-diff: show/hide the sidebar" })
+      end
     end
   end
 end
@@ -960,6 +967,13 @@ function M.install_preview_keymaps(tabpage, sess, hunk_lines)
       pcall(vim.keymap.set, "n", "q", function()
         require("intentdiff").close(tabpage)
       end, { buffer = buf, nowait = true, desc = "intent-diff: close" })
+      local sidebar_key = require("intentdiff.config").options.keymaps
+        and require("intentdiff.config").options.keymaps.toggle_sidebar
+      if sidebar_key then
+        pcall(vim.keymap.set, "n", sidebar_key, function()
+          require("intentdiff").toggle_sidebar(tabpage)
+        end, { buffer = buf, nowait = true, desc = "intent-diff: show/hide the sidebar" })
+      end
       for key, step in pairs({ ["]c"] = 1, ["[c"] = -1 }) do
         pcall(vim.keymap.set, "n", key, function()
           local win = vim.api.nvim_get_current_win()
