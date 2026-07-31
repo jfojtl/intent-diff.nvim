@@ -71,6 +71,32 @@ function M.build(files)
   return root.children
 end
 
+--- Every directory path in `nodes`, for the recursive fold keys.
+---
+--- With `under`, only that directory and its descendants; without it, all of
+--- them. Paths are post-compression — the same strings flatten() puts on dir
+--- rows and `collapsed_dirs` is keyed by — so a compressed chain like
+--- `src/http` contributes exactly one path, not one per segment.
+--- @param nodes table[] roots from M.build
+--- @param under? string directory path to restrict to (inclusive)
+--- @return string[]
+function M.dir_paths(nodes, under)
+  local out = {}
+  local function walk(list, inside)
+    for _, node in ipairs(list) do
+      if node.kind == "dir" then
+        local hit = inside or under == nil or node.path == under
+        if hit then
+          out[#out + 1] = node.path
+        end
+        walk(node.children, hit)
+      end
+    end
+  end
+  walk(nodes, false)
+  return out
+end
+
 local function file_stats(f)
   local additions, deletions = 0, 0
   for _, h in ipairs(f.hunks or {}) do

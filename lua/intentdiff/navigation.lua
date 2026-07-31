@@ -89,12 +89,15 @@ function M.prev_hunk(tabpage)
 end
 
 local function install_keymaps(tabpage)
+  local keymaps = require("intentdiff.keymaps")
   for _, win in ipairs(require("intentdiff.view").diff_wins(tabpage)) do
-    local buf = vim.api.nvim_win_get_buf(win)
-    vim.keymap.set("n", "]c", function() M.next_hunk(tabpage) end,
-      { buffer = buf, nowait = true, desc = "intent-diff: next hunk in group" })
-    vim.keymap.set("n", "[c", function() M.prev_hunk(tabpage) end,
-      { buffer = buf, nowait = true, desc = "intent-diff: previous hunk in group" })
+    keymaps.install(vim.api.nvim_win_get_buf(win), "view", {
+      next_hunk = function() M.next_hunk(tabpage) end,
+      prev_hunk = function() M.prev_hunk(tabpage) end,
+    }, {
+      next_hunk = "intent-diff: next hunk in group",
+      prev_hunk = "intent-diff: previous hunk in group",
+    })
   end
 end
 

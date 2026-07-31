@@ -403,7 +403,7 @@ describe("sidebar hover preview", function()
       hover(entry, line_of(entry, "group"))
       assert.truthy(preview_up(tab), "preview never activated")
 
-      press(entry, "r")
+      press(entry, require("intentdiff.config").options.keymaps.sidebar.reclassify)
       assert.truthy(helpers.wait_for(function()
         return entry.model.state == "loading" or nil
       end, 5000), "reclassify never re-entered the loading model")

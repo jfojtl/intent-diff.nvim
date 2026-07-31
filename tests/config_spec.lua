@@ -59,16 +59,67 @@ describe("config navigation defaults", function()
 end)
 
 describe("config keymaps", function()
-  it("defaults the two new sidebar keys", function()
-    local config = require("intentdiff.config")
+  local config = require("intentdiff.config")
+
+  it("namespaces keymaps by surface, matching codediff's defaults", function()
     config.setup({})
-    assert.equals("zA", config.options.keymaps.toggle_all)
-    assert.equals("<leader>gVt", config.options.keymaps.toggle_sidebar)
+    -- Same lhs codediff binds to keymaps.view.toggle_explorer: the sidebar is
+    -- that explorer's counterpart.
+    assert.equals("<leader>b", config.options.keymaps.view.toggle_sidebar)
+    assert.equals("g?", config.options.keymaps.view.show_help)
+    assert.equals("R", config.options.keymaps.sidebar.reclassify)
+    -- zA is codediff's fold_toggle_recursive, NOT the old expand/collapse-all.
+    assert.equals("zA", config.options.keymaps.sidebar.fold_toggle_recursive)
+    assert.equals("zR", config.options.keymaps.sidebar.fold_open_all)
+    assert.equals("zM", config.options.keymaps.sidebar.fold_close_all)
+    assert.is_false(config.options.keymaps.sidebar.fold_toggle_all)
+  end)
+
+  it("keeps h/l as aliases of the fold open/close keys", function()
+    config.setup({})
+    assert.same({ "zo", "l" }, config.options.keymaps.sidebar.fold_open)
+    assert.same({ "zc", "h" }, config.options.keymaps.sidebar.fold_close)
   end)
 
   it("lets a keymap be disabled with false", function()
+    config.setup({ keymaps = { sidebar = { fold_toggle = false } } })
+    assert.is_false(config.options.keymaps.sidebar.fold_toggle)
+    -- Its neighbours survive: a surface override merges, it does not replace.
+    assert.equals("zA", config.options.keymaps.sidebar.fold_toggle_recursive)
+  end)
+
+  it("replaces a list-valued action outright instead of merging indices", function()
+    -- vim.tbl_deep_extend would leave "l" behind at index 2, making the
+    -- default alias impossible to drop.
+    config.setup({ keymaps = { sidebar = { fold_open = { "zo" } } } })
+    assert.same({ "zo" }, config.options.keymaps.sidebar.fold_open)
+  end)
+
+  it("migrates the pre-namespacing flat keys", function()
+    config.setup({ keymaps = { toggle_sidebar = "<leader>gVt", toggle_all = "zA" } })
+    assert.equals("<leader>gVt", config.options.keymaps.view.toggle_sidebar)
+    assert.equals("zA", config.options.keymaps.sidebar.fold_toggle_all)
+  end)
+
+  it("lets an explicit surface win over the migration shim", function()
+    config.setup({
+      keymaps = { toggle_sidebar = "<leader>gVt", view = { toggle_sidebar = "<leader>x" } },
+    })
+    assert.equals("<leader>x", config.options.keymaps.view.toggle_sidebar)
+  end)
+
+  it("does not leak keymaps between setup calls", function()
+    config.setup({ keymaps = { sidebar = { reclassify = "gr" } } })
+    config.setup({})
+    assert.equals("R", config.options.keymaps.sidebar.reclassify)
+  end)
+end)
+describe("config keymap isolation", function()
+  it("does not let an in-place mutation reach the defaults", function()
     local config = require("intentdiff.config")
-    config.setup({ keymaps = { toggle_all = false } })
-    assert.is_false(config.options.keymaps.toggle_all)
+    config.setup({})
+    table.insert(config.options.keymaps.sidebar.fold_open, "zzz")
+    config.setup({})
+    assert.same({ "zo", "l" }, config.options.keymaps.sidebar.fold_open)
   end)
 end)

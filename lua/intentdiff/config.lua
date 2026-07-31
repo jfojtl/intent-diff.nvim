@@ -52,19 +52,138 @@ M.defaults = {
   -- tree never settles, so it renders once, at rest. Set false to go back to
   -- restoring the last selection on a file row and requiring <CR> to open.
   preview = { enabled = true, debounce_ms = 120, max_lines = 20000, hover_opens_files = true },
-  -- Buffer-local keys the plugin installs inside a review tab. Set any of them
-  -- to false to install nothing, exactly as the plugin already handles
-  -- codediff's toggle_layout key being disabled.
+  -- Buffer-local keys the plugin installs inside a review tab, namespaced by
+  -- surface the way codediff namespaces its own (keymaps.view / .explorer /
+  -- .history / .conflict). Set any action to false to install nothing,
+  -- exactly as the plugin already handles codediff's toggle_layout key being
+  -- disabled. An action may also be a LIST of keys, all bound to it.
   keymaps = {
-    toggle_sidebar = "<leader>gVt", -- installed on the sidebar AND the diff panes
-    toggle_all = "zA",              -- sidebar only
+    -- Diff panes, and the whole-intent preview buffers.
+    view = {
+      quit = "q",
+      -- Named after codediff's keymaps.view.toggle_explorer, and deliberately
+      -- sharing its default: our sidebar is that explorer's counterpart.
+      -- Installed on the sidebar too, since a sidebar-local key would be
+      -- unreachable once the sidebar is hidden.
+      toggle_sidebar = "<leader>b",
+      next_hunk = "]c", -- group-scoped: only the current intent's hunks
+      prev_hunk = "[c",
+      show_help = "g?",
+    },
+    -- The intent sidebar.
+    sidebar = {
+      select = "<CR>",
+      quit = "q",
+      reclassify = "R", -- was `r`; `R` is what codediff's explorer uses
+      goto_file = "gf",
+      next_group = "<Tab>",
+      prev_group = "<S-Tab>",
+      show_help = "g?",
+      -- Vim-style folds, matching codediff's explorer set. On a directory row
+      -- these act on that directory; anywhere else in an intent (title, stats
+      -- line, file row) they act on the enclosing intent. "Recursive" means
+      -- the row plus every directory beneath it. `h`/`l` are kept as the
+      -- nvim-tree-style aliases they have always been, now split across
+      -- close/open rather than both toggling.
+      fold_open = { "zo", "l" },
+      fold_open_recursive = "zO",
+      fold_close = { "zc", "h" },
+      fold_close_recursive = "zC",
+      fold_toggle = "za",
+      fold_toggle_recursive = "zA",
+      -- Whole-sidebar: expand / collapse every intent. Per-directory state is
+      -- deliberately preserved, so re-expanding restores the tree the user had
+      -- arranged (see M.fold_all).
+      fold_open_all = "zR",
+      fold_close_all = "zM",
+      -- The pre-namespacing `zA` behavior — collapse every intent if any is
+      -- expanded, else expand every one. `zA` now means fold_toggle_recursive
+      -- (codediff's meaning), so this is unbound by default and reachable as
+      -- :IntentDiffToggleAll.
+      fold_toggle_all = false,
+    },
   },
 }
+
+--- Pre-namespacing keys that lived flat on `keymaps`, and where they moved.
+local LEGACY_KEYMAPS = {
+  toggle_sidebar = { "view", "toggle_sidebar" },
+  toggle_all = { "sidebar", "fold_toggle_all" },
+}
+
+--- Rewrite a user `keymaps` table that still uses the flat pre-namespacing
+--- keys into the namespaced shape, returning the rewritten table and a list of
+--- human-readable moves for the deprecation notice. A surface the user spelled
+--- out explicitly always wins over what the shim derived.
+local function migrate_keymaps(km)
+  local explicit, derived, moved = {}, {}, {}
+  for key, value in pairs(km) do
+    local target = LEGACY_KEYMAPS[key]
+    -- type(value) ~= "table" distinguishes the legacy scalar `toggle_sidebar =
+    -- "<leader>gVt"` from a namespaced surface that happens to share the name.
+    if target and type(value) ~= "table" then
+      derived[target[1]] = derived[target[1]] or {}
+      derived[target[1]][target[2]] = value
+      moved[#moved + 1] = ("keymaps.%s → keymaps.%s.%s"):format(key, target[1], target[2])
+    else
+      explicit[key] = value
+    end
+  end
+  local out = {}
+  for surface, actions in pairs(derived) do
+    out[surface] = actions
+  end
+  for surface, actions in pairs(explicit) do
+    if type(actions) == "table" and type(out[surface]) == "table" then
+      out[surface] = vim.tbl_extend("force", out[surface], actions)
+    else
+      out[surface] = actions
+    end
+  end
+  return out, moved
+end
+
+--- Merge keymap surfaces one action at a time. vim.tbl_deep_extend would
+--- recurse INTO a list-valued action, so overriding `fold_open = { "zo", "l" }`
+--- with `{ "zo" }` would leave "l" behind at index 2 — a user key that is
+--- impossible to remove. Shallow-per-surface means a user value always
+--- replaces the default outright.
+local function merge_keymaps(defaults, override)
+  local out = {}
+  for surface, actions in pairs(defaults) do
+    -- deepcopy, not a shallow copy: a list-valued action shallow-copied would
+    -- hand M.options a reference to M.defaults' own list, so mutating
+    -- options.keymaps.sidebar.fold_open in place would corrupt the defaults
+    -- for every later setup() call.
+    out[surface] = vim.deepcopy(actions)
+  end
+  for surface, actions in pairs(override) do
+    if type(actions) == "table" and type(out[surface]) == "table" then
+      out[surface] = vim.tbl_extend("force", out[surface], actions)
+    else
+      out[surface] = actions
+    end
+  end
+  return out
+end
 
 M.options = vim.deepcopy(M.defaults)
 
 function M.setup(opts)
-  M.options = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts or {})
+  opts = opts or {}
+  -- Keymaps are merged separately from everything else: see merge_keymaps.
+  local keymaps, moved = migrate_keymaps(opts.keymaps or {})
+  opts = vim.tbl_extend("force", {}, opts)
+  opts.keymaps = nil
+  M.options = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
+  M.options.keymaps = merge_keymaps(M.defaults.keymaps, keymaps)
+  if #moved > 0 then
+    vim.notify(
+      "intent-diff: keymaps are now namespaced by surface; migrated "
+        .. table.concat(moved, ", "),
+      vim.log.levels.WARN
+    )
+  end
 end
 
 return M

@@ -188,7 +188,7 @@ describe("sidebar show/hide", function()
     -- because _preview_active[tab] is still truthy. With the sidebar hidden,
     -- entry.sidebar.winid is nil, so this is the exact crash the guard
     -- exists for: nvim_win_is_valid(nil) throws rather than returning false.
-    assert.has_no.errors(function() press(entry, "r") end)
+    assert.has_no.errors(function() press(entry, require("intentdiff.config").options.keymaps.sidebar.reclassify) end)
 
     assert.truthy(helpers.wait_for(function()
       return entry.model.state == "ready"

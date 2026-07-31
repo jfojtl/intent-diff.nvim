@@ -925,14 +925,14 @@ function M.install_keymaps(tabpage)
   local cd_config = try("codediff.config")
   local keys = cd_config and cd_config.options and cd_config.options.keymaps
   local key = keys and keys.view and keys.view.toggle_layout
-  -- Read BEFORE the "no toggle_layout key" early return below: the sidebar
-  -- toggle must still be installed on the pane buffers even when codediff's
-  -- own toggle_layout key is disabled — it's the only in-pane way back once
-  -- the sidebar itself is hidden (a sidebar-local key is unreachable then).
-  -- An early return gated only on `key` used to skip this block entirely.
-  local sidebar_key = require("intentdiff.config").options.keymaps
-    and require("intentdiff.config").options.keymaps.toggle_sidebar
-  if not key and not sidebar_key then
+  -- Read BEFORE the "no toggle_layout key" early return below: our own view
+  -- keys must still be installed on the pane buffers even when codediff's
+  -- toggle_layout key is disabled — the sidebar toggle in particular is the
+  -- only in-pane way back once the sidebar itself is hidden (a sidebar-local
+  -- key is unreachable then). An early return gated only on `key` used to
+  -- skip this block entirely.
+  local vkm = require("intentdiff.config").options.keymaps.view or {}
+  if not key and not vkm.toggle_sidebar and not vkm.show_help then
     return -- nothing to install
   end
   for _, buf in ipairs({ session.original_bufnr, session.modified_bufnr }) do
@@ -942,13 +942,32 @@ function M.install_keymaps(tabpage)
           M.toggle_layout(tabpage)
         end, { buffer = buf, nowait = true, desc = "intent-diff: toggle layout (keeps group folds)" })
       end
-      if sidebar_key then
-        pcall(vim.keymap.set, "n", sidebar_key, function()
+      M.map_view_keys(buf, {
+        toggle_sidebar = function()
           require("intentdiff").toggle_sidebar(tabpage)
-        end, { buffer = buf, nowait = true, desc = "intent-diff: show/hide the sidebar" })
-      end
+        end,
+        show_help = function()
+          require("intentdiff.keymap_help").toggle()
+        end,
+      })
     end
   end
+end
+
+--- Descriptions for the `keymaps.view` actions, shown in :map / which-key.
+M.VIEW_DESCS = {
+  toggle_sidebar = "intent-diff: show/hide the sidebar",
+  show_help = "intent-diff: toggle this help",
+  quit = "intent-diff: close",
+  next_hunk = "intent-diff: next hunk in group",
+  prev_hunk = "intent-diff: previous hunk in group",
+}
+
+--- Install the `keymaps.view` actions named in `handlers` on `buf`. Shared by
+--- the diff panes and the whole-intent preview buffers, which need the same
+--- keys installed from two different call sites.
+function M.map_view_keys(buf, handlers)
+  require("intentdiff.keymaps").install(buf, "view", handlers, M.VIEW_DESCS)
 end
 
 --- Buffer-local keymaps for preview buffers. They are fresh scratch buffers, so
@@ -962,47 +981,50 @@ function M.install_preview_keymaps(tabpage, sess, hunk_lines)
   local cd_config = try("codediff.config")
   local keys = cd_config and cd_config.options and cd_config.options.keymaps
   local toggle_key = keys and keys.view and keys.view.toggle_layout
-  -- Computed once, unconditionally, alongside toggle_key: this key must be
-  -- installed regardless of whether codediff's own toggle_layout key is
-  -- enabled — see the matching note in M.install_keymaps.
-  local sidebar_key = require("intentdiff.config").options.keymaps
-    and require("intentdiff.config").options.keymaps.toggle_sidebar
+  -- Our own view keys are installed unconditionally, regardless of whether
+  -- codediff's toggle_layout key is enabled — see the matching note in
+  -- M.install_keymaps.
+  local function hunk_step(step)
+    return function()
+      local win = vim.api.nvim_get_current_win()
+      local cursor = vim.api.nvim_win_get_cursor(win)[1]
+      local target
+      if step == 1 then
+        for _, lnum in ipairs(hunk_lines) do
+          if lnum > cursor then target = lnum break end
+        end
+      else
+        for i = #hunk_lines, 1, -1 do
+          if hunk_lines[i] < cursor then target = hunk_lines[i] break end
+        end
+      end
+      if target then
+        pcall(vim.api.nvim_win_set_cursor, win, { target, 0 })
+      end
+    end
+  end
   local seen = {}
   for _, buf in ipairs({ session.original_bufnr, session.modified_bufnr }) do
     if buf and vim.api.nvim_buf_is_valid(buf) and not seen[buf] then
       seen[buf] = true
-      if sidebar_key then
-        pcall(vim.keymap.set, "n", sidebar_key, function()
-          require("intentdiff").toggle_sidebar(tabpage)
-        end, { buffer = buf, nowait = true, desc = "intent-diff: show/hide the sidebar" })
-      end
       if toggle_key then
         pcall(vim.keymap.set, "n", toggle_key, function()
           M.toggle_preview_layout(tabpage)
         end, { buffer = buf, nowait = true, desc = "intent-diff: toggle preview layout" })
       end
-      pcall(vim.keymap.set, "n", "q", function()
-        require("intentdiff").close(tabpage)
-      end, { buffer = buf, nowait = true, desc = "intent-diff: close" })
-      for key, step in pairs({ ["]c"] = 1, ["[c"] = -1 }) do
-        pcall(vim.keymap.set, "n", key, function()
-          local win = vim.api.nvim_get_current_win()
-          local cursor = vim.api.nvim_win_get_cursor(win)[1]
-          local target
-          if step == 1 then
-            for _, lnum in ipairs(hunk_lines) do
-              if lnum > cursor then target = lnum break end
-            end
-          else
-            for i = #hunk_lines, 1, -1 do
-              if hunk_lines[i] < cursor then target = hunk_lines[i] break end
-            end
-          end
-          if target then
-            pcall(vim.api.nvim_win_set_cursor, win, { target, 0 })
-          end
-        end, { buffer = buf, nowait = true, desc = "intent-diff: hunk in preview" })
-      end
+      M.map_view_keys(buf, {
+        toggle_sidebar = function()
+          require("intentdiff").toggle_sidebar(tabpage)
+        end,
+        show_help = function()
+          require("intentdiff.keymap_help").toggle()
+        end,
+        quit = function()
+          require("intentdiff").close(tabpage)
+        end,
+        next_hunk = hunk_step(1),
+        prev_hunk = hunk_step(-1),
+      })
     end
   end
   M._preview_sess[tabpage] = sess

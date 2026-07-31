@@ -324,7 +324,7 @@ describe("sidebar.create", function()
     local selected
     local handle = sidebar.create({
       on_select = function(gi, fi) selected = { gi, fi } end,
-      on_toggle_group = function() end, on_toggle_dir = function() end,
+      on_fold = function() end, on_fold_all = function() end,
       on_reclassify = function() end,
       on_close = function() end, on_next_group = function() end,
       on_prev_group = function() end, on_goto_file = function() end,
@@ -353,13 +353,18 @@ describe("sidebar.create", function()
   end)
 end)
 
-describe("sidebar toggle-all", function()
-  it("invokes on_toggle_all from the configured key", function()
-    require("intentdiff.config").setup({})
-    local called = 0
+describe("sidebar fold keys", function()
+  --- Press `keys` on line 1 (a group title row) of a fresh sidebar and return
+  --- what the fold callbacks were called with.
+  local function press_on_group(keys, opts)
+    require("intentdiff.config").setup(opts or {})
+    local folds, alls = {}, {}
     local handle = sidebar.create({
-      on_select = function() end, on_toggle_group = function() end,
-      on_toggle_dir = function() end, on_toggle_all = function() called = called + 1 end,
+      on_select = function() end,
+      on_fold = function(gi, dir_path, action, recursive)
+        folds[#folds + 1] = { gi, dir_path, action, recursive }
+      end,
+      on_fold_all = function(action) alls[#alls + 1] = action end,
       on_reclassify = function() end, on_close = function() end,
       on_next_group = function() end, on_prev_group = function() end,
       on_goto_file = function() end,
@@ -367,8 +372,43 @@ describe("sidebar toggle-all", function()
     handle.update(mk_model())
     vim.api.nvim_set_current_win(handle.winid)
     vim.api.nvim_win_set_cursor(handle.winid, { 1, 0 })
-    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("zA", true, false, true), "x", false)
-    assert.equals(1, called)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, false, true), "x", false)
     pcall(vim.api.nvim_win_close, handle.winid, true)
+    return folds, alls
+  end
+
+  it("maps the codediff per-node fold set onto the enclosing intent", function()
+    -- dir_path nil ⇒ the intent itself; a group title row is not a dir row.
+    assert.same({ { 1, nil, "toggle", false } }, (press_on_group("za")))
+    assert.same({ { 1, nil, "toggle", true } }, (press_on_group("zA")))
+    assert.same({ { 1, nil, "open", false } }, (press_on_group("zo")))
+    assert.same({ { 1, nil, "open", true } }, (press_on_group("zO")))
+    assert.same({ { 1, nil, "close", false } }, (press_on_group("zc")))
+    assert.same({ { 1, nil, "close", true } }, (press_on_group("zC")))
+  end)
+
+  it("keeps h/l working as the open/close aliases", function()
+    assert.same({ { 1, nil, "open", false } }, (press_on_group("l")))
+    assert.same({ { 1, nil, "close", false } }, (press_on_group("h")))
+  end)
+
+  it("routes zR/zM to on_fold_all, not on_fold", function()
+    local folds, alls = press_on_group("zR")
+    assert.same({}, folds)
+    assert.same({ "open" }, alls)
+    local _, collapse = press_on_group("zM")
+    assert.same({ "close" }, collapse)
+  end)
+
+  it("leaves fold_toggle_all unbound by default but honours an opt-in", function()
+    local _, alls = press_on_group("zA", { keymaps = { sidebar = { fold_toggle_all = "gA" } } })
+    assert.same({}, alls) -- zA is fold_toggle_recursive now
+    local _, opted = press_on_group("gA", { keymaps = { sidebar = { fold_toggle_all = "gA" } } })
+    assert.same({ "toggle" }, opted)
+  end)
+
+  it("installs nothing for an action disabled with false", function()
+    local folds = press_on_group("za", { keymaps = { sidebar = { fold_toggle = false } } })
+    assert.same({}, folds)
   end)
 end)

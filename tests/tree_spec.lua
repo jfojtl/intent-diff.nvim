@@ -106,3 +106,47 @@ describe("tree.flatten", function()
     assert.equals("A", rows[1].status)
   end)
 end)
+
+describe("tree.dir_paths", function()
+  -- src/http/{a,b}.lua branches under src, so `src` stays its own node while
+  -- the single-child chain lib/deep/nested compresses to one.
+  local function roots()
+    return tree.build({
+      file("src/http/a.lua"),
+      file("src/db/b.lua"),
+      file("lib/deep/nested/c.lua"),
+      file("top.lua"),
+    })
+  end
+
+  it("returns every directory path when no root is given", function()
+    local paths = tree.dir_paths(roots())
+    table.sort(paths)
+    assert.same({ "lib/deep/nested", "src", "src/db", "src/http" }, paths)
+  end)
+
+  it("skips files — only directories can be folded", function()
+    for _, p in ipairs(tree.dir_paths(roots())) do
+      assert.is_nil(p:match("%.lua$"), p .. " is a file, not a directory")
+    end
+  end)
+
+  it("restricts to a directory and its descendants, inclusive", function()
+    local paths = tree.dir_paths(roots(), "src")
+    table.sort(paths)
+    assert.same({ "src", "src/db", "src/http" }, paths)
+  end)
+
+  it("returns a compressed chain as one path, not one per segment", function()
+    assert.same({ "lib/deep/nested" }, tree.dir_paths(roots(), "lib/deep/nested"))
+  end)
+
+  it("returns nothing for a path that is not a directory in this tree", function()
+    assert.same({}, tree.dir_paths(roots(), "nope"))
+    assert.same({}, tree.dir_paths(roots(), "top.lua"))
+  end)
+
+  it("returns nothing for a flat file list", function()
+    assert.same({}, tree.dir_paths(tree.build({ file("a.lua"), file("b.lua") })))
+  end)
+end)

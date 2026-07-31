@@ -786,29 +786,45 @@ function M.close(tabpage)
   end
 end
 
---- :IntentDiffToggleAll and the toggle_all key — collapse every intent, or
---- expand every intent.
+--- The whole-sidebar fold keys (zR / zM / an opted-in fold_toggle_all) and
+--- :IntentDiffToggleAll — expand or collapse every intent at once.
 ---
---- Any expanded intent ⇒ collapse everything; otherwise expand everything.
---- Per-directory state (g.collapsed_dirs) is deliberately untouched, so
---- re-expanding restores the tree the user had arranged.
-function M.toggle_all(tabpage)
+--- `action` is "open", "close", or "toggle"; toggle means any expanded intent
+--- ⇒ collapse everything, otherwise expand everything.
+---
+--- Per-directory state (g.collapsed_dirs) is deliberately untouched by ALL
+--- three, so re-expanding restores the tree the user had arranged. The
+--- recursive per-node keys (zO / zC / zA) are the ones that reach into
+--- directories.
+function M.fold_all(tabpage, action)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local entry = M._session(tabpage)
   if not (entry and entry.model and entry.model.groups) then
     return
   end
-  local any_expanded = false
-  for _, g in ipairs(entry.model.groups) do
-    if not g.collapsed then
-      any_expanded = true
-      break
+  local collapsed
+  if action == "open" then
+    collapsed = false
+  elseif action == "close" then
+    collapsed = true
+  else
+    collapsed = false
+    for _, g in ipairs(entry.model.groups) do
+      if not g.collapsed then
+        collapsed = true
+        break
+      end
     end
   end
   for _, g in ipairs(entry.model.groups) do
-    g.collapsed = any_expanded or nil
+    g.collapsed = collapsed or nil
   end
   entry.sidebar.update(entry.model)
+end
+
+--- :IntentDiffToggleAll — collapse every intent, or expand every intent.
+function M.toggle_all(tabpage)
+  return M.fold_all(tabpage, "toggle")
 end
 
 --- :IntentDiffSidebar / the toggle_sidebar key — show or hide the sidebar.
@@ -1032,27 +1048,49 @@ function M.open(argline)
     -- can scroll and search it. The cursor alone renders in place and leaves
     -- focus in the sidebar for continued browsing.
     on_select = function(gi, fi) select_file(token, gi, fi, { focus_diff = true }) end,
-    on_toggle_group = function(gi)
+    -- One entry point for every per-node fold key. `dir_path` nil ⇒ the whole
+    -- intent; `recursive` additionally reaches the directories beneath the
+    -- row. `action` is "open" | "close" | "toggle".
+    on_fold = function(gi, dir_path, action, recursive)
       local entry = sessions[token]
       local g = entry and entry.model.groups[gi]
-      if g then
-        g.collapsed = not g.collapsed
-        entry.sidebar.update(entry.model)
+      if not g then
+        return
       end
-    end,
-    on_toggle_dir = function(gi, dir_path)
-      local entry = sessions[token]
-      local g = entry and entry.model.groups[gi]
-      if g then
+      local function resolve(current)
+        if action == "open" then
+          return false
+        elseif action == "close" then
+          return true
+        end
+        return not current
+      end
+      local tree = require("intentdiff.tree")
+      if dir_path then
         g.collapsed_dirs = g.collapsed_dirs or {}
-        g.collapsed_dirs[dir_path] = not g.collapsed_dirs[dir_path] or nil
-        entry.sidebar.update(entry.model)
+        local collapsed = resolve(g.collapsed_dirs[dir_path])
+        local paths = recursive
+            and tree.dir_paths(tree.build(g.files or {}), dir_path)
+          or { dir_path }
+        for _, p in ipairs(paths) do
+          g.collapsed_dirs[p] = collapsed or nil
+        end
+      else
+        local collapsed = resolve(g.collapsed)
+        g.collapsed = collapsed or nil
+        if recursive then
+          g.collapsed_dirs = g.collapsed_dirs or {}
+          for _, p in ipairs(tree.dir_paths(tree.build(g.files or {}))) do
+            g.collapsed_dirs[p] = collapsed or nil
+          end
+        end
       end
+      entry.sidebar.update(entry.model)
     end,
-    on_toggle_all = function()
+    on_fold_all = function(action)
       local entry = sessions[token]
       if entry then
-        M.toggle_all(entry.sess.tabpage)
+        M.fold_all(entry.sess.tabpage, action)
       end
     end,
     on_toggle_sidebar = function()

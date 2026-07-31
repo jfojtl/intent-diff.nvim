@@ -87,9 +87,11 @@ return {
 `:CodeDiff` — no args (working tree), a single revision, `revision...` for
 merge-base-relative, or `base target`.
 
-`:IntentDiffToggleAll` and `:IntentDiffSidebar` are the command-line
-equivalents of the `zA` and `<leader>gVt` keys described under "Keymaps"
-below — collapsing/expanding every intent, and showing/hiding the sidebar.
+`:IntentDiffSidebar` is the command-line equivalent of the `<leader>b` key
+described under "Keymaps" below, showing/hiding the sidebar.
+`:IntentDiffToggleAll` collapses every intent if any is expanded and expands
+every one otherwise; it has no default key (`zR` and `zM` do the two halves
+explicitly), but `keymaps.sidebar.fold_toggle_all` can bind it.
 
 ## Configuration
 
@@ -191,21 +193,70 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
                                -- and just restores the last-opened file
   },
 
-  -- Buffer-local keys the plugin installs inside a review tab. Set either to
-  -- `false` to install nothing, exactly as the plugin already handles
-  -- codediff's own toggle_layout key being disabled.
+  -- Buffer-local keys the plugin installs inside a review tab, namespaced by
+  -- surface the way codediff namespaces its own (keymaps.view / .explorer /
+  -- .history / .conflict). Set any action to `false` to install nothing,
+  -- exactly as the plugin already handles codediff's own toggle_layout key
+  -- being disabled. An action may also be a LIST of keys, all bound to it.
   keymaps = {
-    -- Show/hide the sidebar. Installed on the sidebar AND on the diff panes,
-    -- since a sidebar-only key is unreachable once the sidebar is hidden —
-    -- and it works even when codediff's own layout-toggle key is disabled.
-    toggle_sidebar = "<leader>gVt",
-    -- Collapse every intent if any is currently expanded, otherwise expand
-    -- every intent (per-directory collapse state inside each one is
-    -- preserved either way). Sidebar only.
-    toggle_all = "zA",
+    -- The diff panes, and the whole-intent preview buffers.
+    view = {
+      quit = "q",             -- preview buffers; the panes use codediff's own
+      -- Show/hide the sidebar. Named after (and sharing a default with)
+      -- codediff's keymaps.view.toggle_explorer, because our sidebar is that
+      -- explorer's counterpart. Installed on the sidebar AND on the diff
+      -- panes, since a sidebar-only key is unreachable once the sidebar is
+      -- hidden — and it works even when codediff's own layout-toggle key is
+      -- disabled.
+      toggle_sidebar = "<leader>b",
+      next_hunk = "]c",       -- group-scoped: only this intent's hunks
+      prev_hunk = "[c",
+      show_help = "g?",
+    },
+    -- The intent sidebar.
+    sidebar = {
+      select = "<CR>",
+      quit = "q",
+      reclassify = "R",       -- was `r`; `R` is what codediff's explorer uses
+      goto_file = "gf",
+      next_group = "<Tab>",
+      prev_group = "<S-Tab>",
+      show_help = "g?",
+      -- Vim-style folds, matching codediff's explorer set. On a directory row
+      -- these act on that directory; anywhere else in an intent (title, stats
+      -- line, file row) they act on the enclosing intent. "Recursive" means
+      -- the row plus every directory beneath it.
+      fold_open = { "zo", "l" },
+      fold_open_recursive = "zO",
+      fold_close = { "zc", "h" },
+      fold_close_recursive = "zC",
+      fold_toggle = "za",
+      fold_toggle_recursive = "zA",
+      -- Whole-sidebar. Per-directory state is deliberately preserved, so
+      -- re-expanding restores the tree you had arranged.
+      fold_open_all = "zR",
+      fold_close_all = "zM",
+      -- The pre-namespacing `zA` — collapse every intent if any is expanded,
+      -- else expand every one. `zA` now means fold_toggle_recursive, so this
+      -- is unbound by default and reachable as :IntentDiffToggleAll.
+      fold_toggle_all = false,
+    },
   },
 }
 ```
+
+### Migrating from the flat `keymaps` table
+
+The old flat `keymaps.toggle_sidebar` / `keymaps.toggle_all` still work — they
+are rewritten to `keymaps.view.toggle_sidebar` and
+`keymaps.sidebar.fold_toggle_all` at `setup()` time, with a one-line notice.
+Three defaults changed, so if you had been relying on them:
+
+| Was | Now | To keep the old key |
+|---|---|---|
+| `<leader>gVt` show/hide sidebar | `<leader>b` | `view = { toggle_sidebar = "<leader>gVt" }` |
+| `r` re-classify | `R` | `sidebar = { reclassify = "r" }` |
+| `zA` expand/collapse every intent | `zR` / `zM`, explicitly | `sidebar = { fold_toggle_recursive = false, fold_toggle_all = "zA" }` |
 
 ## Custom providers
 
@@ -459,18 +510,35 @@ worked (and does, until the theme changes) rather than failing loudly.
 
 ## Keymaps
 
+Press `g?` in a review tab for a floating cheatsheet built from your own
+config — a rebound key shows up rebound, a disabled one not at all.
+
+The whole set deliberately mirrors codediff's, so the two tools share muscle
+memory: the fold verbs are its explorer's, `R`/`gf`/`<CR>` mean what they mean
+there, and the sidebar toggle sits on its `toggle_explorer` default.
+
 **Sidebar:**
 
 | Key | Action |
 |---|---|
 | `<CR>` | On a file row, render its diff if needed (a pure focus change if the cursor already rendered it) and move focus into the diff pane. On a group or directory row, toggle it. |
-| `za` / `h` / `l` | On a directory row, toggle that directory. Anywhere else in the group (title, stats line, or a file row), toggle the enclosing group. |
-| `zA` | Collapse every intent if any is currently expanded, otherwise expand every intent. Per-directory collapse state inside each intent is preserved. (`:IntentDiffToggleAll`) |
-| `<leader>gVt` | Show or hide the sidebar — also works from the diff panes, see below. (`:IntentDiffSidebar`) |
-| `r` | Re-classify (bypasses cache) |
+| `za` / `zA` | Toggle the fold under the cursor / toggle it recursively |
+| `zo` `l` / `zO` | Open the fold under the cursor / open it recursively |
+| `zc` `h` / `zC` | Close the fold under the cursor / close it recursively |
+| `zR` / `zM` | Expand / collapse every intent. Per-directory collapse state inside each intent is preserved. |
+| `<leader>b` | Show or hide the sidebar — also works from the diff panes, see below. (`:IntentDiffSidebar`) |
+| `R` | Re-classify (bypasses cache) |
 | `gf` | Open the real file at the group's first hunk, closing the review tab |
 | `<Tab>` / `<S-Tab>` | Jump to next / previous group header |
+| `g?` | Toggle the keymap cheatsheet |
 | `q` | Close the review tab |
+
+A fold key acts on the directory under the cursor; anywhere else in an intent
+(title, stats line, or a file row) it acts on the enclosing intent.
+"Recursive" additionally reaches every directory beneath the row — that is the
+only way to move directory state in bulk, since `zR`/`zM` are deliberately
+intent-level. `:IntentDiffToggleAll` still collapses-if-any-expanded-else-
+expands; it is unbound by default now that `zA` carries codediff's meaning.
 
 Resting the cursor on a row (no key press) also drives the diff panes — see
 "Previewing an intent" above.
@@ -479,11 +547,11 @@ Resting the cursor on a row (no key press) also drives the diff panes — see
 they move only through the current group's hunks; at a file's last hunk in
 the group they roll over to the group's next file. codediff's inline↔side-by-side
 toggle keeps working; the fold filter re-applies after every toggle.
-`<leader>gVt` (`keymaps.toggle_sidebar`) is also installed here, not just on
-the sidebar — since a sidebar-only key would be unreachable once the sidebar
-is hidden, this one works even when codediff's own layout-toggle key is
-disabled. The same toggle key works inside a whole-intent preview too — see
-"Previewing an intent" above.
+`<leader>b` (`keymaps.view.toggle_sidebar`) and `g?` are also installed here,
+not just on the sidebar — since a sidebar-only key would be unreachable once
+the sidebar is hidden, the toggle works even when codediff's own layout-toggle
+key is disabled. Both work inside a whole-intent preview too — see "Previewing
+an intent" above.
 
 ## Diagnostics
 

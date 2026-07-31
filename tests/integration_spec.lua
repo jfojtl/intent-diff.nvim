@@ -1321,4 +1321,78 @@ describe(":IntentDiff end-to-end", function()
     assert.is_true(entry.model.groups[1].collapsed_dirs["src"],
       "per-directory state must survive the round trip")
   end)
+
+  --- Open a nested repo, then invoke the sidebar keymap `lhs` with the cursor
+  --- parked on the first row of intent 1. Buffer-local keymaps are called
+  --- through their callback rather than feedkeys so a hidden sidebar window
+  --- cannot affect the result.
+  local function fold_via_key(lhs)
+    local nested = helpers.make_repo({
+      ["src/http/a.lua"] = "x",
+      ["src/db/b.lua"] = "x",
+      ["top.lua"] = "x",
+    })
+    helpers.write_file(nested, "src/http/a.lua", "y")
+    helpers.write_file(nested, "src/db/b.lua", "y")
+    helpers.write_file(nested, "top.lua", "y")
+    vim.cmd("cd " .. nested)
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      log_file = vim.fn.tempname() .. "/l.log",
+      provider = fake_provider({ { title = "Everything", ids = "1-99" } }),
+    })
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local entry = helpers.wait_for(function()
+      local s = require("intentdiff")._session(tab)
+      return s and s.model and s.model.state == "ready" and s or nil
+    end, 15000)
+    assert.truthy(entry, "classification never became ready")
+
+    local group_lnum
+    for i, m in ipairs(entry.sidebar.meta) do
+      if m.kind == "group" then
+        group_lnum = i
+        break
+      end
+    end
+    assert.truthy(group_lnum, "no group row in the sidebar")
+    vim.api.nvim_set_current_win(entry.sidebar.winid)
+    vim.api.nvim_win_set_cursor(entry.sidebar.winid, { group_lnum, 0 })
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(entry.sidebar.bufnr, "n")) do
+      if map.lhs == lhs and map.callback then
+        map.callback()
+        return entry
+      end
+    end
+    error("no sidebar mapping for " .. lhs)
+  end
+
+  it("zA on an intent collapses its directories too, and zo re-opens just it", function()
+    local entry = fold_via_key("zA")
+    local g = entry.model.groups[1]
+    assert.is_true(g.collapsed, "the intent itself must collapse")
+    -- Recursive means the directories beneath the row, not only the row.
+    assert.is_true(g.collapsed_dirs["src"], "src must collapse")
+    assert.is_true(g.collapsed_dirs["src/http"], "src/http must collapse")
+    assert.is_true(g.collapsed_dirs["src/db"], "src/db must collapse")
+  end)
+
+  it("zc on an intent leaves its directories alone", function()
+    local entry = fold_via_key("zc")
+    local g = entry.model.groups[1]
+    assert.is_true(g.collapsed, "the intent itself must collapse")
+    assert.same({}, g.collapsed_dirs or {},
+      "the non-recursive key must not touch directory state")
+  end)
+
+  it("zR expands every intent without disturbing directory state", function()
+    local entry = fold_via_key("zA") -- collapse intent + its dirs first
+    local tab = entry.sess.tabpage
+    require("intentdiff").fold_all(tab, "open")
+    local g = entry.model.groups[1]
+    assert.is_falsy(g.collapsed, "zR must expand the intent")
+    assert.is_true(g.collapsed_dirs["src"],
+      "zR is intent-level: the directories the user collapsed must stay collapsed")
+  end)
 end)

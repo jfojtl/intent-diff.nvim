@@ -294,8 +294,12 @@ function M.create(callbacks)
     return true
   end
 
-  local function map(lhs, fn)
-    vim.keymap.set("n", lhs, fn, { buffer = bufnr, nowait = true })
+  --- Bind every key an action is configured with. `spec` is a single lhs, a
+  --- list of them, or false/nil to install nothing.
+  local function map(spec, fn, desc)
+    require("intentdiff.keymaps").each(spec, function(lhs)
+      vim.keymap.set("n", lhs, fn, { buffer = bufnr, nowait = true, desc = desc })
+    end)
   end
   local function cursor_meta()
     if not (handle.winid and vim.api.nvim_win_is_valid(handle.winid)) then
@@ -303,47 +307,68 @@ function M.create(callbacks)
     end
     return handle.meta_at(vim.api.nvim_win_get_cursor(handle.winid)[1]) or {}
   end
-  map("<CR>", function()
+
+  local keys = require("intentdiff.config").options.keymaps or {}
+  local skm = keys.sidebar or {}
+  local vkm = keys.view or {}
+
+  map(skm.select, function()
     local m = cursor_meta()
     if m.kind == "file" then
       callbacks.on_select(m.group_i, m.file_i)
     elseif m.kind == "dir" then
-      callbacks.on_toggle_dir(m.group_i, m.dir_path)
+      callbacks.on_fold(m.group_i, m.dir_path, "toggle", false)
     elseif m.kind == "group" then
-      callbacks.on_toggle_group(m.group_i)
+      callbacks.on_fold(m.group_i, nil, "toggle", false)
     end
-  end)
-  for _, key in ipairs({ "za", "h", "l" }) do
-    map(key, function()
+  end, "intent-diff: open file / toggle intent")
+
+  --- A fold key acts on the directory under the cursor, or — on a title,
+  --- stats or file row — on the intent that row belongs to.
+  local function fold(action, recursive)
+    return function()
       local m = cursor_meta()
       if m.kind == "dir" then
-        callbacks.on_toggle_dir(m.group_i, m.dir_path)
+        callbacks.on_fold(m.group_i, m.dir_path, action, recursive)
       elseif m.group_i then
-        callbacks.on_toggle_group(m.group_i)
+        callbacks.on_fold(m.group_i, nil, action, recursive)
       end
-    end)
+    end
   end
-  local keys = require("intentdiff.config").options.keymaps or {}
-  if keys.toggle_all then
-    map(keys.toggle_all, function()
-      callbacks.on_toggle_all()
-    end)
-  end
-  if keys.toggle_sidebar then
-    map(keys.toggle_sidebar, function()
-      callbacks.on_toggle_sidebar()
-    end)
-  end
-  map("r", callbacks.on_reclassify)
-  map("q", callbacks.on_close)
-  map("<Tab>", callbacks.on_next_group)
-  map("<S-Tab>", callbacks.on_prev_group)
-  map("gf", function()
+  map(skm.fold_open, fold("open", false), "intent-diff: open fold")
+  map(skm.fold_open_recursive, fold("open", true), "intent-diff: open fold recursively")
+  map(skm.fold_close, fold("close", false), "intent-diff: close fold")
+  map(skm.fold_close_recursive, fold("close", true), "intent-diff: close fold recursively")
+  map(skm.fold_toggle, fold("toggle", false), "intent-diff: toggle fold")
+  map(skm.fold_toggle_recursive, fold("toggle", true), "intent-diff: toggle fold recursively")
+  map(skm.fold_open_all, function()
+    callbacks.on_fold_all("open")
+  end, "intent-diff: expand every intent")
+  map(skm.fold_close_all, function()
+    callbacks.on_fold_all("close")
+  end, "intent-diff: collapse every intent")
+  map(skm.fold_toggle_all, function()
+    callbacks.on_fold_all("toggle")
+  end, "intent-diff: expand or collapse every intent")
+
+  -- Lives in keymaps.view but is installed here too: once the sidebar is
+  -- hidden a sidebar-local key would be unreachable.
+  map(vkm.toggle_sidebar, function()
+    callbacks.on_toggle_sidebar()
+  end, "intent-diff: show/hide the sidebar")
+  map(skm.show_help, function()
+    require("intentdiff.keymap_help").toggle()
+  end, "intent-diff: toggle this help")
+  map(skm.reclassify, callbacks.on_reclassify, "intent-diff: re-classify")
+  map(skm.quit, callbacks.on_close, "intent-diff: close")
+  map(skm.next_group, callbacks.on_next_group, "intent-diff: next intent")
+  map(skm.prev_group, callbacks.on_prev_group, "intent-diff: previous intent")
+  map(skm.goto_file, function()
     local m = cursor_meta()
     if m.kind == "file" then
       callbacks.on_goto_file(m.group_i, m.file_i)
     end
-  end)
+  end, "intent-diff: open the real file")
 
   return handle
 end
