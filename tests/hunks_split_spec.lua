@@ -19,6 +19,91 @@ local function three_blocks()
   return lines
 end
 
+--- `count` blank-line-delimited blocks of `size` body lines each (size-1
+--- content lines plus the blank line that closes the block), followed by one
+--- final block of `tail` body lines.
+---
+--- Exists to hit the "fold a short remainder into the previous chunk" branch,
+--- which three_blocks() above cannot reach: with 30-line blocks and
+--- target_lines=40 the accumulator crosses the target on every second block
+--- and the run ends with acc empty, so the remainder branch never executes.
+local function blocks_then_tail(count, size, tail)
+  local lines = {}
+  local function block(n)
+    for i = 1, n - 1 do
+      lines[#lines + 1] = ("line%d"):format(#lines + 1)
+    end
+    lines[#lines + 1] = ""
+  end
+  for _ = 1, count do
+    block(size)
+  end
+  block(tail)
+  return lines
+end
+
+--- Body lines of `piece` (the "+"-prefixed source lines, header excluded).
+local function body_of(piece)
+  local body = {}
+  for line in piece.text:gmatch("(.-)\n") do
+    if not line:match("^@@") then
+      body[#body + 1] = line
+    end
+  end
+  return body
+end
+
+describe("hunks.split_added short-remainder fold-back", function()
+  -- 4 x 20 + 10 = 90 body lines. target_lines = 40, so the accumulator flushes
+  -- a 40-line chunk after blocks 2 and 4 and ends holding the 10-line tail —
+  -- shorter than target_lines/2 (20), so it must be appended to chunk 2 rather
+  -- than surviving as a third, stub chunk.
+  local function short_tail()
+    return blocks_then_tail(4, 20, 10)
+  end
+
+  it("folds a remainder shorter than half the target into the previous chunk", function()
+    local out = hunks.split_added(added_hunk("tail.lua", short_tail()),
+      { min_lines = 60, target_lines = 40 })
+    assert.equals(2, #out, "the 10-line tail must not become a chunk of its own")
+    assert.equals(40, #body_of(out[1]))
+    assert.equals(50, #body_of(out[2]), "the tail must be appended to the last chunk")
+    assert.equals(40, out[1].additions)
+    assert.equals(50, out[2].additions)
+    -- Ranges stay contiguous and end-exclusive across the fold-back.
+    assert.equals(1, out[1].modified.start_line)
+    assert.equals(41, out[1].modified.end_line)
+    assert.equals(41, out[2].modified.start_line)
+    assert.equals(91, out[2].modified.end_line)
+  end)
+
+  it("loses and duplicates no source line when the remainder is folded back", function()
+    local source = short_tail()
+    local out = hunks.split_added(added_hunk("tail.lua", source),
+      { min_lines = 60, target_lines = 40 })
+    local seen = {}
+    for _, piece in ipairs(out) do
+      for _, line in ipairs(body_of(piece)) do
+        seen[#seen + 1] = line:sub(2)
+      end
+    end
+    assert.same(source, seen)
+  end)
+
+  it("keeps a remainder of exactly half the target as its own chunk", function()
+    -- The other side of the same boundary (`#acc < target_lines / 2`): a
+    -- 20-line tail at target_lines = 40 is NOT short, so it stands alone.
+    -- Without this, the fold-back test above would also pass against an
+    -- implementation that folded back unconditionally.
+    local out = hunks.split_added(added_hunk("tail.lua", blocks_then_tail(4, 20, 20)),
+      { min_lines = 60, target_lines = 40 })
+    assert.equals(3, #out)
+    assert.equals(40, #body_of(out[1]))
+    assert.equals(40, #body_of(out[2]))
+    assert.equals(20, #body_of(out[3]))
+  end)
+end)
+
 describe("hunks.split_added", function()
   it("leaves a hunk shorter than min_lines whole", function()
     local h = added_hunk("small.lua", { "a", "b", "c" })
