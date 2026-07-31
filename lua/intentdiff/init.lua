@@ -159,6 +159,11 @@ end
 -- the already-opened tab/session (defined further down, alongside M.close).
 local close_entry
 
+-- Forward-declared: forget_entry (defined further down) tears down the hover
+-- timer, but the timer helper itself lives near apply_hover/schedule_hover,
+-- below forget_entry in this file.
+local stop_hover_timer
+
 --- Parse :IntentDiff args → collect opts. cb(collect_opts, base_for_view, target_for_view)
 --- `token` identifies the session opened by the caller, so the merge-base
 --- failure branch can close it — resolve_args no longer just notifies and
@@ -367,6 +372,9 @@ select_file = function(token, group_i, file_i, opts)
   local entry = sessions[token]
   if entry then
     entry.user_selected = true
+    -- The panes now show a file; the next hover onto a file row must be a
+    -- no-op rather than a restore of something older.
+    entry.hover_key = "file"
   end
   open_file(token, group_i, file_i, opts)
 end
@@ -502,6 +510,10 @@ local function forget_entry(token)
   end
   sessions[token] = nil
   stop_elapsed_timer(entry) -- no timer may outlive its session
+  stop_hover_timer(entry)
+  if entry.hover_augroup then
+    pcall(vim.api.nvim_del_augroup_by_id, entry.hover_augroup)
+  end
   require("intentdiff.classify").cancel(token) -- kill any in-flight provider
   require("intentdiff.navigation").detach(entry.sess.tabpage)
   return entry
@@ -545,6 +557,115 @@ local function ensure_tab_augroup()
           require("intentdiff.view").cleanup_tab_state(tabpage)
         end
       end
+    end,
+  })
+end
+
+--- A group restricted to the files under `dir_path`, so hovering a directory
+--- row previews only that subtree. Hunks are recomputed from the kept files so
+--- the preview's separators and totals stay consistent.
+local function subtree_group(group, dir_path)
+  local files, hunks = {}, {}
+  local prefix = dir_path .. "/"
+  for _, f in ipairs(group.files or {}) do
+    if f.path:sub(1, #prefix) == prefix then
+      files[#files + 1] = f
+      vim.list_extend(hunks, f.hunks or {})
+    end
+  end
+  return { title = dir_path, files = files, hunks = hunks }
+end
+
+--- Stop and clear `entry.hover_timer` if one is armed.
+stop_hover_timer = function(entry)
+  if entry and entry.hover_timer then
+    local timer = entry.hover_timer
+    entry.hover_timer = nil
+    pcall(function() timer:stop() end)
+    pcall(function() timer:close() end)
+  end
+end
+
+--- Act on the row the cursor has settled on. Identical consecutive targets are
+--- a no-op, so cursor jitter inside one wrapped group header costs nothing.
+local function apply_hover(token)
+  local entry = sessions[token]
+  if not entry or not entry.sidebar then
+    return
+  end
+  if not vim.api.nvim_win_is_valid(entry.sidebar.winid) then
+    return
+  end
+  local lnum = vim.api.nvim_win_get_cursor(entry.sidebar.winid)[1]
+  local m = entry.sidebar.meta_at(lnum)
+  if not m then
+    return
+  end
+  local view = require("intentdiff.view")
+  local key
+  if m.kind == "group" then
+    key = "g" .. m.group_i
+  elseif m.kind == "dir" then
+    key = ("d%d:%s"):format(m.group_i, m.dir_path)
+  elseif m.kind == "file" then
+    key = "file"
+  else
+    return
+  end
+  if entry.hover_key == key then
+    return
+  end
+  entry.hover_key = key
+
+  if m.kind == "file" then
+    -- Hovering a file row does NOT open that file: rendering every row the
+    -- cursor passes over would re-run codediff's diff for each one. It just
+    -- leaves the preview, restoring whatever the user last selected. <CR>
+    -- still selects.
+    view.restore(entry.sess)
+    return
+  end
+  local group = entry.model and entry.model.groups and entry.model.groups[m.group_i]
+  if not group then
+    return
+  end
+  view.show_preview(entry.sess, m.kind == "dir" and subtree_group(group, m.dir_path) or group)
+end
+
+--- Debounced CursorMoved handler on the sidebar buffer.
+local function schedule_hover(token)
+  local entry = sessions[token]
+  if not entry then
+    return
+  end
+  local debounce = require("intentdiff.config").options.preview.debounce_ms
+  stop_hover_timer(entry)
+  local timer = vim.uv.new_timer()
+  entry.hover_timer = timer
+  timer:start(debounce, 0, vim.schedule_wrap(function()
+    local current = sessions[token]
+    pcall(function() timer:stop() end)
+    pcall(function() timer:close() end)
+    if current and current.hover_timer == timer then
+      current.hover_timer = nil
+      apply_hover(token)
+    end
+  end))
+end
+
+--- Watch the sidebar's cursor, if previews are enabled.
+local function attach_hover(token)
+  if not require("intentdiff.config").options.preview.enabled then
+    return
+  end
+  local entry = sessions[token]
+  local group = vim.api.nvim_create_augroup("IntentDiffHover_" .. token, { clear = true })
+  entry.hover_augroup = group
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = group,
+    buffer = entry.sidebar.bufnr,
+    callback = function()
+      schedule_hover(token)
     end,
   })
 end
@@ -661,6 +782,7 @@ function M.open(argline)
   }
   sessions[token].model = flat_model({ hunks = {} }, "loading")
   sidebar.update(sessions[token].model)
+  attach_hover(token)
   vim.cmd("wincmd l") -- focus codediff's panes, right of the sidebar
 
   resolve_args(argline, git_root, token, function(collect_opts, base_rev, target_rev)
