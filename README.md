@@ -9,14 +9,18 @@ folded away. Rendering is delegated to
 adds grouping, a sidebar, and group-scoped navigation on top of it.
 
 ```
-▾ Rename UserService → AccountService   (4)
-  ├ account.ts  src/services/         M
-  └ routes.ts   src/api/              M
-▾ Add retry logic to HTTP client       (3)
-  └ client.ts   src/http/             M
-▸ Ungrouped                            (1)
-──────────────────────────────────────
-9/9 hunks · claude:haiku · 2.1s
+▾ Rename UserService → AccountService
+  4 hunks · 2 files  +58 -22
+  ▾ src/services
+   M  account.ts                            +40 -10
+   M  account_test.ts                       +18 -12
+▾ Add retry logic to HTTP client
+  3 hunks · 1 files  +30 -5
+  ▾ src/http
+   M  client.ts                             +30 -5
+▸ Ungrouped
+  1 hunks · 1 files  +3 -0
+9/9 hunks · claude:haiku
 ```
 
 The LLM never decides *what* changed, only how to *label* it: every hunk in
@@ -116,7 +120,11 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   context_lines = nil,
 
   -- Width (columns) of the sidebar split.
-  sidebar_width = 36,
+  sidebar_width = 40,
+
+  -- File icons from nvim-web-devicons (if installed) in the sidebar's file
+  -- tree. Silently omitted if the plugin isn't present, or set to false here.
+  icons = true,
 
   -- Auto-open the first file worth looking at instead of leaving codediff's
   -- diff panes empty until you press <CR>: the first file of the flat "All
@@ -135,13 +143,35 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
 
   -- Above this many hunks, classification is skipped entirely with a
   -- notice — the sidebar stays in flat file-list mode.
-  max_hunks = 400,
+  max_hunks = 600,
+
+  -- Added and untracked files arrive from git as a single whole-file hunk, so
+  -- they could only ever belong to one intent. Splitting them at blank-line
+  -- boundaries lets different parts of one new file land in different
+  -- intents, and makes the group fold filter meaningful for them (see "Added
+  -- and untracked files" below). Set enabled = false to restore one hunk per
+  -- added/untracked file.
+  added_file_split = {
+    enabled = true,
+    min_lines = 60,    -- files shorter than this stay a single hunk
+    target_lines = 40, -- approximate lines per sub-hunk once split
+  },
 
   -- Where classification results are cached, keyed by diff-text hash.
   cache_dir = vim.fn.stdpath("cache") .. "/intentdiff",
 
   -- Diagnostics log used by :IntentDiffLog (see "Diagnostics" below).
   log_file = vim.fn.stdpath("cache") .. "/intentdiff/intentdiff.log",
+
+  -- Whole-intent preview: resting the cursor on a group or directory row in
+  -- the sidebar shows that intent's complete diff in the diff panes, with a
+  -- separator per file (see "Previewing an intent" below).
+  preview = {
+    enabled = true,
+    debounce_ms = 120,  -- cursor settle time before the preview renders, so
+                         -- scrolling past rows doesn't thrash the panes
+    max_lines = 20000,  -- cap on preview length; the omitted count is stated
+  },
 }
 ```
 
@@ -247,23 +277,124 @@ Set `provider_opts.agentic = false` to turn this off and go back to a fully
 self-contained prompt (today's original behavior, and useful if you'd rather
 not have the model spend time/tokens shelling out).
 
+## Sidebar
+
+Each group renders as a wrapped title line (long LLM-generated titles wrap
+onto multiple lines rather than being truncated) followed by a stats line —
+`N hunks · M files` plus `+A -B` when the group has any additions/deletions.
+Below that, when the group is expanded, is a file tree: directories are their
+own rows, and a chain of directories with only one child at each level is
+compressed onto a single row (`src/services/api` instead of three nested
+`src` → `services` → `api` rows) — exactly the compression codediff itself
+uses for the same reason. File rows show a one-character status gutter (`A`,
+`M`, `D`, or `?` for untracked) and, when `icons = true` and
+[nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons) is
+installed, a file-type icon; both degrade silently (gutter letter still
+shows, icon just omitted) when devicons isn't present.
+
+`za`, `h`, and `l` are interchangeable collapse/expand keys: on a directory
+row they toggle that directory; on any other row in the group — a title
+line, the stats line, or even one of its file rows — they toggle the
+*enclosing group* instead, so standing on a file row and pressing `za`
+collapses the whole group it belongs to. `<CR>` behaves the same way on a
+group or directory row (toggles it) but additionally *selects* a file row,
+driving that file's diff into the panes.
+
+## Previewing an intent
+
+With `preview.enabled = true` (the default), simply moving the cursor onto a
+sidebar row — no key press needed — drives a preview into the diff panes
+after `preview.debounce_ms` of the cursor sitting still, so scrolling past
+several rows doesn't thrash the panes:
+
+- **A group row** (any of its title lines or its stats line) previews that
+  group's whole diff: every file it touches, each preceded by a `── path
+  status +A -B` separator line, in file-tree order.
+- **A directory row** previews just that subtree — the same rendering,
+  restricted to the files under that directory.
+- **A file row does *not* open that file.** Hovering it restores the panes to
+  whatever file was last *selected* (`<CR>`) — rendering a full diff for
+  every row the cursor happens to scroll past would be wasteful and
+  distracting. Press `<CR>` on a file row to actually open it.
+
+The preview is capped at `preview.max_lines`; a truncated preview's last line
+states how many more lines were omitted rather than silently cutting off.
+
+Inside the preview, `]c`/`[c` jump the cursor to the next/previous hunk
+header (no wraparound: at the first or last hunk they simply do nothing), and
+codediff's own layout-toggle key (`t` by default) flips the preview between
+inline and side-by-side exactly like it does for a normal diff — it restores
+the last-selected file, performs the ordinary layout toggle on it, and then
+re-renders the preview in the new layout. `q` closes the review tab from
+inside the preview too, same as from the sidebar.
+
+## Added and untracked files
+
+Added (git status `A`) and untracked (`??`) files render their real file
+contents in the diff panes — not a hunk-only fragment — since there is no
+"before" to diff against. When such a file is at least
+`added_file_split.min_lines` lines long, it's split into sub-hunks at
+blank-line boundaries (each roughly `added_file_split.target_lines` lines),
+so different parts of one new file can land in different intents; the pane
+then folds down to just the lines belonging to the currently open intent,
+the same as for an ordinary modified file. Set
+`added_file_split.enabled = false` to go back to one whole-file hunk per
+added/untracked file (no splitting, and therefore no folding within it).
+
+Deleted files are deliberately never fold-filtered — a deleted file always
+has exactly one hunk covering the entire file, so there is nothing to fold.
+
+## Highlights
+
+Every highlight group below is defined with `default = true`, so a
+definition you set — before or after `setup()`, and even across
+`:colorscheme` changes — always wins:
+
+| Group | Default link | Used for |
+|---|---|---|
+| `IntentDiffGroupTitle` | `Title` | A group's (wrapped) title text |
+| `IntentDiffGroupStats` | `Comment` | A group's `N hunks · M files` stats line |
+| `IntentDiffAdd` | `Added` | `+N` addition counts, and `+`-prefixed preview lines |
+| `IntentDiffDelete` | `Removed` | `-N` deletion counts, and `-`-prefixed preview lines |
+| `IntentDiffDirectory` | `Directory` | A directory row's name in the file tree |
+| `IntentDiffIndent` | `Comment` | The indentation before a nested tree row |
+| `IntentDiffStatusA` | `Added` | Status-gutter letter for an added file |
+| `IntentDiffStatusM` | `Changed` | Status-gutter letter for a modified file |
+| `IntentDiffStatusD` | `Removed` | Status-gutter letter for a deleted file |
+| `IntentDiffStatusUntracked` | `Added` | Status-gutter letter for an untracked file |
+| `IntentDiffPreviewFile` | `Title` | A preview's per-file `── path status +A -B` separator |
+| `IntentDiffPreviewHunk` | `Comment` | A preview's `@@ ... @@` hunk headers |
+| `IntentDiffFiller` | `Comment` | Filler rows padding the shorter side of a side-by-side preview |
+
+To override one, define it yourself (order relative to `setup()` doesn't
+matter):
+
+```lua
+vim.api.nvim_set_hl(0, "IntentDiffGroupTitle", { fg = "#c4a7e7", bold = true })
+```
+
 ## Keymaps
 
 **Sidebar:**
 
 | Key | Action |
 |---|---|
-| `<CR>` | Open partial diff for a file, or toggle a group under cursor |
-| `za` / `h` / `l` | Collapse/expand group under cursor |
+| `<CR>` | On a file row, select it and open its diff. On a group or directory row, toggle it. |
+| `za` / `h` / `l` | On a directory row, toggle that directory. Anywhere else in the group (title, stats line, or a file row), toggle the enclosing group. |
 | `r` | Re-classify (bypasses cache) |
 | `gf` | Open the real file at the group's first hunk, closing the review tab |
 | `<Tab>` / `<S-Tab>` | Jump to next / previous group header |
 | `q` | Close the review tab |
 
+Resting the cursor on a row (no key press) also drives a live preview into
+the diff panes — see "Previewing an intent" above.
+
 **Diff panes:** `]c` / `[c` (and codediff's own hunk keys) are group-scoped —
 they move only through the current group's hunks; at a file's last hunk in
 the group they roll over to the group's next file. codediff's inline↔side-by-side
-toggle keeps working; the fold filter re-applies after every toggle.
+toggle keeps working; the fold filter re-applies after every toggle. The same
+toggle key works inside a whole-intent preview too — see "Previewing an
+intent" above.
 
 ## Diagnostics
 
