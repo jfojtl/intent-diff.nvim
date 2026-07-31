@@ -329,6 +329,28 @@ local function group_file(model, group_i, file_i)
   return group, file_entry
 end
 
+--- Move focus to the diff pane of `tabpage`. Prefers the modified side; falls
+--- back to the original, which is the only populated side for a deleted file.
+--- @return boolean whether focus moved
+local function focus_diff_pane(tabpage)
+  local session = require("intentdiff.view").get_session(tabpage)
+  if not session then
+    return false
+  end
+  -- Deliberately NOT `ipairs({ modified_win, original_win })`: ipairs stops at
+  -- the first nil, and a deleted file populates only the original side. That
+  -- exact nil-hole has already shipped twice in this codebase.
+  local win = (session.modified_win and vim.api.nvim_win_is_valid(session.modified_win)
+      and session.modified_win)
+    or (session.original_win and vim.api.nvim_win_is_valid(session.original_win)
+      and session.original_win)
+  if not win then
+    return false
+  end
+  vim.api.nvim_set_current_win(win)
+  return true
+end
+
 --- Show `file_entry` (group_i/file_i in the CURRENT model) in the diff panes
 --- and wire up navigation ctx. Shared by manual/navigation-driven selection
 --- (select_file, below — which also marks entry.user_selected) and auto-open
@@ -337,12 +359,19 @@ end
 --- opts.auto: true only for auto-open call sites. When true, on_ready
 --- re-checks entry.user_selected — which may have flipped true while
 --- show_file() was asynchronously in flight, if the user made their own
---- selection in the meantime — and bails out entirely rather than clobbering
---- the navigation ctx or focus the user's own selection now owns. It also
---- returns focus to the sidebar once the auto-opened content is ready, so the
---- user can keep navigating group/file rows immediately (see task README /
---- report). Manual selection (opts.auto unset) leaves focus wherever
---- codediff's own render left it, unchanged from before this feature.
+--- selection in the meantime. If that newer selection landed on a DIFFERENT
+--- file, on_ready bails out entirely rather than clobbering the navigation
+--- ctx or focus the user's own selection now owns. But if it landed on this
+--- SAME file (a select_file same_as_shown short-circuit, which skips its own
+--- show_file() call), this auto-open's on_ready is the only place left that
+--- will ever attach navigation for it, so it still attaches — just without
+--- touching focus, which the newer selection already decided (see
+--- `superseded` below). It also returns focus to the sidebar once the
+--- auto-opened content is ready (when NOT superseded), so the user can keep
+--- navigating group/file rows immediately (see task README / report).
+--- Manual selection (opts.auto unset) leaves focus wherever codediff's own
+--- render left it, unless opts.focus_diff or opts.restore_focus says
+--- otherwise.
 local function open_file(token, group_i, file_i, opts)
   local entry = sessions[token]
   if not entry then
@@ -360,12 +389,37 @@ local function open_file(token, group_i, file_i, opts)
       if not current then
         return -- closed while show_file() was in flight
       end
-      if opts and opts.auto and current.user_selected then
-        return -- user selected something else while this auto-open was in flight
-      end
       -- Read sess.tabpage fresh: show_file() may have just reconciled it to
       -- the tab codediff actually created (see module-level note above).
       local tabpage = current.sess.tabpage
+      local superseded = opts and opts.auto and current.user_selected
+      if superseded then
+        -- The user made their own selection while this auto-open was in
+        -- flight. If it landed on a DIFFERENT file, this render's navigation
+        -- ctx is stale — attaching it would point ]c/[c at content no longer
+        -- on screen, so bail entirely, as before.
+        --
+        -- But select_file's same_as_shown short-circuit (task 2) can also
+        -- match THIS EXACT auto-opened file — same path, same hunk
+        -- objects — and skip its own show_file() call because the panes
+        -- already agreed. When that happens, THIS on_ready is the only place
+        -- that will ever call navigation.attach for it: codediff reinstalls
+        -- its own default ]c/[c as the final step of the very cd.view.update
+        -- this render kicked off, so an eager attach attempt from
+        -- select_file's short-circuit (which runs synchronously, before that
+        -- update settles) loses the race and gets clobbered right back.
+        -- Bailing unconditionally here left ]c/[c pointing at codediff's own
+        -- all-hunks version instead of ours — caught by
+        -- integration_spec.lua's "keeps ]c group-scoped" test. Compare by
+        -- identity against the freshest view._last_shown, which nothing but
+        -- a NEWER show_file() call can move on, to tell the two cases apart.
+        local view = require("intentdiff.view")
+        local still_current = view._last_shown[tabpage]
+            and view._last_shown[tabpage].file_entry == file_entry
+        if not still_current then
+          return
+        end
+      end
       navigation.attach(tabpage, {
         model = current.model,
         group_i = group_i,
@@ -380,11 +434,20 @@ local function open_file(token, group_i, file_i, opts)
         local h = opts.jump == "last" and file_entry.hunks[#file_entry.hunks] or file_entry.hunks[1]
         pcall(vim.api.nvim_win_set_cursor, win, { h.modified.start_line, 0 })
       end
+      if opts and opts.focus_diff then
+        focus_diff_pane(tabpage)
+      end
       -- `auto` and `restore_focus` are deliberately separate flags. `auto`
       -- ALSO means "bail if the user has selected something" (see the guard
       -- above), and a hover-open sets user_selected itself — reusing `auto`
       -- for it would make every hover-open bail before rendering.
-      if opts and (opts.auto or opts.restore_focus)
+      --
+      -- `not superseded`: an auto-open that survived the guard above only
+      -- because it happens to match the user's own newer selection (see
+      -- still_current) must NOT then yank focus back to the sidebar — that
+      -- newer selection (a select_file short-circuit) already decided where
+      -- focus belongs (e.g. focus_diff_pane, just above, for <CR>).
+      if not superseded and opts and (opts.auto or opts.restore_focus)
           and vim.api.nvim_tabpage_is_valid(tabpage)
           and current.sidebar and current.sidebar.winid
           and vim.api.nvim_win_is_valid(current.sidebar.winid) then
@@ -392,23 +455,6 @@ local function open_file(token, group_i, file_i, opts)
       end
     end,
   })
-end
-
---- Manual (sidebar <CR>) or ]c/[c-driven selection. Marks entry.user_selected
---- so auto-open never overrides the user's own choice again for this
---- session — see open_file's opts.auto handling and auto_open_first below.
-select_file = function(token, group_i, file_i, opts)
-  local entry = sessions[token]
-  if entry then
-    entry.user_selected = true
-    -- The panes now show a file; the next hover onto a file row must be a
-    -- no-op rather than a restore of something older.
-    -- Per-file, matching apply_hover's key: a flat "file" key made every file
-    -- row the same hover target, which was right when they all did the same
-    -- thing and is wrong now that each renders its own diff.
-    entry.hover_key = ("f%d:%d"):format(group_i, file_i)
-  end
-  open_file(token, group_i, file_i, opts)
 end
 
 --- True when `file_entry`'s hunks are exactly (same objects, same order)
@@ -434,6 +480,38 @@ local function same_as_shown(tabpage, file_entry)
     end
   end
   return true
+end
+
+--- Manual (sidebar <CR>) or ]c/[c-driven selection. Marks entry.user_selected
+--- so auto-open never overrides the user's own choice again for this
+--- session — see open_file's opts.auto handling and auto_open_first below.
+select_file = function(token, group_i, file_i, opts)
+  local entry = sessions[token]
+  if entry then
+    entry.user_selected = true
+    -- The panes now show a file; the next hover onto a file row must be a
+    -- no-op rather than a restore of something older.
+    -- Per-file, matching apply_hover's key: a flat "file" key made every file
+    -- row the same hover target, which was right when they all did the same
+    -- thing and is wrong now that each renders its own diff.
+    entry.hover_key = ("f%d:%d"):format(group_i, file_i)
+  end
+  -- <CR> on the file the cursor already rendered is a pure focus change: the
+  -- panes are already correct, so re-rendering would spend a codediff diff to
+  -- produce identical output.
+  if opts and opts.focus_diff and entry then
+    local _, file_entry = group_file(entry.model, group_i, file_i)
+    -- Navigation (]c/[c) for this file is already attached, or will be: if a
+    -- same-file auto-open is still in flight (same_as_shown true, but that
+    -- render's own on_ready hasn't run yet), open_file's `superseded` /
+    -- `still_current` handling (see its on_ready) still attaches it once
+    -- ready — this short-circuit only needs to move focus.
+    if file_entry and same_as_shown(entry.sess.tabpage, file_entry) then
+      focus_diff_pane(entry.sess.tabpage)
+      return
+    end
+  end
+  open_file(token, group_i, file_i, opts)
 end
 
 --- Auto-open the first file of the first group, when auto_open is enabled
@@ -789,7 +867,10 @@ function M.open(argline)
   ensure_tab_augroup()
 
   local sidebar = require("intentdiff.sidebar").create({
-    on_select = function(gi, fi) select_file(token, gi, fi) end,
+    -- <CR> renders if needed and then moves focus INTO the diff, so the user
+    -- can scroll and search it. The cursor alone renders in place and leaves
+    -- focus in the sidebar for continued browsing.
+    on_select = function(gi, fi) select_file(token, gi, fi, { focus_diff = true }) end,
     on_toggle_group = function(gi)
       local entry = sessions[token]
       local g = entry and entry.model.groups[gi]

@@ -558,4 +558,86 @@ describe("sidebar hover preview", function()
       assert.equals(before and before.file_entry.path, after and after.file_entry.path)
     end)
   end)
+
+  describe("<CR> jumps into the diff", function()
+    local function first_file_row(entry)
+      for l = 1, vim.api.nvim_buf_line_count(entry.sidebar.bufnr) do
+        local m = entry.sidebar.meta_at(l)
+        if m and m.kind == "file" then return l end
+      end
+    end
+
+    local function press_cr(entry, lnum)
+      vim.api.nvim_set_current_win(entry.sidebar.winid)
+      vim.api.nvim_win_set_cursor(entry.sidebar.winid, { lnum, 0 })
+      vim.api.nvim_feedkeys(
+        vim.api.nvim_replace_termcodes("<CR>", true, false, true), "x", false)
+    end
+
+    it("moves focus into the diff pane without re-rendering an already-shown file", function()
+      local tab, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
+      local lnum = first_file_row(entry)
+      local m = entry.sidebar.meta_at(lnum)
+      local path = entry.model.groups[m.group_i].files[m.file_i].path
+      hover(entry, lnum)
+      -- Wait for THIS row's file specifically, not just "some" _last_shown:
+      -- auto_open (on by default) already renders group 1/file 1 the instant
+      -- the session goes ready, and in this fixture that is "b.lua" while
+      -- first_file_row's row (nested under the "src" dir header) is
+      -- "src/a.lua" — a bare `_last_shown[tab] ~= nil` check is already true
+      -- from auto-open before the hover's own debounce timer ever fires, so
+      -- it would let press_cr race ahead of hover's render instead of
+      -- catching the already-shown short-circuit this test exists to verify.
+      assert.truthy(helpers.wait_for(function()
+        local shown = require("intentdiff.view")._last_shown[tab]
+        return shown and shown.file_entry.path == path or nil
+      end, 10000))
+      -- _last_shown's path flips synchronously at the TOP of show_file, before
+      -- codediff has actually swapped session.modified_bufnr onto the new
+      -- file's diff buffer (that happens off a callback show_file's own
+      -- on_ready — here, hover's restore_focus — only runs after). Also wait
+      -- for focus to land back on the sidebar (hover's open_file call passes
+      -- restore_focus = true) so "before" is captured once the render is
+      -- actually settled, not mid-flight.
+      assert.truthy(helpers.wait_for(function()
+        return vim.api.nvim_get_current_win() == entry.sidebar.winid or nil
+      end, 10000), "hover's render never settled (focus never returned to the sidebar)")
+      local before = require("intentdiff.view").get_session(tab).modified_bufnr
+
+      press_cr(entry, lnum)
+      vim.wait(500, function() return false end, 50)
+
+      local session = require("intentdiff.view").get_session(tab)
+      assert.equals(before, session.modified_bufnr, "already-shown file must not re-render")
+      -- Focus-change timing depends on which path was taken: the short-circuit
+      -- moves focus synchronously inside select_file, but if this assertion
+      -- ever runs against a real render instead, on_ready's focus_diff_pane
+      -- call is asynchronous — wait rather than assert bare-equals immediately.
+      assert.truthy(helpers.wait_for(function()
+        return session.modified_win == vim.api.nvim_get_current_win() or nil
+      end, 10000))
+    end)
+
+    it("renders and focuses a file that was not shown yet", function()
+      local tab, entry = open_ready({
+        preview = { enabled = true, debounce_ms = 10, hover_opens_files = false },
+      })
+      local lnum = first_file_row(entry)
+      local m = entry.sidebar.meta_at(lnum)
+      local path = entry.model.groups[m.group_i].files[m.file_i].path
+
+      press_cr(entry, lnum)
+      assert.truthy(helpers.wait_for(function()
+        local s = require("intentdiff.view")._last_shown[tab]
+        return s and s.file_entry.path == path or nil
+      end, 10000))
+      local session = require("intentdiff.view").get_session(tab)
+      -- _last_shown is set synchronously at the top of show_file, strictly
+      -- BEFORE show_file's on_ready moves focus (see open_file's opts.focus_diff
+      -- handling) — asserting focus immediately after the wait above is racy.
+      assert.truthy(helpers.wait_for(function()
+        return session.modified_win == vim.api.nvim_get_current_win() or nil
+      end, 10000))
+    end)
+  end)
 end)
