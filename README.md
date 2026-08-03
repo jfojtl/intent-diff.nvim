@@ -271,8 +271,9 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       fold_toggle_all = false,
     },
     -- Review comments. Cross-surface by nature: an intent comment is added
-    -- from a sidebar group row, a line comment from a diff pane, and both
-    -- surfaces need the export keys — so this is installed on BOTH, not one.
+    -- from a sidebar group row, a line comment from a diff pane or a
+    -- whole-intent preview row, and every surface needs the export keys — so
+    -- this is installed on all three, not one.
     comments = {
       add_comment = "<localleader>cc", -- pick the type in the popup
       add_note = "<localleader>cn",
@@ -494,6 +495,33 @@ the last-selected file, performs the ordinary layout toggle on it, and then
 re-renders the preview in the new layout. `q` closes the review tab from
 inside the preview too, same as from the sidebar.
 
+### Commenting on a preview
+
+The preview takes comments, with the same keys and the same popup as a real
+file diff — looking at an intent and commenting on it is one thing, not two.
+Each body row of the preview knows which file, line and side it displays, so a
+comment made there is stored as an ordinary `(file, line, side)` record: there
+is nothing "preview" about it in the store, on disk, or in the export. Comment
+on an intent, then open the file — the box is already there, on the same line;
+comment in the file, then hover its intent — it is there too.
+
+What still refuses, and why:
+
+- **A `── path` separator, a `@@` hunk header, a side-by-side filler row and
+  the truncation summary line.** These display no line of any file, so there
+  is nothing to attach to. The refusal says so and names the fix.
+- **A visual range covering two files.** A comment records one file; select
+  within one file's diff instead. A range *inside* one file works, and a range
+  in the inline layout takes its side from its first `+`/`-`/context row.
+- **`]n` / `[n`** stay refused in a preview, as does the comment list picker's
+  jump — the list opens the real file rather than jumping inside the preview.
+
+File-level and whole-intent comments are not drawn in a preview (they hang off
+a file's line 1 and off a sidebar row respectively, neither of which the
+preview has), and a comment whose line falls outside what the preview renders
+— another intent's file, or past `preview.max_lines` — simply isn't drawn
+there. In every case the comment still exists and still exports.
+
 ## Review comments
 
 Put comments directly on a diff, in the style of
@@ -520,10 +548,13 @@ cycled with `<Tab>` in the popup, and reachable directly without it:
 Which *shape* of comment one of these produces depends on where the cursor
 is, not on which key was pressed:
 
-- **Line** — cursor on a line in a diff pane.
-- **Range** — a visual selection (`'<`/`'>`) in a diff pane.
+- **Line** — cursor on a line in a diff pane, or on a body row of a
+  whole-intent preview (see "Commenting on a preview" above).
+- **Range** — a visual selection (`'<`/`'>`) in a diff pane, or within one
+  file's rows of a preview.
 - **File-level** — `<localleader>cf` (`add_file_comment`) in a diff pane, or
-  on a sidebar **file** row.
+  on a sidebar **file** row. In a preview it applies to the file the cursor's
+  row belongs to.
 - **Whole-intent** — `<localleader>cf`, or in fact any of the five add keys
   above, on a sidebar **group** row: there is no line to attach to there, so
   every add action produces an intent comment. This is the only case where
@@ -540,7 +571,9 @@ A comment's side is derived from which window the cursor is in when it's
 created — the original pane → `"old"`, the modified pane → `"new"`. Inline
 layout only ever has one window (the modified buffer; deletions render as
 virtual lines), so **an old-side comment can only be created in side-by-side
-layout.**
+layout** — except in a whole-intent preview, where the side comes from the row
+itself: a `-` row addresses the old side even in the inline preview, because
+that render carries the removed lines as real buffer lines.
 
 Once created, it renders whenever the original pane is visible — but
 deliberately not in inline layout. This is not a bug to route around: inline
@@ -793,10 +826,10 @@ the sidebar is hidden, the toggle works even when codediff's own layout-toggle
 key is disabled. Both work inside a whole-intent preview too — see "Previewing
 an intent" above.
 
-**Comments:** cross-surface by nature, installed on both the diff panes and
-the sidebar — an intent comment is added from a sidebar group row, a line
-comment from a pane, and both surfaces need the export keys (see "Review
-comments" above).
+**Comments:** cross-surface by nature, installed on the diff panes, the
+whole-intent preview buffers and the sidebar — an intent comment is added from
+a sidebar group row, a line comment from a pane or a preview row, and every
+surface needs the export keys (see "Review comments" above).
 
 | Key | Action |
 |---|---|

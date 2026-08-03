@@ -170,6 +170,219 @@ describe("preview.render side-by-side", function()
   end)
 end)
 
+-- The row → (file, line, side) map that makes the preview commentable.
+--
+-- These fixtures go through `hunks.parse` rather than hand-writing hunk
+-- records: the map is computed from `hunk.original/modified.start_line`, and a
+-- hand-written record whose ranges disagree with its own `@@` header (as the
+-- fixture at the top of this file's do) would let a wrong implementation pass.
+describe("preview.render line mapping", function()
+  local hunks = require("intentdiff.hunks")
+
+  --- A group built from real unified-diff text, so headers and ranges agree.
+  local function group_from(diff)
+    local hs, files = hunks.parse(diff)
+    local by_path = {}
+    for _, f in ipairs(files) do
+      f.hunks = {}
+      by_path[f.path] = f
+    end
+    for _, h in ipairs(hs) do
+      table.insert(by_path[h.file].hunks, h)
+    end
+    return { title = "T", hunks = hs, files = files }
+  end
+
+  --- Two files. The SECOND one's hunk starts at line 120 (old) / 140 (new) —
+  --- far from 1 and from each other, so a dropped per-hunk offset, a reused
+  --- old counter or an off-by-one is caught rather than masked by small
+  --- numbers that happen to coincide.
+  local DIFF = table.concat({
+    "diff --git a/src/auth.lua b/src/auth.lua",
+    "@@ -1,3 +1,4 @@",
+    " keep",
+    "-old",
+    "+new",
+    "+extra",
+    "diff --git a/zz/late.lua b/zz/late.lua",
+    "@@ -120,3 +140,3 @@",
+    " ctx a",
+    "-gone",
+    "+arrived",
+    " ctx b",
+    "",
+  }, "\n")
+
+  --- The single row of `pane` whose text is exactly `text`.
+  local function row_of(pane, text)
+    local found
+    for i, l in ipairs(pane.lines) do
+      if l == text then
+        assert.is_nil(found, "ambiguous row for " .. text)
+        found = i
+      end
+    end
+    assert.truthy(found, "no row for " .. text)
+    return found
+  end
+
+  describe("inline", function()
+    local pane
+    before_each(function()
+      pane = preview.render(group_from(DIFF), "inline", {}).modified
+    end)
+
+    it("maps a - row to the old side and a + row to the new side", function()
+      assert.same({ file = "src/auth.lua", line = 2, side = "old" },
+        preview.target_at(pane, row_of(pane, "-old")))
+      assert.same({ file = "src/auth.lua", line = 2, side = "new" },
+        preview.target_at(pane, row_of(pane, "+new")))
+      assert.same({ file = "src/auth.lua", line = 3, side = "new" },
+        preview.target_at(pane, row_of(pane, "+extra")))
+    end)
+
+    it("maps a context row to the new side", function()
+      assert.same({ file = "src/auth.lua", line = 1, side = "new" },
+        preview.target_at(pane, row_of(pane, " keep")))
+    end)
+
+    it("maps separators and @@ headers to nothing", function()
+      local sep, header
+      for i, l in ipairs(pane.lines) do
+        if l:find("src/auth.lua", 1, true) then sep = i end
+        if l == "@@ -1,3 +1,4 @@" then header = i end
+      end
+      assert.is_nil(preview.target_at(pane, sep))
+      assert.is_nil(preview.target_at(pane, header))
+    end)
+
+    -- The load-bearing one: exact numbers for a file whose hunk starts high.
+    it("counts each hunk from ITS OWN @@ start, not from the buffer row", function()
+      assert.same({ file = "zz/late.lua", line = 140, side = "new" },
+        preview.target_at(pane, row_of(pane, " ctx a")))
+      assert.same({ file = "zz/late.lua", line = 121, side = "old" },
+        preview.target_at(pane, row_of(pane, "-gone")))
+      assert.same({ file = "zz/late.lua", line = 141, side = "new" },
+        preview.target_at(pane, row_of(pane, "+arrived")))
+      -- Context consumes a line on BOTH sides: getting that wrong leaves this
+      -- at 141.
+      assert.same({ file = "zz/late.lua", line = 142, side = "new" },
+        preview.target_at(pane, row_of(pane, " ctx b")))
+    end)
+  end)
+
+  describe("side-by-side", function()
+    local rendered
+    before_each(function()
+      rendered = preview.render(group_from(DIFF), "side-by-side", {})
+    end)
+
+    it("addresses old-side lines in the original pane", function()
+      local pane = rendered.original
+      assert.same({ file = "src/auth.lua", line = 2, side = "old" },
+        preview.target_at(pane, row_of(pane, "old")))
+      assert.same({ file = "src/auth.lua", line = 1, side = "old" },
+        preview.target_at(pane, row_of(pane, "keep")))
+    end)
+
+    it("addresses new-side lines in the modified pane", function()
+      local pane = rendered.modified
+      assert.same({ file = "src/auth.lua", line = 2, side = "new" },
+        preview.target_at(pane, row_of(pane, "new")))
+      assert.same({ file = "src/auth.lua", line = 3, side = "new" },
+        preview.target_at(pane, row_of(pane, "extra")))
+    end)
+
+    it("counts each hunk from ITS OWN @@ start, per pane", function()
+      assert.same({ file = "zz/late.lua", line = 120, side = "old" },
+        preview.target_at(rendered.original, row_of(rendered.original, "ctx a")))
+      assert.same({ file = "zz/late.lua", line = 121, side = "old" },
+        preview.target_at(rendered.original, row_of(rendered.original, "gone")))
+      assert.same({ file = "zz/late.lua", line = 122, side = "old" },
+        preview.target_at(rendered.original, row_of(rendered.original, "ctx b")))
+      assert.same({ file = "zz/late.lua", line = 140, side = "new" },
+        preview.target_at(rendered.modified, row_of(rendered.modified, "ctx a")))
+      assert.same({ file = "zz/late.lua", line = 141, side = "new" },
+        preview.target_at(rendered.modified, row_of(rendered.modified, "arrived")))
+      assert.same({ file = "zz/late.lua", line = 142, side = "new" },
+        preview.target_at(rendered.modified, row_of(rendered.modified, "ctx b")))
+    end)
+
+    it("maps a filler row to nothing", function()
+      -- "+extra" has no counterpart, so the original pane carries a filler
+      -- opposite it.
+      local row = row_of(rendered.modified, "extra")
+      assert.equals("", rendered.original.lines[row])
+      assert.is_nil(preview.target_at(rendered.original, row))
+      assert.same({ file = "src/auth.lua", line = 3, side = "new" },
+        preview.target_at(rendered.modified, row))
+    end)
+
+    it("maps separators and @@ headers to nothing in both panes", function()
+      for _, pane in ipairs({ rendered.original, rendered.modified }) do
+        for i, l in ipairs(pane.lines) do
+          if l:find("^──") or l:find("^@@") then
+            assert.is_nil(preview.target_at(pane, i))
+          end
+        end
+      end
+    end)
+  end)
+
+  describe("rows_for (the inverse direction)", function()
+    it("finds the row a comment's (file, line, side) renders on", function()
+      local pane = preview.render(group_from(DIFF), "inline", {}).modified
+      local rows = preview.rows_for(pane,
+        { file = "zz/late.lua", line = 141, side = "new" })
+      assert.equals(1, #rows)
+      assert.equals("+arrived", pane.lines[rows[1]])
+    end)
+
+    it("agrees with target_at for every mapped row", function()
+      local pane = preview.render(group_from(DIFF), "inline", {}).modified
+      for row = 1, #pane.lines do
+        local t = preview.target_at(pane, row)
+        if t then
+          assert.same({ row }, preview.rows_for(pane, t),
+            "row " .. row .. " disagrees with its own target")
+        end
+      end
+    end)
+
+    it("spans every row of a range comment", function()
+      local pane = preview.render(group_from(DIFF), "inline", {}).modified
+      local rows = preview.rows_for(pane,
+        { file = "src/auth.lua", line = 1, line_end = 3, side = "new" })
+      assert.equals(3, #rows)
+      assert.same({ " keep", "+new", "+extra" },
+        { pane.lines[rows[1]], pane.lines[rows[2]], pane.lines[rows[3]] })
+    end)
+
+    it("answers nothing for a file the preview does not show", function()
+      local pane = preview.render(group_from(DIFF), "inline", {}).modified
+      assert.same({}, preview.rows_for(pane,
+        { file = "elsewhere.lua", line = 2, side = "new" }))
+    end)
+
+    it("answers nothing for a line past the truncation cut", function()
+      local pane = preview.render(group_from(DIFF), "inline", { max_lines = 4 }).modified
+      assert.equals(4, #pane.lines)
+      assert.same({}, preview.rows_for(pane,
+        { file = "zz/late.lua", line = 141, side = "new" }))
+      for row = 1, #pane.lines do
+        local t = preview.target_at(pane, row)
+        assert.is_true(t == nil or pane.lines[row]:find("more line", 1, true) == nil)
+      end
+    end)
+
+    it("answers nothing for a file-level or intent comment", function()
+      local pane = preview.render(group_from(DIFF), "inline", {}).modified
+      assert.same({}, preview.rows_for(pane, { file = "src/auth.lua", line = 0 }))
+      assert.same({}, preview.rows_for(pane, { intent_title = "T" }))
+    end)
+  end)
+end)
+
 describe("preview.render limits", function()
   it("truncates both panes identically and says so", function()
     local body = {}

@@ -154,6 +154,63 @@ local function nudge_topfill(bufnr, box_lines)
   end
 end
 
+--- Draw `c` across `rows` (0-indexed, ascending, at least one): sign and line
+--- highlight on the first, line highlight on the rest, the box hanging off the
+--- last.
+---
+--- The ONE definition of how a line/range comment is painted, shared by the
+--- file-diff path (a contiguous, clamped span) and the whole-intent preview
+--- (the rows its map says the comment's real lines landed on, which need not
+--- be contiguous — a file separator can sit inside a range). Duplicating it
+--- per surface is how the renderer and the action layer came to disagree once
+--- already.
+local function draw_rows(bufnr, c, rows)
+  local n = #rows
+  if n == 0 then
+    return
+  end
+  local info = type_info(c.type)
+  local sign_hl, line_hl = hl.comment_groups(c.type)
+  local box = M.build_box(c.text, info.name, sign_hl)
+  if n == 1 then
+    pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, rows[1], 0, {
+      sign_text = info.icon,
+      sign_hl_group = sign_hl,
+      line_hl_group = line_hl,
+      virt_lines = box,
+    })
+    return
+  end
+  pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, rows[1], 0, {
+    sign_text = info.icon,
+    sign_hl_group = sign_hl,
+    line_hl_group = line_hl,
+  })
+  for i = 2, n - 1 do
+    pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, rows[i], 0, { line_hl_group = line_hl })
+  end
+  pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, rows[n], 0, {
+    line_hl_group = line_hl,
+    virt_lines = box,
+  })
+end
+
+--- Draw a file-level comment's box above line 1.
+local function draw_file_level(bufnr, c)
+  local info = type_info(c.type)
+  local sign_hl = hl.comment_groups(c.type)
+  local box = M.build_box(c.text, info.name, sign_hl)
+  local ok = pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, 0, 0, {
+    sign_text = info.icon,
+    sign_hl_group = sign_hl,
+    virt_lines = box,
+    virt_lines_above = true,
+  })
+  if ok then
+    nudge_topfill(bufnr, #box)
+  end
+end
+
 --- Clear and re-render every comment for `file` on `side` into `bufnr`, from
 --- `store` — the store of the review this buffer belongs to.
 function M.render_buffer(store, bufnr, file, side)
@@ -165,46 +222,18 @@ function M.render_buffer(store, bufnr, file, side)
   local last = vim.api.nvim_buf_line_count(bufnr)
 
   for _, c in ipairs(store.get_for_file(file, side)) do
-    local info = type_info(c.type)
-    local sign_hl, line_hl = hl.comment_groups(c.type)
-    local box = M.build_box(c.text, info.name, sign_hl)
-
     if (c.line or 0) == 0 then
-      local ok = pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, 0, 0, {
-        sign_text = info.icon,
-        sign_hl_group = sign_hl,
-        virt_lines = box,
-        virt_lines_above = true,
-      })
-      if ok then
-        nudge_topfill(bufnr, #box)
-      end
+      draw_file_level(bufnr, c)
     else
       -- A persisted comment can outlive the lines it pointed at (in `line`,
       -- `line_end`, or both); clamp_rows clamps rather than dropping it, so
       -- it stays visible and exportable.
       local first, final = clamp_rows(c, last)
-      if final == first then
-        pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, first, 0, {
-          sign_text = info.icon,
-          sign_hl_group = sign_hl,
-          line_hl_group = line_hl,
-          virt_lines = box,
-        })
-      else
-        pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, first, 0, {
-          sign_text = info.icon,
-          sign_hl_group = sign_hl,
-          line_hl_group = line_hl,
-        })
-        for row = first + 1, final - 1 do
-          pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, row, 0, { line_hl_group = line_hl })
-        end
-        pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, final, 0, {
-          line_hl_group = line_hl,
-          virt_lines = box,
-        })
+      local rows = {}
+      for row = first, final do
+        rows[#rows + 1] = row
       end
+      draw_rows(bufnr, c, rows)
     end
   end
 end
@@ -268,6 +297,103 @@ function M.align(store, orig_buf, mod_buf, file)
   end
 end
 
+-- ------------------------------------------- the whole-intent preview --
+
+--- Every line/range comment `store` holds, paired with the rows of `pane` it
+--- lands on. Rows come from `preview.rows_for`, the inverse of the very map
+--- the cursor is resolved through — so a comment is drawn exactly where
+--- commenting again would land, and nowhere else.
+---
+--- Comments whose lines are not in this render (another intent's files, or
+--- past `preview.max_lines`) yield no rows and are skipped: they still exist,
+--- still export, and must not error here. File-level and intent comments
+--- address no line and are not drawn in a preview at all.
+--- @return table[] { comment, rows } — rows 1-indexed, ascending
+local function preview_placements(store, pane)
+  local out = {}
+  local preview = require("intentdiff.preview")
+  for _, c in ipairs(store.get_all()) do
+    local rows = preview.rows_for(pane, c)
+    if #rows > 0 then
+      out[#out + 1] = { comment = c, rows = rows }
+    end
+  end
+  return out
+end
+
+--- Clear and re-render `store`'s comments into one preview pane buffer.
+function M.render_preview_buffer(store, bufnr, pane)
+  if not (store and bufnr and vim.api.nvim_buf_is_valid(bufnr) and pane) then
+    return
+  end
+  vim.api.nvim_buf_clear_namespace(bufnr, M.ns, 0, -1)
+  remember(store, bufnr)
+  for _, placement in ipairs(preview_placements(store, pane)) do
+    local rows0 = {}
+    for i, row in ipairs(placement.rows) do
+      rows0[i] = row - 1
+    end
+    draw_rows(bufnr, placement.comment, rows0)
+  end
+end
+
+--- Blank-line padding between two preview panes, so a box on one side does not
+--- slide the other out of scroll sync. The preview's own alignment already
+--- guarantees equal line counts; this keeps that true once boxes are drawn.
+---
+--- Keyed on preview ROWS rather than on file lines (which is what M.align
+--- does): the two panes show the same rows, so the comparison is row by row.
+local function align_preview(store, panes)
+  for _, entry in ipairs(panes) do
+    if vim.api.nvim_buf_is_valid(entry.bufnr) then
+      pcall(vim.api.nvim_buf_clear_namespace, entry.bufnr, M.ns_padding, 0, -1)
+      remember(store, entry.bufnr)
+    end
+  end
+  if #panes ~= 2 then
+    return -- inline preview: one buffer, nothing to keep aligned
+  end
+
+  --- 0-indexed row → total box height drawn on it in this pane.
+  local function heights(pane)
+    local map = {}
+    for _, placement in ipairs(preview_placements(store, pane.pane)) do
+      local row = placement.rows[#placement.rows] - 1
+      map[row] = (map[row] or 0) + #vim.split(placement.comment.text or "", "\n") + 2
+    end
+    return map
+  end
+
+  local left, right = heights(panes[1]), heights(panes[2])
+  local rows = {}
+  for row in pairs(left) do rows[row] = true end
+  for row in pairs(right) do rows[row] = true end
+  for row in pairs(rows) do
+    local diff = (left[row] or 0) - (right[row] or 0)
+    if diff ~= 0 then
+      local target = (diff > 0) and panes[2].bufnr or panes[1].bufnr
+      local padding = {}
+      for _ = 1, math.abs(diff) do
+        padding[#padding + 1] = { { "", "Normal" } }
+      end
+      pcall(vim.api.nvim_buf_set_extmark, target, M.ns_padding, row, 0, { virt_lines = padding })
+    end
+  end
+end
+
+--- Re-render every comment into `tabpage`'s live preview panes.
+---
+--- The preview is a coordinate system, not a storage concept: nothing here
+--- consults `_last_shown`, because a preview shows a whole intent's files at
+--- once and every comment is placed by its own (file, line, side).
+function M.render_preview(store, tabpage)
+  local panes = require("intentdiff.view").preview_panes(tabpage)
+  for _, entry in ipairs(panes) do
+    M.render_preview_buffer(store, entry.bufnr, entry.pane)
+  end
+  align_preview(store, panes)
+end
+
 --- Sign the sidebar rows whose intent carries a comment. No box: the sidebar
 --- is a dense navigation surface and boxes would push rows around.
 --- @param rows { lnum: integer, title: string }[] group head rows, 1-indexed
@@ -317,16 +443,24 @@ function M.refresh(tabpage)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local store = require("intentdiff.comments").store_for(tabpage)
   local view = require("intentdiff.view")
+  if not store then
+    return
+  end
+  -- A preview buffer concatenates many files, so `_last_shown` (the last file
+  -- RENDERED, which is not what the panes display) says nothing about it.
+  -- Place every comment through the render's own row map instead. Checked
+  -- BEFORE _last_shown: previewing an intent before any file has ever been
+  -- selected is an ordinary first sidebar move, and its comments must still
+  -- draw.
+  if view._preview_active[tabpage] then
+    return M.render_preview(store, tabpage)
+  end
   local shown = view._last_shown[tabpage]
   local session = view.get_session(tabpage)
-  if not (store and shown and shown.file_entry and session) then
+  if not (shown and shown.file_entry and session) then
     return
   end
   local file = shown.file_entry.path
-  -- A preview buffer concatenates many files; comments do not belong there.
-  if view._preview_active[tabpage] then
-    return
-  end
   local orig_buf = session.original_win and vim.api.nvim_win_is_valid(session.original_win)
     and vim.api.nvim_win_get_buf(session.original_win) or nil
   local mod_buf = session.modified_win and vim.api.nvim_win_is_valid(session.modified_win)

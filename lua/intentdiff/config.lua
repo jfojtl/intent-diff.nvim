@@ -119,9 +119,10 @@ M.defaults = {
       -- :IntentDiffToggleAll.
       fold_toggle_all = false,
     },
-    -- Review comments. Cross-surface by nature: installed on the diff panes
-    -- AND the sidebar, since an intent comment is added from a group row and
-    -- a line comment from a pane.
+    -- Review comments. Cross-surface by nature: installed on the diff panes,
+    -- the whole-intent preview buffers AND the sidebar, since an intent
+    -- comment is added from a group row and a line comment from a pane or a
+    -- preview row.
     comments = {
       add_comment = "<localleader>cc", -- pick the type in the popup
       add_note = "<localleader>cn",

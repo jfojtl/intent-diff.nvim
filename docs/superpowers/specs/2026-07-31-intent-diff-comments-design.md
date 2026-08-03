@@ -73,6 +73,41 @@ From the session's currently-shown entry (`view._last_shown`), not by parsing
 the buffer name. codediff's `codediff://` URI shapes never have to be
 understood.
 
+### The whole-intent preview as a coordinate system
+
+A preview buffer concatenates many files, so none of the three rules above
+applies there: `_last_shown` names the last file *rendered*, which is not what
+the panes display, and window identity says nothing because both windows hold
+scratch buffers of ours.
+
+`preview.render` therefore returns, per pane, a `map` of buffer row →
+`{ file, line, side }`, computed where it is already known: walking each
+hunk's body from its own `@@` start lines, a `-` row consuming an old line, a
+`+` row a new line and a context row both. Rows that display no line of any
+file — the `── path` separators, the `@@` headers, side-by-side fillers and
+the truncation summary — have no entry, so `map` is sparse and must never be
+walked with `ipairs`.
+
+The preview is a **coordinate system, never a storage concept**. Resolving a
+cursor through the map yields exactly the `(file, line, side)` the same line
+in that file's own diff would yield, so nothing in the store, the storage
+format or the export knows previews exist. Side comes from the map, not from
+`side_for_win`: side-by-side gives each side its own pane, and the inline
+preview interleaves both sides inside one buffer (a `-` row there is an
+old-side line, unlike a real inline diff, where deletions are virtual lines
+and the buffer is the modified file outright).
+
+`preview.rows_for` is the inverse — the rows a stored comment lands on, used
+to draw its sign, highlight and box. It is *derived by scanning the same map*
+rather than accumulated alongside it: two independently built indexes are how
+the renderer and the action layer once came to disagree about where a drifted
+comment was.
+
+Refusals in a preview are the rows the map cannot answer for: a separator, a
+hunk header, a filler, and a visual range covering two files (no single record
+can express it). A range within one file resolves to that file's side of its
+first addressed row.
+
 ## Comment record
 
 ```lua
@@ -157,6 +192,8 @@ It is called after every event that rebuilds a pane:
 - `view.toggle_layout` and `view.toggle_preview_layout`
 - `view.apply_group_folds`
 - `view.restore`
+- `view.show_preview` — the preview re-renders into fresh scratch buffers on
+  every debounced sidebar cursor move, and extmarks live on the buffer
 - any store mutation
 
 Per comment, in the buffer for its `side` — and, for a file-level comment
@@ -417,6 +454,8 @@ Plenary busted specs under `tests/`, matching the existing naming and using
 | `comments_export_spec` | grouping and ordering; continuous numbering; old-side `~`; ranges; file-level; intent paragraphs; conditional `~` trailer; flat fallback; unmatched section; empty-store behaviour |
 | `comments_marks_spec` | extmark placement for single, range, file-level and intent comments; side-by-side alignment padding |
 | `comments_popup_spec` | type cycling; submit; cancel; empty-text discard; pre-fill when editing |
+| `comments_preview_spec` | commenting in the whole-intent preview: side from the pane/marker, exact file lines, range within one file, the refusals, the round trip against a file diff, rendering in both directions, edit/delete at the cursor |
+| `preview_spec` (extended) | the row → `(file, line, side)` map in both layouts, exact line numbers for a hunk starting far from line 1, and `rows_for` agreeing with it |
 | `integration_spec` (extended) | add → render → reclassify → export, asserting comments re-file under the new intents |
 
 `comments_export_spec` carries the most weight: the export is the plugin's
@@ -428,7 +467,9 @@ out — so it can be tested exhaustively without a running review tab.
 - Sending comments to sidekick.nvim. review.nvim has it; clipboard and file
   cover the stated workflow, and the export module is where it would slot in
   later.
-- Commenting inside whole-intent preview buffers, which would need a reverse
-  map from a concatenated preview line back to `(file, line, side)`.
+- Rendering file-level and whole-intent comments inside a preview. Neither
+  addresses a line the preview shows (a file comment hangs off line 1 of a
+  file's own buffer; an intent comment lives on a sidebar row), so both are
+  simply not drawn there.
 - Threading, replies, or resolving comments.
 - Reading an agent's response back into the review.

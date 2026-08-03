@@ -229,6 +229,95 @@ function M.detach_session(entry)
   marks.clear_for(st)
 end
 
+--- Refusals for the whole-intent preview. Both name the fix, not just the
+--- failure: a row that shows no line of any file cannot carry a comment, and a
+--- comment records ONE file.
+local NOT_A_LINE =
+  "nothing to comment on here — put the cursor on an added, removed or context "
+  .. "line (file separators, @@ headers and filler rows show no line)"
+local SPANS_FILES =
+  "a comment records one file — select lines inside a single file's diff"
+local NOT_A_PREVIEW_PANE =
+  "put the cursor in the intent preview to comment on it"
+
+--- What the cursor is pointing at inside a live whole-intent preview.
+---
+--- The preview is a COORDINATE SYSTEM, never a storage concept: this returns
+--- exactly the ctx shape the file-diff branch returns — { file, side, line,
+--- line_end? } — so the record that reaches the store is indistinguishable
+--- from one made in that file's own diff. `side` comes from the render's map,
+--- NOT from `side_for_win`: in a preview both windows hold scratch buffers of
+--- ours, so window identity says nothing, and in the inline layout the two
+--- sides are interleaved inside one buffer.
+---
+--- A visual range resolves through the rows it actually covers, so an
+--- unaddressed row inside it (a separator, a filler) is skipped rather than
+--- refusing a selection that is otherwise fine — but a range covering rows of
+--- TWO files refuses, because no single record can express it. Its side is the
+--- side of its first addressed row; in the inline layout, where one buffer
+--- interleaves both sides, that is what keeps a `-`-first selection an
+--- old-side range and a context/`+`-first one a new-side range.
+--- @return table|nil ctx, string|nil err
+local function preview_context(tabpage, win, opts)
+  local view = require("intentdiff.view")
+  local ok_buf, bufnr = pcall(vim.api.nvim_win_get_buf, win)
+  if not ok_buf then
+    return nil, NOT_A_PREVIEW_PANE
+  end
+  local pane = view.preview_pane_for_buf(tabpage, bufnr)
+  if not pane then
+    return nil, NOT_A_PREVIEW_PANE
+  end
+
+  local first_row, last_row
+  if opts.visual then
+    local mark_start, mark_end = vim.fn.line("'<"), vim.fn.line("'>")
+    -- An unset visual mark reports line 0; see the file-diff branch below.
+    if mark_start == 0 or mark_end == 0 then
+      return nil, "no visual selection"
+    end
+    local a, b = M.visual_range(mark_start, mark_end)
+    first_row, last_row = a, b or a
+  else
+    first_row = vim.api.nvim_win_get_cursor(win)[1]
+    last_row = first_row
+  end
+
+  local preview = require("intentdiff.preview")
+  local targets = {}
+  for row = first_row, last_row do
+    local t = preview.target_at(pane, row)
+    if t then
+      targets[#targets + 1] = t
+    end
+  end
+  if #targets == 0 then
+    return nil, NOT_A_LINE
+  end
+  local file = targets[1].file
+  for _, t in ipairs(targets) do
+    if t.file ~= file then
+      return nil, SPANS_FILES
+    end
+  end
+  if opts.file_level then
+    return { file = file, line = 0 }
+  end
+  local side = targets[1].side
+  local first, last
+  for _, t in ipairs(targets) do
+    if t.side == side then
+      if not first or t.line < first then first = t.line end
+      if not last or t.line > last then last = t.line end
+    end
+  end
+  local ctx = { file = file, side = side, line = first }
+  if last > first then
+    ctx.line_end = last
+  end
+  return ctx
+end
+
 --- What the cursor is pointing at: a line in a pane, or an intent in the
 --- sidebar.
 --- @return table|nil ctx, string|nil err
@@ -257,14 +346,19 @@ function M.context(tabpage, opts)
     return nil, "no intent under the cursor"
   end
 
-  -- Diff pane.
+  -- Whole-intent preview. Resolved BEFORE the `_last_shown` check: a preview
+  -- can own the panes before any file has ever been selected in the tab, and
+  -- `_last_shown` names the last file rendered, which is not what a preview
+  -- displays.
   local view = require("intentdiff.view")
+  if view._preview_active[tabpage] then
+    return preview_context(tabpage, win, opts)
+  end
+
+  -- Diff pane.
   local shown = view._last_shown[tabpage]
   if not (shown and shown.file_entry) then
     return nil, "no file open"
-  end
-  if view._preview_active[tabpage] then
-    return nil, "comments cannot be added in an intent preview"
   end
   local session = view.get_session(tabpage)
   local side = M.side_for_win(win, session)
@@ -382,6 +476,9 @@ end
 --- before returning in those cases). A file-level comment never needs
 --- disambiguation: `store.collides` enforces exactly one per file.
 local function at_cursor(tabpage, st, cb)
+  -- Resolved here, not left nil for M.context to default internally: the
+  -- preview check below reads a per-tabpage table with it.
+  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local ctx = M.context(tabpage)
   if not ctx then
     return cb(nil)
@@ -414,7 +511,14 @@ local function at_cursor(tabpage, st, cb)
     return cb(nil)
   end
   local found = st.get_at_line(ctx.file, ctx.line, ctx.side)
-  if not found then
+  -- The drifted fallback measures a comment against the BUFFER's line count,
+  -- which only means anything when the buffer IS the file. A preview buffer is
+  -- a render of many files, so clamping there would match a comment stored at
+  -- line 500 onto whatever the preview's last row happens to be — the "checks
+  -- one thing, acts on another" failure this fallback was written to fix, in
+  -- mirror image. A preview simply does not draw a comment whose lines it does
+  -- not show, so there is nothing there to reach.
+  if not found and not require("intentdiff.view")._preview_active[tabpage] then
     found = drifted_at_line(st, ctx, current_buf())
   end
   return cb(found)

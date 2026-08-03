@@ -86,6 +86,35 @@ M._preview_active = {}
 --- keymaps (which only capture a tabpage) can restore and re-render.
 M._preview_sess = {}
 
+--- The rendered panes currently installed per tabpage, as
+--- `{ { bufnr, pane }, ... }` — `pane` being `preview.render`'s pane table,
+--- whose `map` says which (file, line, side) each row addresses.
+---
+--- This is what lets the comment layer treat the preview as a COORDINATE
+--- SYSTEM: `comments.context` turns a cursor row into a real (file, line,
+--- side), and `marks` turns a stored comment back into rows. Kept alongside
+--- M._preview_bufs (same lifetime, cleared by the same places) rather than
+--- inside it, because retire_preview_bufs takes a plain buffer list.
+M._preview_maps = {}
+
+--- The rendered panes of `tabpage`'s live preview, or an empty list.
+--- @return table[] { bufnr, pane }
+function M.preview_panes(tabpage)
+  return M._preview_maps[tabpage] or {}
+end
+
+--- The rendered pane displayed in `bufnr`, or nil when that buffer is not one
+--- of `tabpage`'s preview panes.
+--- @return table|nil pane
+function M.preview_pane_for_buf(tabpage, bufnr)
+  for _, entry in ipairs(M.preview_panes(tabpage)) do
+    if entry.bufnr == bufnr then
+      return entry.pane
+    end
+  end
+  return nil
+end
+
 local folds_augroup
 
 --- codediff's own session TabEnter autocmd (codediff/ui/lifecycle/session.lua)
@@ -290,6 +319,7 @@ function M.cleanup_tab_state(tabpage)
   M._last_shown[tabpage] = nil
   M._preview_active[tabpage] = nil
   M._preview_sess[tabpage] = nil
+  M._preview_maps[tabpage] = nil
   if M._preview_bufs[tabpage] then
     retire_preview_bufs(M._preview_bufs[tabpage])
     M._preview_bufs[tabpage] = nil
@@ -596,6 +626,10 @@ function M.show_file(sess, file_entry, opts)
   M._preview_active[tabpage] = nil
   M._preview_sess[tabpage] = nil
   M._preview_bufs[tabpage] = nil
+  -- The row → (file, line, side) maps describe buffers that are about to leave
+  -- the panes; a stale one would let comments.context resolve a cursor against
+  -- a render that is no longer on screen.
+  M._preview_maps[tabpage] = nil
 
   -- Whole-file statuses render a single pane. Added and untracked files are
   -- split into sub-hunks (hunks.split_added), so a group may own only part of
@@ -896,6 +930,7 @@ function M.show_preview(sess, group)
     vim.wo[win].cursorbind = false
     cd.lifecycle.update_buffers(tabpage, buf, buf)
     M._preview_bufs[tabpage] = { buf }
+    M._preview_maps[tabpage] = { { bufnr = buf, pane = rendered.modified } }
   else
     local original_buf = preview_buf(rendered.original)
     local modified_buf = preview_buf(rendered.modified)
@@ -909,6 +944,10 @@ function M.show_preview(sess, group)
     end
     cd.lifecycle.update_buffers(tabpage, original_buf, modified_buf)
     M._preview_bufs[tabpage] = { original_buf, modified_buf }
+    M._preview_maps[tabpage] = {
+      { bufnr = original_buf, pane = rendered.original },
+      { bufnr = modified_buf, pane = rendered.modified },
+    }
   end
   cd.lifecycle.update_paths(tabpage, cd.path.empty(), cd.path.empty())
   cd.lifecycle.update_revisions(tabpage, nil, nil)
@@ -920,6 +959,12 @@ function M.show_preview(sess, group)
 
   M._preview_active[tabpage] = group
   M.install_preview_keymaps(tabpage, sess, rendered.hunk_lines)
+  -- Strictly after _preview_active and _preview_maps are set: that pair is what
+  -- makes marks render THROUGH the map instead of against the last-shown file.
+  -- The preview re-renders into fresh scratch buffers on every debounced
+  -- sidebar cursor move, and extmarks live on the buffer — so the comment boxes
+  -- have to be re-drawn here, not only when the store changes.
+  refresh_comments(tabpage)
   return true
 end
 
@@ -1177,9 +1222,14 @@ function M.install_preview_keymaps(tabpage, sess, hunk_lines)
     end
   end
   -- pane_bufs de-dupes (inline layout shares one buffer between both fields)
-  -- and skips the nil hole a bare table literal would leave. Comment keys are
-  -- deliberately NOT installed here: a preview buffer concatenates many files,
-  -- so comments.context refuses to place a comment in one.
+  -- and skips the nil hole a bare table literal would leave.
+  --
+  -- The comment keys ARE installed here, exactly as on a real diff pane: the
+  -- preview's row → (file, line, side) map (M._preview_maps) gives every body
+  -- row a real coordinate, so comments.context resolves a cursor here into the
+  -- same record commenting that line in the file's own diff would produce.
+  -- Rows that address nothing — separators, `@@` headers, fillers — refuse
+  -- there, with a message; they are not silently dropped.
   for _, buf in ipairs(pane_bufs(session)) do
     if toggle_key then
       pcall(vim.keymap.set, "n", toggle_key, function()
@@ -1199,6 +1249,7 @@ function M.install_preview_keymaps(tabpage, sess, hunk_lines)
       next_hunk = hunk_step(1),
       prev_hunk = hunk_step(-1),
     })
+    M.install_comment_keymaps(buf, tabpage)
   end
   M._preview_sess[tabpage] = sess
 end
@@ -1221,12 +1272,10 @@ function M.toggle_preview_layout(tabpage)
   end
   M.toggle_layout(tabpage, {
     on_done = function()
+      -- show_preview refreshes the comment marks itself, against the NEW
+      -- layout's map — which is the only thing that can place them, since the
+      -- two layouts put a given (file, line, side) on different rows.
       M.show_preview(sess, group)
-      -- A preview owns the panes again, so this is a no-op today (marks.refresh
-      -- refuses while _preview_active is set). It is here so that the moment
-      -- the preview is left — or the guard ever changes — the toggled layout's
-      -- panes are re-signed like every other rebuild.
-      refresh_comments(tabpage)
     end,
   })
   return true

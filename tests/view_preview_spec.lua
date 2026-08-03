@@ -98,6 +98,53 @@ describe("view: intent preview", function()
       vim.api.nvim_buf_line_count(session.modified_bufnr))
   end)
 
+  -- The author's report: pressing the comment key in the intent view did
+  -- nothing at all. The keys were simply never installed there.
+  it("installs the comment keys on the preview buffers, with a live row map", function()
+    -- Literal lhs values: the defaults use <localleader>, which is expanded at
+    -- map time and comes back from nvim_buf_get_keymap as "\cc".
+    require("intentdiff.config").setup({
+      keymaps = { comments = { add_comment = "gc", add_note = "gn", edit_comment = "ge" } },
+    })
+    local sess, file_entry, group = fixture()
+    show(sess, file_entry)
+    assert.is_true(view.show_preview(sess, group))
+
+    local session = view.get_session(sess.tabpage)
+    local function mapped(buf, mode)
+      local out = {}
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, mode)) do
+        out[m.lhs] = true
+      end
+      return out
+    end
+    for _, buf in ipairs({ session.original_bufnr, session.modified_bufnr }) do
+      local normal = mapped(buf, "n")
+      assert.is_truthy(normal.gc, "no add_comment mapping on preview buffer " .. buf)
+      assert.is_truthy(normal.ge, "no edit_comment mapping on preview buffer " .. buf)
+      -- The visual-mode variants too: a range comment is the other half of
+      -- requirement 1.
+      assert.is_truthy(mapped(buf, "x").gn,
+        "no visual add_note mapping on preview buffer " .. buf)
+    end
+
+    -- And the map those keys resolve through is registered for both panes.
+    local panes = view.preview_panes(sess.tabpage)
+    assert.equals(2, #panes)
+    local addressed = 0
+    for _, entry in ipairs(panes) do
+      assert.truthy(view.preview_pane_for_buf(sess.tabpage, entry.bufnr))
+      for row = 1, #entry.pane.lines do
+        local target = require("intentdiff.preview").target_at(entry.pane, row)
+        if target then
+          assert.equals("big.lua", target.file)
+          addressed = addressed + 1
+        end
+      end
+    end
+    assert.is_true(addressed > 0, "no preview row addresses a real file line")
+  end)
+
   it("does not leave group folds applied to the preview buffers", function()
     local sess, file_entry, group = fixture()
     show(sess, { path = "big.lua", status = "M", hunks = { file_entry.hunks[1] } })
