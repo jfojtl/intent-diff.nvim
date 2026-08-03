@@ -189,11 +189,14 @@ empty and logged to `:IntentDiffLog`.
 It is called after every event that rebuilds a pane:
 
 - `view.show_file`
-- `view.toggle_layout` and `view.toggle_preview_layout`
+- `view.toggle_layout`
 - `view.apply_group_folds`
 - `view.restore`
 - `view.show_preview` — the preview re-renders into fresh scratch buffers on
-  every debounced sidebar cursor move, and extmarks live on the buffer
+  every debounced sidebar cursor move, and extmarks live on the buffer.
+  `view.toggle_preview_layout` refreshes *through* this one rather than calling
+  it directly: only a render against the new layout's row map can place a box,
+  since the two layouts put a given `(file, line, side)` on different rows
 - any store mutation
 
 Per comment, in the buffer for its `side` — and, for a file-level comment

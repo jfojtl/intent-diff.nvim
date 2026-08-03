@@ -398,8 +398,9 @@ local NO_STORE = "no comments available in this tab"
 
 --- Add a comment at the cursor. `comment_type` nil opens the type picker.
 function M.add(tabpage, comment_type, opts)
-  -- Context first: it gives the precise reason ("no file open", "comments
-  -- cannot be added in an intent preview") where there is one.
+  -- Context first: it gives the precise reason ("no file open", "no intent
+  -- under the cursor", or one of the preview's row/range refusals) where there
+  -- is one.
   local ctx, err = M.context(tabpage, opts)
   if not ctx then
     return notify(err, vim.log.levels.WARN)
@@ -586,9 +587,13 @@ local function jump(tabpage, finder)
   if not (shown and shown.file_entry) then
     return
   end
-  -- The two guards every sibling checks: a preview buffer concatenates many
-  -- files (M.list, M.context and marks.refresh all refuse there), and the
-  -- comment keys reach surfaces that are not diff panes at all.
+  -- Two guards. A preview buffer concatenates many files: M.context and
+  -- marks.refresh now RESOLVE that through the render's row map, but jumping
+  -- cannot — `finder` walks stored line numbers of ONE file, and the cursor
+  -- would have to land on whichever preview row that file's line happens to
+  -- occupy, per pane, per layout. M.list refuses for the same reason and opens
+  -- the real file instead. And the comment keys reach surfaces that are not
+  -- diff panes at all.
   if view._preview_active[tabpage] then
     return notify("comments are not shown in an intent preview", vim.log.levels.WARN)
   end

@@ -584,9 +584,10 @@ describe("comments actions", function()
         assert.equals(5, vim.api.nvim_win_get_cursor(win_sidebar)[1])
       end)
 
-      -- The same flag M.context, M.list and marks.refresh all check: a preview
-      -- buffer holds a whole intent's files concatenated, so its rows are not
-      -- the shown file's lines either.
+      -- A preview buffer holds a whole intent's files concatenated. Its rows
+      -- ARE resolvable — M.context and marks.refresh go through the render's
+      -- row map — but they are not the SHOWN file's lines, which is what
+      -- `finder` walks, so ]n/[n still refuse (as does M.list's jump).
       it("refuses in a hover preview", function()
         view._preview_active[tab] = { title = "An intent" }
         focus(win_mod, 1)

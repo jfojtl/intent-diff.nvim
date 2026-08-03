@@ -50,6 +50,8 @@ describe("comments in the whole-intent preview", function()
   local tab = 900011 -- sentinel key, never a real tabpage id
   local st, restore_session, real_open, notices
   local wins, panes
+  --- vim.notify as it was before the spec swapped it out.
+  local real_notify
 
   --- Put `pane` in a fresh scratch buffer and a floating window, and register
   --- both as one of the tab's live preview panes.
@@ -64,12 +66,12 @@ describe("comments in the whole-intent preview", function()
     return win, buf
   end
 
-  --- Render the fixture group and drive it into the tab exactly as
-  --- view.show_preview does: buffers in windows, maps registered, the preview
-  --- flag set.
+  --- Render `diff` (the two-file fixture by default) and drive it into the tab
+  --- exactly as view.show_preview does: buffers in windows, maps registered,
+  --- the preview flag set.
   --- @return table rendered, table wins_by_role
-  local function show_preview(layout)
-    local rendered = preview.render(group_from(DIFF), layout, {})
+  local function show_preview(layout, diff)
+    local rendered = preview.render(group_from(diff or DIFF), layout, {})
     local roles = {}
     if layout == "inline" then
       roles.modified = select(1, install_pane(rendered.modified))
@@ -116,18 +118,16 @@ describe("comments in the whole-intent preview", function()
     popup.open = function(opts, cb)
       cb(opts.type or "note", opts.text or "a comment")
     end
-    local real_notify = vim.notify
+    -- Restored in after_each via the describe-scope upvalue above.
+    real_notify = vim.notify
     vim.notify = function(msg, level)
       notices[#notices + 1] = { msg = msg, level = level }
     end
-    -- Restored in after_each via this upvalue.
-    _G.__preview_spec_real_notify = real_notify
   end)
 
   after_each(function()
     popup.open = real_open
-    vim.notify = _G.__preview_spec_real_notify
-    _G.__preview_spec_real_notify = nil
+    vim.notify = real_notify
     restore_session()
     view._preview_active[tab] = nil
     view._preview_maps[tab] = nil
@@ -376,6 +376,19 @@ describe("comments in the whole-intent preview", function()
       assert.same({ row_of(rendered.modified, "+arrived") }, boxed_rows(panes[1].bufnr))
     end)
 
+    -- An inline FILE diff cannot show an old-side comment: its buffer is the
+    -- modified file and deletions are codediff virt_lines, so there is no row
+    -- to hang the box off. The inline PREVIEW is the exception — its `-` rows
+    -- are real buffer lines — and the README now says so, so assert it.
+    it("draws an old-side comment in the INLINE preview, on the - row", function()
+      st.add({ file = "zz/late.lua", line = 121, side = "old", type = "note", text = "hi" })
+      local rendered = show_preview("inline")
+
+      marks.refresh(tab)
+
+      assert.same({ row_of(rendered.modified, "-gone") }, boxed_rows(panes[1].bufnr))
+    end)
+
     it("draws an old-side comment in the ORIGINAL pane only", function()
       st.add({ file = "zz/late.lua", line = 121, side = "old", type = "note", text = "hi" })
       local rendered, _ = show_preview("side-by-side")
@@ -484,17 +497,65 @@ describe("comments in the whole-intent preview", function()
     end)
 
     -- The drifted-comment fallback clamps a past-EOF comment onto a BUFFER's
-    -- last line. A preview buffer is a render of many files, so that clamp
-    -- would match an unrelated comment onto whatever row happens to be last.
-    it("does not reach a drifted comment through the preview's last row", function()
-      st.add({ file = "zz/late.lua", line = 9999, side = "new", type = "note", text = "drifted" })
-      local rendered, roles = show_preview("inline")
-      focus(roles.modified, #rendered.modified.lines)
+    -- last line and then matches the cursor's line against that clamped span.
+    -- In a preview the cursor's line is a FILE line while the clamp measures
+    -- the preview BUFFER — so the fallback fires exactly when a mapped row's
+    -- file line numerically equals the preview's row count, which is entirely
+    -- ordinary (a 100-row preview and a file line 100).
+    --
+    -- This fixture is built to hit that coincidence: seven rendered rows, and
+    -- row 5 addresses one.lua:7 on the new side. Without the guard, deleting
+    -- there deletes the comment stored at line 9999 — a comment the preview
+    -- does not draw anywhere. The assertion below on the coincidence is what
+    -- keeps this test from quietly going vacuous if the fixture drifts.
+    local COINCIDENT_DIFF = table.concat({
+      "diff --git a/one.lua b/one.lua",
+      "@@ -5,4 +5,4 @@",
+      " p",
+      " q",
+      "-r",
+      "+R",
+      " s",
+      "",
+    }, "\n")
 
+    it("does not reach a drifted comment through the preview's last row", function()
+      st.add({ file = "one.lua", line = 9999, side = "new", type = "note", text = "drifted" })
+      local rendered, roles = show_preview("inline", COINCIDENT_DIFF)
+      local row = row_of(rendered.modified, "+R")
+      local target = preview.target_at(rendered.modified, row)
+      assert.same({ file = "one.lua", line = 7, side = "new" }, target)
+      assert.equals(target.line, #rendered.modified.lines,
+        "fixture must make a mapped row's FILE line equal the preview's ROW count, "
+        .. "or the clamped fallback can never fire and this test proves nothing")
+
+      focus(roles.modified, row)
       comments.delete(tab)
 
       assert.equals(1, st.count(),
         "a comment the preview does not draw must not be reachable in it")
+    end)
+
+    it("still reaches a drifted comment in a real file diff", function()
+      -- The mirror: the guard must be scoped to previews, not disable the
+      -- fallback outright. Five-line buffer, comment stored at line 500.
+      st.add({ file = "a.lua", line = 500, side = "new", type = "note", text = "drifted" })
+      local win = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, {
+        relative = "editor", row = 0, col = 0, width = 20, height = 5, style = "minimal",
+      })
+      wins[#wins + 1] = win
+      vim.api.nvim_buf_set_lines(vim.api.nvim_win_get_buf(win), 0, -1, false,
+        { "1", "2", "3", "4", "5" })
+      local real_get_session = view.get_session
+      view.get_session = function() return { original_win = -1, modified_win = win } end
+      view._last_shown[tab] = { file_entry = { path = "a.lua" } }
+      focus(win, 5)
+
+      comments.delete(tab)
+
+      view.get_session = real_get_session
+      assert.equals(0, st.count(),
+        "the clamped fallback must still work where the buffer IS the file")
     end)
   end)
 end)

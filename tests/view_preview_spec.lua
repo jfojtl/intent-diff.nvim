@@ -2,15 +2,23 @@ local helpers = require("tests.helpers")
 
 describe("view: intent preview", function()
   local view
+  --- Set by the tests that need `comments.store_for` to resolve a store from
+  --- the fixture's tabpage; cleared in after_each.
+  local restore_session
 
   before_each(function()
     package.loaded["intentdiff.view"] = nil
     view = require("intentdiff.view")
     assert.is_true(view.load())
     require("intentdiff.config").setup({})
+    restore_session = nil
   end)
 
   after_each(function()
+    if restore_session then
+      restore_session()
+      restore_session = nil
+    end
     while #vim.api.nvim_list_tabpages() > 1 do
       pcall(vim.cmd, "tabclose $")
     end
@@ -143,6 +151,114 @@ describe("view: intent preview", function()
       end
     end
     assert.is_true(addressed > 0, "no preview row addresses a real file line")
+  end)
+
+  --- The 1-indexed row of `pane` whose text is exactly `text`, asserting there
+  --- is exactly one.
+  local function row_of(pane, text)
+    local found
+    for i, l in ipairs(pane.lines) do
+      if l == text then
+        assert.is_nil(found, "ambiguous preview row for " .. text)
+        found = i
+      end
+    end
+    assert.truthy(found, "no preview row reads " .. text)
+    return found
+  end
+
+  local function pane_named(tabpage, bufnr)
+    return assert(view.preview_pane_for_buf(tabpage, bufnr), "not a preview pane")
+  end
+
+  -- big.lua carries TWO hunks, at opposite ends of a 60-line file. Each must be
+  -- counted from ITS OWN @@ start: seeding the walk once per FILE instead of
+  -- once per HUNK renders identical-looking text with line numbers that are
+  -- plausible and wrong, and every single-hunk fixture in the suite would still
+  -- pass.
+  it("counts each hunk of a file from its own @@ start", function()
+    local sess, file_entry, group = fixture()
+    show(sess, file_entry)
+    assert.is_true(view.show_preview(sess, group))
+
+    local session = view.get_session(sess.tabpage)
+    local preview = require("intentdiff.preview")
+    local original = pane_named(sess.tabpage, session.original_bufnr)
+    local modified = pane_named(sess.tabpage, session.modified_bufnr)
+
+    -- First hunk (around line 5) and second (around line 55), exact numbers.
+    assert.same({ file = "big.lua", line = 5, side = "new" },
+      preview.target_at(modified, row_of(modified, "CHANGED 5")))
+    assert.same({ file = "big.lua", line = 55, side = "new" },
+      preview.target_at(modified, row_of(modified, "CHANGED 55")))
+    assert.same({ file = "big.lua", line = 5, side = "old" },
+      preview.target_at(original, row_of(original, "line 5")))
+    assert.same({ file = "big.lua", line = 55, side = "old" },
+      preview.target_at(original, row_of(original, "line 55")))
+    -- Context rows of the second hunk too, so the check is not only on the
+    -- changed line the @@ header names.
+    assert.same({ file = "big.lua", line = 54, side = "new" },
+      preview.target_at(modified, row_of(modified, "line 54")))
+  end)
+
+  --- The comment extmarks (not the padding namespace) on `bufnr`.
+  local function boxes(bufnr)
+    return vim.api.nvim_buf_get_extmarks(
+      bufnr, require("intentdiff.comments.marks").ns, 0, -1, { details = true })
+  end
+
+  -- The preview re-renders into FRESH scratch buffers on every debounced
+  -- sidebar cursor move, and extmarks live on the buffer — so the boxes only
+  -- stay on screen because show_preview re-applies them itself. Nothing else
+  -- does: this drives the real view.show_preview and never calls marks.refresh.
+  it("re-applies the comment boxes on every preview render", function()
+    local st = require("intentdiff.comments.store").new()
+    local sess, file_entry, group = fixture()
+    show(sess, file_entry)
+    -- AFTER show: bootstrap reconciles sess.tabpage onto the tab codediff
+    -- actually built, and the store is resolved from that one.
+    restore_session = helpers.fake_session(sess.tabpage, { comment_store = st })
+    assert.is_true(view.show_preview(sess, group))
+    st.add({ file = "big.lua", line = 5, side = "new", type = "note", text = "boxed" })
+
+    -- A second render, exactly as a hover onto the same intent produces.
+    assert.is_true(view.show_preview(sess, group))
+
+    local session = view.get_session(sess.tabpage)
+    local modified = pane_named(sess.tabpage, session.modified_bufnr)
+    local drawn = boxes(session.modified_bufnr)
+    assert.equals(1, #drawn, "the box must be re-applied to the fresh buffer")
+    assert.equals(row_of(modified, "CHANGED 5") - 1, drawn[1][2])
+    assert.truthy(drawn[1][4].virt_lines)
+  end)
+
+  -- toggle_preview_layout no longer refreshes on its own: it re-renders through
+  -- show_preview, which is the only thing that can place a box against the NEW
+  -- layout's map. That transitivity needs its own test, or removing the one
+  -- remaining call goes unnoticed here.
+  it("re-applies the comment boxes after a layout toggle from inside a preview", function()
+    local st = require("intentdiff.comments.store").new()
+    local sess, file_entry, group = fixture()
+    show(sess, file_entry)
+    -- AFTER show: bootstrap reconciles sess.tabpage onto the tab codediff
+    -- actually built, and the store is resolved from that one.
+    restore_session = helpers.fake_session(sess.tabpage, { comment_store = st })
+    assert.is_true(view.show_preview(sess, group))
+    st.add({ file = "big.lua", line = 5, side = "new", type = "note", text = "boxed" })
+    local before = view.get_session(sess.tabpage).layout
+
+    view.toggle_preview_layout(sess.tabpage)
+    assert.truthy(helpers.wait_for(function()
+      local s = view.get_session(sess.tabpage)
+      return (s.layout ~= before and view._preview_active[sess.tabpage]) and true or nil
+    end, 15000), "layout must flip and the preview must return")
+
+    local session = view.get_session(sess.tabpage)
+    local modified = pane_named(sess.tabpage, session.modified_bufnr)
+    local drawn = boxes(session.modified_bufnr)
+    assert.equals(1, #drawn, "the box must survive the toggle's re-render")
+    assert.equals(row_of(modified, "+CHANGED 5") - 1, drawn[1][2],
+      "the box must land on the NEW layout's row for big.lua:5")
   end)
 
   it("does not leave group folds applied to the preview buffers", function()

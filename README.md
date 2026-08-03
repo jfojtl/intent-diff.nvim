@@ -576,12 +576,17 @@ itself: a `-` row addresses the old side even in the inline preview, because
 that render carries the removed lines as real buffer lines.
 
 Once created, it renders whenever the original pane is visible — but
-deliberately not in inline layout. This is not a bug to route around: inline
-shows only the modified file's buffer, and an old-side line number addresses
-a row of the *original* file that simply has no corresponding row in that
-buffer to hang a box off. Toggle back to side-by-side and the comment is
+deliberately not in an inline *file diff*. This is not a bug to route around:
+inline shows only the modified file's buffer, and an old-side line number
+addresses a row of the *original* file that simply has no corresponding row in
+that buffer to hang a box off. Toggle back to side-by-side and the comment is
 exactly where it was left; toggle to inline and it is invisible and
 unreachable until you toggle back.
+
+The inline *preview* is the exception, and for the same reason it can create
+old-side comments there: its `-` rows are real buffer lines, so an old-side
+comment does render on them. The rule is one rule — a box is drawn wherever a
+row addresses its line — and only the inline file diff has no such row.
 
 ### The popup
 

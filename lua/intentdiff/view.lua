@@ -1128,7 +1128,8 @@ local VISUAL_ACTIONS = {
 --- Comment keys, installed on every diff pane and on the sidebar.
 ---
 --- Cross-surface by design: an intent comment is added from a sidebar group
---- row, a line comment from a pane, and both surfaces need the export keys.
+--- row, a line comment from a diff pane or a whole-intent preview row, and all
+--- three surfaces need the export keys.
 --- `tabpage` may be nil, in which case the actions resolve the current tabpage
 --- when the key is pressed — which is always the right one for a
 --- buffer-local mapping.
