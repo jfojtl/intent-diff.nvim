@@ -383,7 +383,16 @@ function M.build(files, visible, layout, opts)
       -- the separator states it.
       local has_content = file.original ~= nil and file.modified ~= nil
       local fallback_reason
-      if not has_content then
+      -- `file.stale` wins over the generic "content unavailable": the caller
+      -- (view.lua) withholds content for a stale file on purpose, even though
+      -- content.get could answer for it — pairing fresh worktree lines against
+      -- this file's frozen (pre-edit) hunk ranges is exactly the silently
+      -- inconsistent diff this render must never produce. Naming the real
+      -- reason tells the reader there IS a fix (reopen the review) rather than
+      -- looking like an I/O failure.
+      if file.stale then
+        fallback_reason = "changed on disk since this review opened — reopen for a fresh diff"
+      elseif not has_content then
         fallback_reason = "content unavailable"
       elseif #file.original > budget or #file.modified > budget then
         fallback_reason = "over line budget"

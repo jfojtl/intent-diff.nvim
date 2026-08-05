@@ -69,6 +69,15 @@ M._wins = {}
 --- The layout each tabpage was last rendered in ("side-by-side" | "inline").
 M._layout = {}
 
+-- Forward-declared: M.open_tab (right below) arms the on-disk-write watcher on
+-- every review it opens, but the watcher calls back into `render_now`, which
+-- is defined further down this file. Kept together with its call site here.
+local ensure_write_watch
+
+--- The one augroup id `ensure_write_watch` creates, or nil until the first
+--- review tab opens. Guards it against being created twice.
+local write_augroup
+
 local function win_valid(win)
   return win ~= nil and vim.api.nvim_win_is_valid(win)
 end
@@ -140,6 +149,7 @@ function M.open_tab()
   local modified = vim.api.nvim_get_current_win()
   M._wins[tabpage] = { original = original, modified = modified }
   M._layout[tabpage] = "side-by-side"
+  ensure_write_watch()
   return tabpage
 end
 
@@ -283,6 +293,21 @@ local function render_now(tabpage, sess, files, visible, layout)
     if f.binary then
       binary = true
     end
+    -- A file a write invalidated is rendered hunks-only, on purpose, even once
+    -- content.ensure has refetched its worktree side: `f.hunks` still describes
+    -- the file as of the last `git diff`, and pairing possibly-shifted fresh
+    -- content against those frozen ranges is exactly the silently-inconsistent
+    -- diff this renderer must never produce (see content.is_stale's doc
+    -- comment). Deliberately not `content.is_stale(...) and nil or
+    -- content.get(...)`: the fallback branch of that idiom is nil, so it would
+    -- always take the "or" side regardless of staleness — the exact bug shape
+    -- this codebase has already shipped four times.
+    local stale = content.is_stale(sess, f.path)
+    local original, modified
+    if not stale then
+      original = content.get(sess, f.path, "old")
+      modified = content.get(sess, f.path, "new")
+    end
     local entry = {
       path = f.path,
       old_path = f.old_path,
@@ -290,8 +315,9 @@ local function render_now(tabpage, sess, files, visible, layout)
       filetype = filetype_of(f.path),
       binary = binary,
       hunks = f.hunks or {},
-      original = content.get(sess, f.path, "old"),
-      modified = content.get(sess, f.path, "new"),
+      original = original,
+      modified = modified,
+      stale = stale,
     }
     entries[#entries + 1] = entry
     by_path[f.path] = { old = entry.original, new = entry.modified }
@@ -324,6 +350,119 @@ local function render_now(tabpage, sess, files, visible, layout)
   M.install_keymaps(tabpage)
   refresh_comments(tabpage)
   return true
+end
+
+-- ------------------------------------------------------- stale-on-write ----
+--
+-- Closes the gap task 11 (`gf` / M.open_real_file) opened: that command hands
+-- the reader an ordinary editable buffer on the real file, and until now
+-- nothing ever called content.lua's `invalidate` — so review → gf → fix →
+-- back to the review showed whatever the worktree held at the moment the
+-- review's content cache first read that file, forever.
+--
+-- BufWritePost is the only trigger wired up. `gf` always opens the real file
+-- in an editable buffer inside THIS Neovim, so the edit this gap is about
+-- ends in a `:w` this instance sees directly — BufWritePost covers it exactly.
+-- FileChangedShellPost (a file changed by something OUTSIDE this Neovim —
+-- another process, a second Neovim, `git checkout`) is deliberately not
+-- wired up: nothing in the reachable gap needs it, it only fires on an
+-- explicit `:checktime`/'autoread' check this plugin does not otherwise
+-- perform, and adding it would mean reasoning through a second, harder
+-- staleness source for a workflow nobody has asked for yet.
+
+--- One global augroup, not one per review tab: the event this reacts to — "a
+--- file changed on disk" — has nothing to do with which tabpage is current,
+--- and the callback below re-reads `M._painted` fresh on every write rather
+--- than closing over any particular tab's state. Created at most once
+--- (`write_augroup` guards it, declared above with the other tab-state
+--- locals) and, unlike a per-tab group, never needs tearing down when a
+--- review tab closes, because it was never tied to one — so it does not
+--- participate in the `IntentDiffSync_<n>` per-tab augroup hygiene
+--- paint.lua's alignment tracker follows, and there is nothing here for that
+--- hygiene test to catch.
+
+--- Every review tabpage whose CURRENTLY PAINTED plan includes `abs_path`
+--- (already an absolute path). See `M._on_file_written`'s doc comment for why
+--- "currently painted" — not "anywhere in the review's diff" — is the scope.
+--- @return table[] { tabpage, painted, path } — `path` is repo-relative
+local function tabs_showing(abs_path)
+  local out = {}
+  for tabpage, painted in pairs(M._painted) do
+    if vim.api.nvim_tabpage_is_valid(tabpage) and painted.sess and painted.sess.git_root then
+      local prefix = painted.sess.git_root:gsub("/+$", "") .. "/"
+      if abs_path:sub(1, #prefix) == prefix then
+        local relpath = abs_path:sub(#prefix + 1)
+        for _, f in ipairs(painted.files) do
+          if f.path == relpath then
+            out[#out + 1] = { tabpage = tabpage, painted = painted, path = relpath }
+            break
+          end
+        end
+      end
+    end
+  end
+  return out
+end
+
+--- A file was written to disk. Invalidate its cached worktree content in
+--- every review tab that currently has it on screen, and repaint those tabs
+--- immediately so the reader sees the "changed on disk" note (render/plan.lua's
+--- `file.stale` branch) as soon as they return, rather than only on their next
+--- navigation.
+---
+--- Deliberately does NOT try to show the edit itself. `content.is_stale`
+--- (checked by render_now, above) forces this file to fall back to its
+--- hunks' own frozen text instead of pairing fresh worktree lines against
+--- hunk ranges a `git diff` run before the edit produced — those ranges can
+--- no longer be trusted to describe the file (a shifted line count misaligns
+--- every row after the edit, silently). Actually re-diffing to make a live
+--- update SAFE would mean re-parsing hunks and reconciling them against the
+--- classifier's existing groups by identity — a real re-classification, out
+--- of scope here. Freezing to the hunks-only view is the honest degradation:
+--- never wrong, just says so instead of guessing.
+---
+--- Scoped to `M._painted[tab].files` — what a tab is CURRENTLY showing — not
+--- the review's whole diff. `gf` only ever opens a file that is part of the
+--- plan on screen at the moment it is pressed, and that plan does not change
+--- while the reader is away editing in the other (real-file) tab, so this
+--- covers the task 11 workflow exactly. A file that belongs to the review but
+--- is showing in neither pane at write time is left alone — reaching it would
+--- mean tracking the review's whole file list here too, which nothing this
+--- task's interface surface (view.lua/content.lua) exposes, and no described
+--- workflow needs it.
+function M._on_file_written(abs_path)
+  if not abs_path or abs_path == "" then
+    return
+  end
+  local content = require("intentdiff.render.content")
+  for _, hit in ipairs(tabs_showing(abs_path)) do
+    content.invalidate(hit.painted.sess, hit.path)
+    vim.notify(
+      ("intent-diff: %s changed on disk — showing it as reviewed; reopen the review for a fresh diff")
+        :format(hit.path),
+      vim.log.levels.WARN)
+    render_now(hit.tabpage, hit.painted.sess, hit.painted.files, hit.painted.visible,
+      M._layout[hit.tabpage])
+  end
+end
+
+--- Arm the write watcher. Idempotent — `write_augroup` guards it against
+--- registering twice across repeated `M.open_tab` calls in the same Neovim
+--- session, and `nvim_create_augroup`'s `clear = true` means even a forced
+--- re-arm (a reloaded module in a test run) replaces rather than stacks the
+--- one autocommand it owns.
+ensure_write_watch = function()
+  if write_augroup then
+    return
+  end
+  write_augroup = vim.api.nvim_create_augroup("IntentDiffWatch", { clear = true })
+  vim.api.nvim_create_autocmd("BufWritePost", {
+    group = write_augroup,
+    pattern = "*",
+    callback = function(args)
+      M._on_file_written(vim.fn.fnamemodify(args.file, ":p"))
+    end,
+  })
 end
 
 --- Render `files` with `visible` hunks left unfolded. THE render entry point: a

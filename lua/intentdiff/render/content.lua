@@ -11,7 +11,7 @@
 local M = {}
 
 --- caches[sess_key] = { old = { [path] = lines }, new = { [path] = lines },
----                      inflight = { [path] = true } }
+---                      inflight = { [path] = true }, stale = { [path] = true } }
 local caches = {}
 
 local function key_of(sess)
@@ -22,7 +22,7 @@ end
 local function cache_of(sess)
   local k = key_of(sess)
   if not caches[k] then
-    caches[k] = { old = {}, new = {}, inflight = {} }
+    caches[k] = { old = {}, new = {}, inflight = {}, stale = {} }
   end
   return caches[k]
 end
@@ -90,12 +90,29 @@ function M.get(sess, path, side)
   return cache[side][path]
 end
 
---- Drop the worktree side of `path`, keeping the immutable base side.
+--- Drop the worktree side of `path`, keeping the immutable base side, and mark
+--- it stale: its hunks (parsed from `git diff` before this call) describe a
+--- file that has since changed underneath them, so pairing freshly-fetched
+--- content against those hunk ranges could silently misalign every line after
+--- the edit. `M.is_stale` is how a caller finds out it must not do that;
+--- staleness sticks for the rest of this review's cache, since nothing here
+--- re-diffs to clear it — that would be a full reclassification, out of scope
+--- for a cache module.
 function M.invalidate(sess, path)
   local cache = caches[key_of(sess)]
   if cache then
     cache.new[path] = nil
+    cache.stale[path] = true
   end
+end
+
+--- Whether `path`'s worktree side was invalidated (e.g. by a write to the file
+--- while its review was open) since this review's cache was created. A stale
+--- file's hunks may no longer describe it; renderers must fall back to the
+--- hunks' own frozen text rather than pairing it against fresh content.
+function M.is_stale(sess, path)
+  local cache = caches[key_of(sess)]
+  return cache ~= nil and cache.stale[path] == true
 end
 
 --- Ensure both sides of every file are cached.
