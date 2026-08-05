@@ -173,14 +173,29 @@ describe("paint syntax highlighting", function()
       "an unchanged row got no treesitter highlights")
   end)
 
-  it("highlights an inline deletion row from the ORIGINAL parse", function()
+  it("highlights an inline deletion row from the ORIGINAL parse, not the interleaved pane slice", function()
+    -- The old side opens an unterminated long-string bracket. Parsed on its
+    -- own (correct), it does not touch the addition row at all. Parsed as ONE
+    -- document concatenated with the addition row (the bug this task exists
+    -- to prevent -- treating a pane's interleaved row range as coherent
+    -- content), the `[[` swallows the addition row's "local" into the
+    -- unterminated string and it loses its @keyword capture, coming back as
+    -- @variable instead. Verified empirically:
+    --   compute_syntax_highlights({"local s = [["}, "lua")[1]        -> @keyword/@variable/@operator (local s =)
+    --   compute_syntax_highlights({"local x = 1"}, "lua")[1]         -> @keyword/@variable/@operator/@number (local x = 1)
+    --   compute_syntax_highlights({"local s = [[","local x = 1"}, "lua")[2]
+    --     -> "local" comes back as @variable, not @keyword: concatenation changed the parse.
+    -- Two independent `local x = n` statements (no unterminated construct)
+    -- tokenise identically whether parsed alone or concatenated, so that
+    -- fixture would pass against a buggy single-parse implementation too;
+    -- this one does not.
     local file = {
       path = "a.lua", status = "M", filetype = "lua", binary = false,
-      original = { "local removed = 1" },
-      modified = { "local added = 2" },
+      original = { "local s = [[" },
+      modified = { "local x = 1" },
       hunks = { {
         id = "a.lua:1", file = "a.lua", header = "@@ -1,1 +1,1 @@",
-        text = "@@ -1,1 +1,1 @@\n-local removed = 1\n+local added = 2\n",
+        text = "@@ -1,1 +1,1 @@\n-local s = [[\n+local x = 1\n",
         original = { start_line = 1, end_line = 2 },
         modified = { start_line = 1, end_line = 2 },
         additions = 1, deletions = 1,
@@ -192,7 +207,9 @@ describe("paint syntax highlighting", function()
     -- Row 2 is the deletion (original content), row 3 the addition.
     assert.is_true(#syntax_marks(painted.bufs.modified, 2) > 0,
       "the deletion row must be highlighted from the original file's parse")
-    assert.is_true(#syntax_marks(painted.bufs.modified, 3) > 0)
+    assert.is_true(vim.tbl_contains(syntax_marks(painted.bufs.modified, 3), "@keyword"),
+      "the addition row must be parsed from the modified file alone: "
+        .. "under the interleaved-slice bug 'local' loses its @keyword capture")
   end)
 
   it("leaves separators and fillers unhighlighted", function()
@@ -231,5 +248,41 @@ describe("paint syntax highlighting", function()
     local content = { ["a.weird"] = { old = file.original, new = file.modified } }
     local p = plan.build({ file }, {}, "side-by-side")
     assert.has_no.errors(function() paint.render(p, wins, content) end)
+  end)
+
+  it("looks a fallback file's syntax up by its real file line, not its pane row", function()
+    -- A fallback file (no `original`/`modified` content, so plan.lua renders
+    -- hunks-only) still carries the hunk's REAL start_line into
+    -- map[row].line via fallback_rows -> pair_body, exactly like a normal
+    -- file. The design's correctness rests on that: pane rows are dense
+    -- (separator, then one row per changed pair) and do NOT line up with
+    -- file line numbers once a hunk starts anywhere past line 1. Lines 1-4
+    -- are numeral filler (only ever an @number capture); line 5, the hunk's
+    -- real start_line, is the only line with an @keyword capture. The
+    -- addition lands on pane row 2 (row 1 is the separator) -- if the lookup
+    -- used the pane row instead of map[row].line it would hit content.new[2]
+    -- ("2", @number only) instead of content.new[5] ("local x = 1", @keyword).
+    local file = {
+      path = "a.lua", status = "M", filetype = "lua", binary = false,
+      original = nil, modified = nil,
+      hunks = { {
+        id = "a.lua:1", file = "a.lua", header = "@@ -5,1 +5,1 @@",
+        text = "@@ -5,1 +5,1 @@\n-local removed = 1\n+local x = 1\n",
+        original = { start_line = 5, end_line = 6 },
+        modified = { start_line = 5, end_line = 6 },
+        additions = 1, deletions = 1,
+      } },
+    }
+    local content = {
+      ["a.lua"] = {
+        old = { "1", "2", "3", "4", "local removed = 1" },
+        new = { "1", "2", "3", "4", "local x = 1" },
+      },
+    }
+    local p = plan.build({ file }, {}, "side-by-side")
+    assert.is_true(p.files[1].fallback, "the file must actually take the fallback path")
+    local painted = paint.render(p, wins, content)
+    assert.is_true(vim.tbl_contains(syntax_marks(painted.bufs.modified, 2), "@keyword"),
+      "the fallback row must be looked up by its real file line (5), not its pane row (2)")
   end)
 end)
