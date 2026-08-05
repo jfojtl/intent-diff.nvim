@@ -385,3 +385,66 @@ describe("plan.target_at and plan.rows_for", function()
       { file = "a.lua", line = 3, side = "new", intent_title = "Auth" }))
   end)
 end)
+
+describe("plan.build inline", function()
+  it("puts every row in one pane and leaves the original pane empty", function()
+    local p = plan.build({ modified_file() }, {}, "inline")
+    assert.equals("inline", p.layout)
+    assert.is_nil(p.original)
+    -- separator + 2 context + delete + add + 2 context
+    assert.equals(7, #p.modified.lines)
+  end)
+
+  it("shows the deletion and the addition as separate rows", function()
+    local p = plan.build({ modified_file() }, {}, "inline")
+    assert.equals("three", p.modified.lines[4])
+    assert.equals("THREE", p.modified.lines[5])
+  end)
+
+  it("addresses a deletion row to the old side and everything else to new", function()
+    local p = plan.build({ modified_file() }, {}, "inline")
+    assert.same({ file = "a.lua", line = 2, side = "new" }, p.modified.map[3])
+    assert.same({ file = "a.lua", line = 3, side = "old" }, p.modified.map[4])
+    assert.same({ file = "a.lua", line = 3, side = "new" }, p.modified.map[5])
+    assert.same({ file = "a.lua", line = 4, side = "new" }, p.modified.map[6])
+  end)
+
+  it("emits no filler rows at all", function()
+    local file = {
+      path = "a.lua", status = "M", filetype = "lua", binary = false,
+      original = { "one", "two" },
+      modified = { "one", "TWO", "EXTRA" },
+      hunks = { {
+        id = "a.lua:1", file = "a.lua", header = "@@ -2,1 +2,2 @@",
+        text = "@@ -2,1 +2,2 @@\n-two\n+TWO\n+EXTRA\n",
+        original = { start_line = 2, end_line = 3 },
+        modified = { start_line = 2, end_line = 4 },
+        additions = 2, deletions = 1,
+      } },
+    }
+    local p = plan.build({ file }, {}, "inline")
+    for _, s in ipairs(p.modified.spans) do
+      assert.not_equals("IntentDiffFiller", s.hl)
+    end
+    -- separator, context "one", "-two", "+TWO", "+EXTRA"
+    assert.equals(5, #p.modified.lines)
+  end)
+
+  it("records run rows in inline coordinates", function()
+    local p = plan.build({ modified_file() }, {}, "inline")
+    assert.equals(1, #p.runs)
+    assert.same({ 4 }, p.runs[1].minus_rows)
+    assert.same({ 5 }, p.runs[1].plus_rows)
+  end)
+
+  it("is still the exact inverse of target_at", function()
+    local p = plan.build({ modified_file() }, {}, "inline")
+    for row = 1, #p.modified.lines do
+      local t = plan.target_at(p.modified, row)
+      if t then
+        local rows = plan.rows_for(p.modified, { file = t.file, line = t.line, side = t.side })
+        assert.truthy(vim.tbl_contains(rows, row))
+      end
+    end
+  end)
+end)

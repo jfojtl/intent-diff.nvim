@@ -266,12 +266,19 @@ end
 function M.build(files, visible, layout, opts)
   opts = opts or {}
   visible = visible or {}
-  local original, modified = new_pane(), new_pane()
+  local inline = layout == "inline"
+  local original
+  if not inline then
+    original = new_pane()
+  end
+  local modified = new_pane()
   local runs, meta = {}, {}
 
   for _, file in ipairs(files or {}) do
     local sep = separator(file)
-    original.add(sep, "IntentDiffFileSeparator")
+    if original then
+      original.add(sep, "IntentDiffFileSeparator")
+    end
     modified.add(sep, "IntentDiffFileSeparator")
 
     if file.binary then
@@ -290,36 +297,63 @@ function M.build(files, visible, layout, opts)
                           fallback = not has_content }
 
       for _, row in ipairs(rows) do
-        local left_hl, right_hl
-        if row.changed then
-          if row.left == nil then
-            left_hl = "IntentDiffFiller"
+        if inline then
+          -- One buffer, so a row's SIDE comes from its kind. A filler row has
+          -- no content on either side and simply is not emitted here: inline
+          -- has no second pane to stay level with.
+          if row.left ~= nil and row.right ~= nil and not row.changed then
+            local r = modified.add(row.right, nil,
+              { file = file.path, line = row.new_line, side = "new" })
+            _ = r
           else
-            left_hl = "IntentDiffDelete"
+            if row.left ~= nil then
+              local r = modified.add(row.left, "IntentDiffDelete",
+                { file = file.path, line = row.old_line, side = "old" })
+              if row.run then
+                local run = runs[row.run]
+                run.minus_rows[#run.minus_rows + 1] = r
+              end
+            end
+            if row.right ~= nil then
+              local r = modified.add(row.right, "IntentDiffAdd",
+                { file = file.path, line = row.new_line, side = "new" })
+              if row.run then
+                local run = runs[row.run]
+                run.plus_rows[#run.plus_rows + 1] = r
+              end
+            end
           end
-          if row.right == nil then
-            right_hl = "IntentDiffFiller"
-          else
-            right_hl = "IntentDiffAdd"
+        else
+          local left_hl, right_hl
+          if row.changed then
+            if row.left == nil then
+              left_hl = "IntentDiffFiller"
+            else
+              left_hl = "IntentDiffDelete"
+            end
+            if row.right == nil then
+              right_hl = "IntentDiffFiller"
+            else
+              right_hl = "IntentDiffAdd"
+            end
           end
-        end
-        local left_target, right_target
-        if row.old_line then
-          left_target = { file = file.path, line = row.old_line, side = "old" }
-        end
-        if row.new_line then
-          right_target = { file = file.path, line = row.new_line, side = "new" }
-        end
-        local lrow = original.add(row.left or "", left_hl, left_target)
-        local rrow = modified.add(row.right or "", right_hl, right_target)
-        -- Record where each run's lines landed, for character refinement.
-        if row.run then
-          local run = runs[row.run]
-          if row.left ~= nil then
-            run.minus_rows[#run.minus_rows + 1] = lrow
+          local left_target, right_target
+          if row.old_line then
+            left_target = { file = file.path, line = row.old_line, side = "old" }
           end
-          if row.right ~= nil then
-            run.plus_rows[#run.plus_rows + 1] = rrow
+          if row.new_line then
+            right_target = { file = file.path, line = row.new_line, side = "new" }
+          end
+          local lrow = original.add(row.left or "", left_hl, left_target)
+          local rrow = modified.add(row.right or "", right_hl, right_target)
+          if row.run then
+            local run = runs[row.run]
+            if row.left ~= nil then
+              run.minus_rows[#run.minus_rows + 1] = lrow
+            end
+            if row.right ~= nil then
+              run.plus_rows[#run.plus_rows + 1] = rrow
+            end
           end
         end
       end
@@ -327,7 +361,7 @@ function M.build(files, visible, layout, opts)
   end
 
   return {
-    layout = "side-by-side",
+    layout = inline and "inline" or "side-by-side",
     original = original,
     modified = modified,
     files = meta,
