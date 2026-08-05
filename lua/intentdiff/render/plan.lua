@@ -137,10 +137,18 @@ local function file_rows(file, runs)
   local o, m = 1, 1
 
   local function unchanged()
-    rows[#rows + 1] = {
-      left = orig[o], right = mod[m],
-      old_line = o, new_line = m, changed = false,
-    }
+    -- Bound each side independently: a row past the end of one side's array
+    -- is a filler on that side and must not claim a coordinate there, even
+    -- though the loops that call this are driven by `o` (or, in the tail
+    -- loop, by both together) rather than by each side's own length.
+    local row = { changed = false }
+    if o <= #orig then
+      row.left, row.old_line = orig[o], o
+    end
+    if m <= #mod then
+      row.right, row.new_line = mod[m], m
+    end
+    rows[#rows + 1] = row
     o, m = o + 1, m + 1
   end
 
