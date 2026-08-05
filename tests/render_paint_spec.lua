@@ -29,6 +29,7 @@ describe("paint.render", function()
   local wins, tab
   before_each(function() wins, tab = two_wins() end)
   after_each(function()
+    paint.unsync(tab)
     if vim.api.nvim_tabpage_is_valid(tab) then
       vim.cmd("tabclose!")
     end
@@ -74,19 +75,25 @@ describe("paint.render", function()
     assert.is_true(found, "the added line has no IntentDiffAdd line highlight")
   end)
 
-  it("binds the two panes together for scrolling", function()
+  it("keeps the two panes aligned WITHOUT native scrollbind", function()
     local p = plan.build({ modified_file() }, {}, "side-by-side")
     paint.render(p, wins)
-    assert.is_true(vim.wo[wins.original].scrollbind)
-    assert.is_true(vim.wo[wins.modified].scrollbind)
-    assert.is_true(vim.wo[wins.original].cursorbind)
+    -- Native scrollbind mirrors relative deltas and drifts permanently once the
+    -- panes are knocked apart; alignment is structural now, and leaving the
+    -- native binding on would fight it.
+    assert.is_false(vim.wo[wins.original].scrollbind)
+    assert.is_false(vim.wo[wins.modified].scrollbind)
+    assert.is_false(vim.wo[wins.original].cursorbind)
+    assert.is_false(vim.wo[wins.modified].cursorbind)
+    assert.is_not_nil(paint.sync_state(tab), "the panes were not bound for alignment")
   end)
 
-  it("uses one window and no scrollbind in inline layout", function()
+  it("uses one window and no alignment in inline layout", function()
     local p = plan.build({ modified_file() }, {}, "inline")
     local painted = paint.render(p, { modified = wins.modified })
     assert.is_nil(painted.bufs.original)
     assert.is_false(vim.wo[wins.modified].scrollbind)
+    assert.is_nil(paint.sync_state(tab), "one pane has nothing to align to")
   end)
 
   it("closes the plan's fold ranges", function()
@@ -138,6 +145,7 @@ describe("paint syntax highlighting", function()
   local wins, tab
   before_each(function() wins, tab = two_wins() end)
   after_each(function()
+    paint.unsync(tab)
     if vim.api.nvim_tabpage_is_valid(tab) then vim.cmd("tabclose!") end
   end)
 
@@ -291,6 +299,7 @@ describe("paint character highlighting", function()
   local wins, tab
   before_each(function() wins, tab = two_wins() end)
   after_each(function()
+    paint.unsync(tab)
     if vim.api.nvim_tabpage_is_valid(tab) then vim.cmd("tabclose!") end
   end)
 
@@ -388,5 +397,229 @@ describe("paint character highlighting", function()
     if not ok then
       error(err, 0)
     end
+  end)
+end)
+
+describe("paint pane alignment", function()
+  -- The bug this covers: native scrollbind mirrors RELATIVE scroll deltas, so
+  -- once the two panes are knocked apart (a jump, a mouse scroll, a fold
+  -- toggle) they stay apart, and the row under the cursor on the left points at
+  -- a row far from it on the right. Alignment is absolute now: plan.lua pads
+  -- both panes to the same height with real filler rows, so buffer row N left
+  -- IS buffer row N right, and syncing means copying the topline and the cursor
+  -- ROW across.
+
+  local wins, tab
+  before_each(function() wins, tab = two_wins() end)
+  after_each(function()
+    paint.unsync(tab)
+    if vim.api.nvim_tabpage_is_valid(tab) then vim.cmd("tabclose!") end
+  end)
+
+  --- A file long enough to scroll in a ~21-row headless window.
+  local function tall_file()
+    local orig, mod = {}, {}
+    for i = 1, 200 do
+      orig[i] = "line " .. i
+      mod[i] = "line " .. i
+    end
+    mod[100] = "CHANGED"
+    return {
+      path = "a.lua", status = "M", filetype = "lua", binary = false,
+      original = orig, modified = mod,
+      hunks = { {
+        id = "a.lua:1", file = "a.lua", header = "@@ -100,1 +100,1 @@",
+        text = "@@ -100,1 +100,1 @@\n-line 100\n+CHANGED\n",
+        original = { start_line = 100, end_line = 101 },
+        modified = { start_line = 100, end_line = 101 },
+        additions = 1, deletions = 1,
+      } },
+    }
+  end
+
+  --- Drive the alignment autocommands the way a real scroll or cursor move
+  --- does. Headless Neovim never raises WinScrolled or CursorMoved by itself —
+  --- both come from the main loop's redraw/state check, which needs a UI — so
+  --- the registered callbacks are invoked through `doautocmd` in the window the
+  --- movement happened in. The callbacks under test are the real ones: nothing
+  --- here reaches past the autocommand.
+  local function fire(win, event)
+    vim.api.nvim_set_current_win(win)
+    vim.cmd("doautocmd " .. event)
+  end
+
+  local function topline(win)
+    return vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+  end
+
+  local function row(win)
+    return vim.api.nvim_win_get_cursor(win)[1]
+  end
+
+  local function move(win, keys)
+    vim.api.nvim_set_current_win(win)
+    vim.cmd("normal! " .. keys)
+  end
+
+  local function render_tall()
+    local p = plan.build({ tall_file() }, {}, "side-by-side")
+    assert.equals(#p.original.lines, #p.modified.lines)
+    assert.is_true(#p.modified.lines > 100, "the fixture must be tall enough to scroll")
+    paint.render(p, wins)
+    return p
+  end
+
+  it("scrolls the other pane to the same absolute topline", function()
+    render_tall()
+    move(wins.original, "G")
+    assert.is_true(topline(wins.original) > topline(wins.modified),
+      "the fixture did not actually scroll one pane away from the other")
+    fire(wins.original, "WinScrolled")
+    assert.equals(topline(wins.original), topline(wins.modified))
+  end)
+
+  it("scrolls in the other direction too", function()
+    render_tall()
+    move(wins.modified, "G")
+    fire(wins.modified, "WinScrolled")
+    assert.equals(topline(wins.modified), topline(wins.original))
+  end)
+
+  it("puts the other pane's cursor on the same row without scrolling", function()
+    render_tall()
+    local before = topline(wins.original)
+    -- Inside the visible area: nothing scrolls, so WinScrolled would never
+    -- fire and CursorMoved is the only thing that can carry this.
+    move(wins.original, "5j")
+    fire(wins.original, "CursorMoved")
+    assert.equals(6, row(wins.original))
+    assert.equals(row(wins.original), row(wins.modified))
+    assert.equals(before, topline(wins.original), "the fixture scrolled after all")
+    assert.equals(before, topline(wins.modified))
+  end)
+
+  it("follows the cursor from the modified pane back to the original", function()
+    render_tall()
+    move(wins.modified, "120G")
+    fire(wins.modified, "CursorMoved")
+    assert.equals(120, row(wins.modified))
+    assert.equals(120, row(wins.original))
+    assert.equals(topline(wins.modified), topline(wins.original))
+  end)
+
+  it("re-aligns absolutely after a jump that leaves native scrollbind drifted", function()
+    render_tall()
+    -- A relative binding would carry this offset forever; an absolute one
+    -- cannot even represent it.
+    move(wins.original, "G")
+    fire(wins.original, "WinScrolled")
+    move(wins.original, "gg")
+    fire(wins.original, "CursorMoved")
+    assert.equals(1, row(wins.original))
+    assert.equals(1, topline(wins.original))
+    assert.equals(1, topline(wins.modified))
+    assert.equals(1, row(wins.modified))
+  end)
+
+  it("snaps a pane knocked out of alignment behind its back back into line", function()
+    render_tall()
+    -- Exactly the state the report describes: the panes are far apart and no
+    -- delta will ever bring them together again.
+    vim.api.nvim_win_call(wins.modified, function()
+      vim.fn.winrestview({ topline = 90, lnum = 95 })
+    end)
+    move(wins.original, "40G")
+    fire(wins.original, "CursorMoved")
+    assert.equals(40, row(wins.modified))
+    assert.equals(topline(wins.original), topline(wins.modified))
+  end)
+
+  it("does not sync in response to its own sync", function()
+    render_tall()
+    local state = paint.sync_state(tab)
+    move(wins.original, "60G")
+    fire(wins.original, "CursorMoved")
+    local after_one = state.applies
+    -- The echo: the events our own winrestview raises, delivered once the
+    -- callback has returned. Nothing has moved that we did not move ourselves,
+    -- so these must align nothing — that is what stops a counter-sync.
+    fire(wins.original, "WinScrolled")
+    fire(wins.modified, "CursorMoved")
+    fire(wins.modified, "WinScrolled")
+    assert.equals(after_one, state.applies,
+      "an event carrying no user movement still re-aligned: this is the loop")
+  end)
+
+  it("keeps the panes on the same row when a fold is open in only one of them", function()
+    local file = tall_file()
+    local p = plan.build({ file }, { ["a.lua:1"] = true }, "side-by-side", { context = 2 })
+    assert.is_true(#p.folds > 0, "the fixture must actually fold")
+    paint.render(p, wins)
+    local state = paint.sync_state(tab)
+    -- Folds are per WINDOW: `zo` on the left opens a fold the right still has
+    -- closed. Buffer rows still correspond 1:1, so the cursor row stays exact;
+    -- the screen rows below the topline differ until both fold sets agree
+    -- again, which is the honest cost of letting the user fold one side.
+    move(wins.original, "3G")
+    vim.api.nvim_win_call(wins.original, function() pcall(vim.cmd, "normal! zo") end)
+    assert.has_no.errors(function()
+      move(wins.original, "10G")
+      fire(wins.original, "CursorMoved")
+    end)
+    assert.equals(10, row(wins.original))
+    assert.equals(10, row(wins.modified))
+    -- And it settles: a follower whose fold moved the topline it was given
+    -- must not start a tug of war with the leader.
+    local settled = state.applies
+    fire(wins.original, "WinScrolled")
+    fire(wins.modified, "WinScrolled")
+    assert.equals(settled, state.applies, "the differing fold sets caused a ping-pong")
+  end)
+
+  it("does nothing and does not error in inline layout", function()
+    local p = plan.build({ tall_file() }, {}, "inline")
+    paint.render(p, { modified = wins.modified })
+    assert.is_nil(paint.sync_state(tab))
+    assert.has_no.errors(function()
+      fire(wins.modified, "CursorMoved")
+      fire(wins.modified, "WinScrolled")
+      paint.resync(tab)
+    end)
+  end)
+
+  it("tears the alignment down when a side-by-side render becomes inline", function()
+    render_tall()
+    assert.is_not_nil(paint.sync_state(tab))
+    local p = plan.build({ tall_file() }, {}, "inline")
+    paint.render(p, { modified = wins.modified })
+    assert.is_nil(paint.sync_state(tab))
+    assert.is_false(pcall(vim.api.nvim_get_autocmds, { group = "IntentDiffSync_" .. tab }),
+      "the augroup outlived the layout that needed it")
+  end)
+
+  it("does not accumulate autocommands across repeated renders", function()
+    local function count()
+      return #vim.api.nvim_get_autocmds({ group = "IntentDiffSync_" .. tab })
+    end
+    render_tall()
+    local first = count()
+    assert.is_true(first > 0, "nothing was registered")
+    render_tall()
+    assert.equals(first, count())
+    render_tall()
+    render_tall()
+    assert.equals(first, count(),
+      "every render stacked another copy of the alignment autocommands")
+  end)
+
+  it("stops aligning once the tab is unsynced", function()
+    render_tall()
+    paint.unsync(tab)
+    assert.is_nil(paint.sync_state(tab))
+    assert.is_false(pcall(vim.api.nvim_get_autocmds, { group = "IntentDiffSync_" .. tab }))
+    move(wins.original, "G")
+    local before = topline(wins.modified)
+    fire(wins.original, "WinScrolled")
+    assert.equals(before, topline(wins.modified))
   end)
 end)

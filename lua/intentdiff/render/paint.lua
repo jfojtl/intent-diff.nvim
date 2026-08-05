@@ -244,6 +244,243 @@ local function apply_folds(win, plan)
   vim.wo[win].foldenable = true
 end
 
+-- --------------------------------------------------------- pane alignment --
+--
+-- Native `scrollbind` mirrors RELATIVE scroll deltas, so the two panes stay
+-- wherever a fold toggle, a jump or a mouse scroll left them: once drifted,
+-- forever drifted, and `syncbind` at render time only fixes the drift that
+-- already happened. What the reader wants is ABSOLUTE alignment, and here it is
+-- exact for free: plan.lua pads both side-by-side panes with real filler rows,
+-- so `#plan.original.lines == #plan.modified.lines` and buffer row N in the
+-- left pane is buffer row N in the right pane, always. Aligning the panes is
+-- therefore "put the other window on the same topline and the same cursor row"
+-- — no filler tables, no offset arithmetic.
+
+--- Per-tabpage alignment record:
+--- `{ wins = { modified, original }, group = augroup id, expected = { [win] = fp },
+---    syncing = boolean, applies = integer }`.
+local sync_by_tab = {}
+
+local function win_view(win)
+  return vim.api.nvim_win_call(win, vim.fn.winsaveview)
+end
+
+--- The part of a window's view a desync would show up in: which line is at the
+--- top, and which line the cursor is on.
+local function view_fp(win)
+  local ok, v = pcall(win_view, win)
+  if not ok then
+    return ""
+  end
+  return string.format("%d,%d", v.topline or 0, v.lnum or 0)
+end
+
+local function live_wins(state)
+  local out = {}
+  for _, win in ipairs(state.wins) do
+    if vim.api.nvim_win_is_valid(win) then
+      out[#out + 1] = win
+    end
+  end
+  return out
+end
+
+local function is_member(state, win)
+  for _, w in ipairs(state.wins) do
+    if w == win then
+      return true
+    end
+  end
+  return false
+end
+
+--- Remember where every member window ACTUALLY ended up. The recorded views are
+--- what makes an echo event (the scroll our own `winrestview` causes, delivered
+--- after our callback has already returned) a no-op: it finds no window whose
+--- view differs from what we last wrote, so it aligns nothing and fires nothing.
+--- Recording the real resulting view rather than the requested one matters when
+--- the follower cannot honour the request exactly — a closed fold at the target
+--- topline moves the topline to the fold's first row — because otherwise every
+--- event afterwards would see a permanent difference and re-align forever.
+local function record(state)
+  for _, win in ipairs(live_wins(state)) do
+    state.expected[win] = view_fp(win)
+  end
+end
+
+--- The member window the USER moved, i.e. the one whose view no longer matches
+--- what we last recorded. The focused window wins a tie, since that is the one
+--- the reader is driving.
+local function detect_leader(state)
+  local cur = vim.api.nvim_get_current_win()
+  local candidate
+  for _, win in ipairs(live_wins(state)) do
+    if view_fp(win) ~= state.expected[win] then
+      if win == cur then
+        return win
+      end
+      if not candidate then
+        candidate = win
+      end
+    end
+  end
+  return candidate
+end
+
+--- Put every other member window on `leader`'s ABSOLUTE topline and cursor row.
+---
+--- `winrestview` rather than `nvim_win_set_cursor`: the cursor API has no say
+--- over the topline at all, and moving the cursor makes Neovim scroll the
+--- window by 'scrolloff' rules — which is exactly the relative, drift-prone
+--- behaviour being replaced. `winrestview` sets topline and cursor in ONE
+--- consistent operation.
+---
+--- The COLUMN is deliberately not copied. The two panes hold different text on
+--- every changed row, so the leader's column addresses nothing in particular on
+--- the follower's line; the follower keeps its own column (Vim clamps it to the
+--- new line for us). Only the row carries meaning across the panes.
+local function align(state, leader)
+  local lv = win_view(leader)
+  for _, win in ipairs(live_wins(state)) do
+    if win ~= leader then
+      vim.api.nvim_win_call(win, function()
+        local v = vim.fn.winsaveview()
+        local last = vim.api.nvim_buf_line_count(0)
+        v.topline = math.min(math.max(lv.topline or 1, 1), last)
+        v.lnum = math.min(math.max(lv.lnum or 1, 1), last)
+        vim.fn.winrestview(v)
+      end)
+    end
+  end
+  state.applies = state.applies + 1
+  record(state)
+end
+
+--- Handle one scroll or cursor event.
+---
+--- `state.syncing` is belt to the braces of Neovim's own rule that an
+--- autocommand does not trigger itself (ours are registered without `nested`),
+--- and it is what makes this safe even if a future caller drives the handler
+--- directly.
+local function on_event(state)
+  if state.syncing then
+    return
+  end
+  if #live_wins(state) < 2 then
+    return
+  end
+  local leader = detect_leader(state)
+  if not leader then
+    return -- nothing moved, or only our own alignment did: stop here
+  end
+  state.syncing = true
+  pcall(align, state, leader)
+  state.syncing = false
+end
+
+--- Stop keeping `tabpage`'s panes aligned and forget its record.
+function M.unsync(tabpage)
+  local state = sync_by_tab[tabpage]
+  if not state then
+    return
+  end
+  sync_by_tab[tabpage] = nil
+  pcall(vim.api.nvim_del_augroup_by_id, state.group)
+end
+
+--- The alignment record for `tabpage`, or nil. Read-only; exposed for tests and
+--- diagnostics.
+function M.sync_state(tabpage)
+  return sync_by_tab[tabpage]
+end
+
+--- Re-align `tabpage`'s panes right now, taking the focused pane as the truth
+--- when the cursor is in one and the modified pane otherwise. Called after a
+--- render has put the cursors back, so a fresh generation starts aligned rather
+--- than waiting for the reader's first move.
+function M.resync(tabpage)
+  local state = sync_by_tab[tabpage]
+  if not state then
+    return
+  end
+  local wins = live_wins(state)
+  if #wins < 2 then
+    return
+  end
+  local leader = wins[1]
+  local cur = vim.api.nvim_get_current_win()
+  if is_member(state, cur) and vim.api.nvim_win_is_valid(cur) then
+    leader = cur
+  end
+  state.syncing = true
+  pcall(align, state, leader)
+  state.syncing = false
+end
+
+--- Keep `tabpage`'s two pane windows vertically aligned.
+---
+--- The augroup is per tabpage and re-created with `clear = true`, so the
+--- repeated renders a review does (every sidebar move, every layout toggle)
+--- REPLACE these autocommands instead of stacking a fresh copy on each one.
+--- Callbacks close over `state`; a superseded generation's callbacks are gone
+--- with the augroup and can never answer for the new one.
+local function bind_sync(tabpage, wins)
+  local group = vim.api.nvim_create_augroup("IntentDiffSync_" .. tostring(tabpage), { clear = true })
+  local state = {
+    -- Modified first: it is the default leader, and it is the side a reader
+    -- looks at.
+    wins = { wins.modified, wins.original },
+    group = group,
+    expected = {},
+    syncing = false,
+    applies = 0,
+  }
+  sync_by_tab[tabpage] = state
+  record(state)
+
+  -- WinScrolled covers scrolling — including a mouse scroll over a pane that is
+  -- not focused, which no cursor event reports. It does NOT cover a cursor move
+  -- inside the visible area (nothing scrolled), which is the other half of the
+  -- report: a cursor put on a row must show the SAME row opposite. Hence both
+  -- events. Neither callback trusts the event's own window: `detect_leader`
+  -- asks which pane actually moved, which is also how an echo is recognised.
+  vim.api.nvim_create_autocmd("WinScrolled", {
+    group = group,
+    callback = function()
+      on_event(state)
+    end,
+  })
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = group,
+    callback = function()
+      if not is_member(state, vim.api.nvim_get_current_win()) then
+        return -- a cursor moving anywhere else in the tab is none of our business
+      end
+      on_event(state)
+    end,
+  })
+  -- A pane closed behind our back (`:q` in a pane, or the layout toggle closing
+  -- the original side) leaves nothing to align: tear down rather than keep
+  -- firing against a dead window id.
+  vim.api.nvim_create_autocmd("WinClosed", {
+    group = group,
+    callback = function(args)
+      local closed = tonumber(args.match)
+      if closed and is_member(state, closed) then
+        -- Scheduled so the augroup is not deleted from inside its own
+        -- dispatch, and guarded by identity: a layout toggle closes the
+        -- original window and immediately binds a NEW record for this tabpage,
+        -- and this teardown must never take that one down with it.
+        vim.schedule(function()
+          if sync_by_tab[tabpage] == state then
+            M.unsync(tabpage)
+          end
+        end)
+      end
+    end,
+  })
+end
+
 --- Render `plan` into `wins`.
 --- @param wins table { original = win|nil, modified = win }
 --- @param content table|nil { [path] = { old = string[], new = string[] } };
@@ -255,6 +492,12 @@ function M.render(plan, wins, content)
   for win in pairs(folded_by_win) do
     if not vim.api.nvim_win_is_valid(win) then
       folded_by_win[win] = nil
+    end
+  end
+  -- Same for tabpages that went away without anyone telling us.
+  for tabpage in pairs(sync_by_tab) do
+    if not vim.api.nvim_tabpage_is_valid(tabpage) then
+      M.unsync(tabpage)
     end
   end
 
@@ -279,16 +522,24 @@ function M.render(plan, wins, content)
 
   for side, win in pairs({ original = wins.original, modified = wins.modified }) do
     if (side ~= "original" or two_pane) and win and vim.api.nvim_win_is_valid(win) then
-      vim.wo[win].scrollbind = two_pane
-      vim.wo[win].cursorbind = two_pane
+      -- Explicitly OFF, never merely unset: the panes are aligned structurally
+      -- now (see "pane alignment" above), and a window still carrying native
+      -- scrollbind from an earlier generation — or from the user's own defaults
+      -- — would add its relative scrolling on top of ours and fight it.
+      vim.wo[win].scrollbind = false
+      vim.wo[win].cursorbind = false
       apply_folds(win, plan)
     end
   end
 
+  local tabpage = vim.api.nvim_win_get_tabpage(wins.modified)
   if two_pane then
-    vim.api.nvim_win_call(wins.modified, function()
-      vim.cmd("syncbind")
-    end)
+    bind_sync(tabpage, wins)
+    M.resync(tabpage)
+  else
+    -- Inline layout is ONE pane. There is nothing to align, and any record left
+    -- over from a side-by-side generation of this tab has to go.
+    M.unsync(tabpage)
   end
 
   return { bufs = bufs, plan = plan }

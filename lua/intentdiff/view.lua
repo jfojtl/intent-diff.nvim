@@ -154,6 +154,13 @@ function M.cleanup_tab_state(tabpage)
   M._painted[tabpage] = nil
   M._wins[tabpage] = nil
   M._layout[tabpage] = nil
+  -- Unconditional, and before the early return a missing `painted` would make:
+  -- the pane-alignment autocommands are the one piece of per-tab state that
+  -- lives outside `_painted`, and leaving them behind leaks a group that keeps
+  -- firing for a tab that no longer exists.
+  pcall(function()
+    require("intentdiff.render.paint").unsync(tabpage)
+  end)
   if painted then
     require("intentdiff.render.paint").retire(painted.bufs)
   end
@@ -309,6 +316,10 @@ local function render_now(tabpage, sess, files, visible, layout)
     require("intentdiff.render.paint").retire(prior.bufs)
   end
   restore_cursors(tabpage, captured)
+  -- After the cursors, not before: restoring them moves each pane's view
+  -- independently, and this is what leaves the fresh generation aligned instead
+  -- of waiting for the reader's first scroll to notice.
+  require("intentdiff.render.paint").resync(tabpage)
 
   M.install_keymaps(tabpage)
   refresh_comments(tabpage)
