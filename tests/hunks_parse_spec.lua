@@ -64,7 +64,7 @@ describe("hunks.parse", function()
     assert.equals("old.lua", parsed[3].old_path)
     assert.equals("A", parsed[4].status)
     assert.equals("D", parsed[5].status)
-    assert.same({ path = "added.lua", status = "A", old_path = nil }, files[3])
+    assert.same({ path = "added.lua", status = "A", old_path = nil, binary = false }, files[3])
   end)
 
   it("captures raw hunk text and content hash", function()
@@ -159,5 +159,44 @@ describe("hunks.parse line statistics", function()
     local h = require("intentdiff.hunks").untracked_hunk("new.lua", { "a", "b", "c" })
     assert.equals(3, h.additions)
     assert.equals(0, h.deletions)
+  end)
+end)
+
+describe("hunks.parse binary files", function()
+  it("marks a binary file and gives it no hunks", function()
+    local diff = table.concat({
+      "diff --git a/logo.png b/logo.png",
+      "index 1111111..2222222 100644",
+      "Binary files a/logo.png and b/logo.png differ",
+      "diff --git a/src/a.lua b/src/a.lua",
+      "index 3333333..4444444 100644",
+      "--- a/src/a.lua",
+      "+++ b/src/a.lua",
+      "@@ -1,1 +1,1 @@",
+      "-old",
+      "+new",
+    }, "\n") .. "\n"
+    local hunks, files = require("intentdiff.hunks").parse(diff)
+    assert.equals(2, #files)
+    assert.equals("logo.png", files[1].path)
+    assert.is_true(files[1].binary)
+    assert.equals("src/a.lua", files[2].path)
+    assert.is_false(files[2].binary)
+    -- Only the text file contributes hunks.
+    assert.equals(1, #hunks)
+    assert.equals("src/a.lua", hunks[1].file)
+  end)
+
+  it("marks a binary file added in this diff", function()
+    local diff = table.concat({
+      "diff --git a/img.bin b/img.bin",
+      "new file mode 100644",
+      "index 0000000..5555555",
+      "Binary files /dev/null and b/img.bin differ",
+    }, "\n") .. "\n"
+    local _, files = require("intentdiff.hunks").parse(diff)
+    assert.equals(1, #files)
+    assert.is_true(files[1].binary)
+    assert.equals("A", files[1].status)
   end)
 end)

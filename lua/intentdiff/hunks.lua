@@ -31,13 +31,18 @@ function M.parse(diff_text)
     if a then
       flush()
       file, old_path, status = b, (a ~= b) and a or nil, "M"
-      files[#files + 1] = { path = file, status = "M", old_path = old_path }
+      files[#files + 1] = { path = file, status = "M", old_path = old_path, binary = false }
     elseif line:match("^new file mode") then
       status = "A"
       files[#files].status = "A"
     elseif line:match("^deleted file mode") then
       status = "D"
       files[#files].status = "D"
+    elseif line:match("^Binary files ") then
+      -- No @@ header follows, so `current` stays nil and this file
+      -- contributes no hunks. Mark it so the renderer shows a marker row
+      -- instead of trying to read the file's bytes as text.
+      files[#files].binary = true
     elseif line:match("^@@") then
       flush()
       local os_, ol, ms, ml = line:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
