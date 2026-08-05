@@ -388,11 +388,20 @@ describe("paint character highlighting", function()
       local fresh = require("intentdiff.render.paint")
       local p = plan.build({ one_word_changed() }, {}, "side-by-side")
       assert.has_no.errors(function() fresh.render(p, wins, nil) end)
+      -- The fresh copy owns its OWN alignment record, so after_each's
+      -- paint.unsync (on the module every other spec holds) would find nothing
+      -- and leave this tab's augroup registered for the rest of the run — in a
+      -- suite that shares one nvim, a leaked autocommand is somebody else's
+      -- failure. Only this copy can reclaim it.
+      fresh.unsync(tab)
     end)
 
     package.preload["codediff.core.diff"] = nil
     package.loaded["codediff.core.diff"] = real
     package.loaded["intentdiff.render.paint"] = nil
+    -- Belt and braces: if the body above failed before it got that far, delete
+    -- the group by name. Nothing else can, once `fresh` is unreachable.
+    pcall(vim.api.nvim_del_augroup_by_name, "IntentDiffSync_" .. tab)
 
     if not ok then
       error(err, 0)
@@ -610,6 +619,50 @@ describe("paint pane alignment", function()
     render_tall()
     assert.equals(first, count(),
       "every render stacked another copy of the alignment autocommands")
+  end)
+
+  it("turns wrapping OFF in both panes", function()
+    render_tall()
+    -- Alignment is stated in BUFFER rows, and only nowrap makes a buffer row
+    -- one screen row. The panes hold different text on a changed row, so a
+    -- short line opposite a long one wraps to a different height at the SAME
+    -- width and every row below it drifts on screen — the reported symptom
+    -- again, from a second cause.
+    assert.is_false(vim.wo[wins.original].wrap)
+    assert.is_false(vim.wo[wins.modified].wrap)
+  end)
+
+  it("honours pane_wrap = true for a reader who wants wrapping anyway", function()
+    local config = require("intentdiff.config")
+    local prior = config.options.pane_wrap
+    config.options.pane_wrap = true
+    -- Restored even if the assertion fails: config.options is process-wide and
+    -- a leaked override would follow every later spec in this run.
+    local ok, err = pcall(function()
+      render_tall()
+      assert.is_true(vim.wo[wins.original].wrap)
+      assert.is_true(vim.wo[wins.modified].wrap)
+    end)
+    config.options.pane_wrap = prior
+    if not ok then
+      error(err, 0)
+    end
+  end)
+
+  it("leaves no alignment augroup behind for a tab that is gone", function()
+    -- Suite hygiene, asserted rather than hoped for: this file renders panes in
+    -- four describes and the whole suite shares ONE nvim, so an augroup that
+    -- outlives its tab keeps firing WinScrolled for every later spec. Reads the
+    -- registrations themselves rather than any module's bookkeeping, so it
+    -- still catches a group whose owning module copy was thrown away.
+    local orphans = {}
+    for _, au in ipairs(vim.api.nvim_get_autocmds({ event = "WinScrolled" })) do
+      local id = tostring(au.group_name or ""):match("^IntentDiffSync_(%d+)$")
+      if id and not vim.api.nvim_tabpage_is_valid(tonumber(id)) then
+        orphans[au.group_name] = true
+      end
+    end
+    assert.same({}, orphans, "an alignment augroup outlived its tabpage")
   end)
 
   it("stops aligning once the tab is unsynced", function()

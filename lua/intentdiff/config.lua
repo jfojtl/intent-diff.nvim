@@ -24,6 +24,12 @@ M.defaults = {
   },
   context_lines = nil, -- nil = follow codediff's diff.compact_context_lines
   sidebar_width = 40,
+  -- Wrap long lines in the diff panes. OFF, because the whole side-by-side
+  -- design rests on row N left being row N right: a changed line that is 40
+  -- characters on one side and 200 on the other occupies one screen row against
+  -- three at the SAME width, and everything below it reads at a different
+  -- height in each pane. Set true to wrap anyway and give up that alignment.
+  pane_wrap = false,
   icons = true, -- file icons from nvim-web-devicons when it is installed
   -- Auto-open the first file worth looking at, instead of leaving codediff's
   -- empty placeholder panes until the user presses <CR>: the first file of

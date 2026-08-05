@@ -137,6 +137,14 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   -- Width (columns) of the sidebar split.
   sidebar_width = 40,
 
+  -- Wrap long lines in the diff panes. Off, and deliberately so: the two panes
+  -- are kept aligned row for row (see "Scrolling and alignment" below), and a
+  -- changed line that is 40 characters on one side and 200 on the other takes
+  -- one screen row against three even at equal widths — so with wrapping on,
+  -- everything below such a line sits at a different height in each pane. Set
+  -- to true if you would rather read long lines whole and give that up.
+  pane_wrap = false,
+
   -- File icons from nvim-web-devicons (if installed) in the sidebar's file
   -- tree. Silently omitted if the plugin isn't present, or set to false here.
   icons = true,
@@ -710,6 +718,35 @@ added/untracked file (no splitting, and therefore no folding within it).
 
 Deleted files are deliberately never fold-filtered — a deleted file always
 has exactly one hunk covering the entire file, so there is nothing to fold.
+
+## Scrolling and alignment
+
+In side-by-side layout the two panes are kept aligned **absolutely**: buffer
+row N on the left is buffer row N on the right (both panes are padded to the
+same height with filler rows), so whenever you scroll or move the cursor in
+one pane, the other is put on the same top line and the same cursor row. This
+is not Vim's `scrollbind`, which mirrors *relative* scroll deltas and
+therefore stays permanently offset once anything knocks the two windows apart
+— a jump, a mouse scroll over the unfocused pane, `zz`, a fold toggle. Here
+there is no offset to accumulate: every scroll and every cursor move
+re-establishes the absolute relationship, so the row you are looking at on
+one side is always the row opposite it on the other.
+
+The cursor's **column** is not copied, only its row: the two panes hold
+different text on a changed line, so the column would point at nothing in
+particular. Long lines are not wrapped either (`pane_wrap`, above) — a
+40-character line opposite a 200-character one would occupy a different
+number of screen rows in each pane and undo the alignment below it.
+
+Folds are per window, so `zo` in one pane leaves the other pane's copy of that
+fold closed. Row alignment is unaffected (the buffers are unchanged, and the
+cursor still lands on the same row in both), but the screen rows *below* the
+cursor sit at different heights until both sides agree about folds again.
+
+Because the events this relies on (`WinScrolled`, `CursorMoved`) are only
+raised by Neovim when a UI is attached, the automated tests cannot observe
+them being delivered. `tests/manual/pane_alignment.lua` drives the real thing
+under a pty; its header says how to run it.
 
 ## Highlights
 

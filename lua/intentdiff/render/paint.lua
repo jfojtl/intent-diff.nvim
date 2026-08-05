@@ -223,6 +223,27 @@ local function paint_syntax(buf, pane, syntax)
   end
 end
 
+--- Whether the panes should wrap long lines (`config.pane_wrap`, off by
+--- default). Read through a pcall so the renderer keeps working if it is ever
+--- driven before `setup()` has run.
+---
+--- Wrapping is off because alignment is expressed in BUFFER rows: the two panes
+--- hold different text on every changed row, so a 40-character line opposite a
+--- 200-character one takes one screen row against three at the same width, and
+--- every row below it sits at a different height in each pane — the reported
+--- symptom again, from a different cause. The sidebar turns wrapping off for
+--- the same reason (its tree alignment) and wraps its own text by hand.
+local function pane_wrap()
+  local ok, config = pcall(require, "intentdiff.config")
+  if not ok then
+    return false
+  end
+  if config.options.pane_wrap == true then
+    return true
+  end
+  return false
+end
+
 --- Apply `plan.folds` to `win`, or clear folding when there is nothing to fold.
 local function apply_folds(win, plan)
   if #plan.folds == 0 then
@@ -447,6 +468,14 @@ local function bind_sync(tabpage, wins)
   vim.api.nvim_create_autocmd("WinScrolled", {
     group = group,
     callback = function()
+      -- WinScrolled fires for a scroll ANYWHERE, and `nvim_win_call` really
+      -- does reach into a background tabpage: without this, scrolling an
+      -- unrelated buffer would cost two winsaveview calls per open review tab
+      -- and could re-align a review the user is not even looking at.
+      -- CursorMoved's `is_member` check is the same guard by another route.
+      if vim.api.nvim_get_current_tabpage() ~= tabpage then
+        return
+      end
       on_event(state)
     end,
   })
@@ -520,6 +549,7 @@ function M.render(plan, wins, content)
 
   paint_chars(bufs, plan)
 
+  local wrap = pane_wrap()
   for side, win in pairs({ original = wins.original, modified = wins.modified }) do
     if (side ~= "original" or two_pane) and win and vim.api.nvim_win_is_valid(win) then
       -- Explicitly OFF, never merely unset: the panes are aligned structurally
@@ -528,6 +558,7 @@ function M.render(plan, wins, content)
       -- — would add its relative scrolling on top of ours and fight it.
       vim.wo[win].scrollbind = false
       vim.wo[win].cursorbind = false
+      vim.wo[win].wrap = wrap
       apply_folds(win, plan)
     end
   end
