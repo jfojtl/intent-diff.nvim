@@ -26,6 +26,14 @@
 --                                whole-file render with a hunks-only one would
 --                                fold real content with nothing to unfold to;
 --   * every row was kept open.
+--
+-- `hunk_rows` is one inclusive `{first, last}` PANE row range per VISIBLE
+-- hunk, ascending by `first`. Built from the same `hunk_spans` and the same
+-- before/after emission bracketing that `folds` uses — a second, independent
+-- way of answering "where is this hunk on screen" is exactly how this
+-- codebase previously got two surfaces disagreeing about a drifted comment.
+-- `navigation.lua` reads it directly instead of comparing a pane row against
+-- file line numbers.
 local M = {}
 
 local WHOLE_LINE = -1
@@ -347,6 +355,15 @@ function M.build(files, visible, layout, opts)
   local keep, protected = {}, {}
   local any_visible, any_fallback = false, false
 
+  -- Per-hunk PANE row bookkeeping, hunk id -> {first, last}. Built from the
+  -- exact same `hunk_spans` the fold `keep` set above is grown from, and by
+  -- the exact same before/after emission bracketing (below) that translates a
+  -- file-relative row into the pane rows it actually emitted — navigation and
+  -- folds read the same source so they can never disagree about where a hunk
+  -- is, the way the renderer and the comment store once disagreed about a
+  -- drifted comment.
+  local hunk_pane_span = {}
+
   local function add_separator(sep)
     if original then
       original.add(sep, "IntentDiffFileSeparator")
@@ -390,6 +407,20 @@ function M.build(files, visible, layout, opts)
       local keep_row = {}
       if not fallback_reason then
         any_visible = visible_rows(hunk_spans, visible, context, keep_row) or any_visible
+      end
+
+      -- File-relative row -> hunk id, for VISIBLE hunks only, unpadded (no
+      -- `context`): navigation lands on the hunk itself, not on the context
+      -- lines folds additionally keep open around it. Built whether or not
+      -- the file fell back to hunks-only rendering — a fallback file's rows
+      -- are exactly its hunk bodies, so its hunks are just as reachable.
+      local hunk_of_row = {}
+      for id, span in pairs(hunk_spans) do
+        if visible[id] then
+          for r = span[1], span[2] do
+            hunk_of_row[r] = id
+          end
+        end
       end
 
       for i, row in ipairs(rows) do
@@ -461,6 +492,16 @@ function M.build(files, visible, layout, opts)
             keep[r] = true
           end
         end
+        local hid = hunk_of_row[i]
+        if hid and #modified.lines > before then
+          local span = hunk_pane_span[hid]
+          if not span then
+            hunk_pane_span[hid] = { before + 1, #modified.lines }
+          else
+            span[1] = math.min(span[1], before + 1)
+            span[2] = math.max(span[2], #modified.lines)
+          end
+        end
       end
     end
   end
@@ -475,6 +516,17 @@ function M.build(files, visible, layout, opts)
     folds = fold_ranges(#modified.lines, keep, protected)
   end
 
+  -- One entry per VISIBLE hunk, ascending PANE row ranges. Navigation reads
+  -- this directly instead of comparing a pane row against file line numbers
+  -- (the old, off-by-the-separator-row bug): every hunk here already IS a
+  -- pane row range, on the plan that is actually painted, so a jump can never
+  -- land anywhere the reader cannot see.
+  local hunk_rows = {}
+  for _, span in pairs(hunk_pane_span) do
+    hunk_rows[#hunk_rows + 1] = { span[1], span[2] }
+  end
+  table.sort(hunk_rows, function(a, b) return a[1] < b[1] end)
+
   return {
     layout = inline and "inline" or "side-by-side",
     original = original,
@@ -482,6 +534,7 @@ function M.build(files, visible, layout, opts)
     files = meta,
     runs = runs,
     folds = folds,
+    hunk_rows = hunk_rows,
   }
 end
 

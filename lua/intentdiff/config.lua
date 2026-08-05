@@ -92,6 +92,12 @@ M.defaults = {
       next_hunk = "]c", -- group-scoped: only the current intent's hunks
       prev_hunk = "[c",
       show_help = "g?",
+      -- Panes are read-only scratch buffers now; this is the only way from
+      -- one into the real, editable file, at the cursor's exact line. Opens
+      -- in a new tab, identically for a single-file and a whole-intent view.
+      -- No collision on the pane buffers: sidebar's own `gf` (goto_file) is a
+      -- different surface/buffer entirely.
+      open_file = "gf",
     },
     -- The intent sidebar.
     sidebar = {

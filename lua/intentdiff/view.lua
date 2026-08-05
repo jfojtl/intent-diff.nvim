@@ -414,6 +414,52 @@ function M.pane_for_buf(tabpage, bufnr)
   return nil
 end
 
+--- Open the real file the cursor's row addresses, at that line, in a normal
+--- editable window — the escape hatch for the panes being read-only scratch
+--- buffers now.
+---
+--- Resolves through `plan.target_at`, the same map every other cross-surface
+--- feature (comments, cursor-preserving repaints) uses, so this behaves
+--- IDENTICALLY in a single-file view and a whole-intent one: both are one
+--- plan, and a row either addresses a (file, line) or it does not.
+---
+--- Opens in a NEW TAB rather than reusing the current window or the review
+--- tab's own windows: the two diff panes are dedicated, and swapping the real
+--- file into one of them would leave that pane no longer showing the diff it
+--- was laid out for. A new tab keeps the review's two-pane layout intact —
+--- `gt`/`gT` (or closing the file's tab) returns to it exactly as it was.
+---
+--- Does nothing, rather than erroring, when the cursor's row addresses no
+--- line of any file — a separator, a filler, the binary marker.
+--- @return boolean whether a file was opened
+function M.open_real_file(tabpage)
+  local win = vim.api.nvim_get_current_win()
+  local ok, bufnr = pcall(vim.api.nvim_win_get_buf, win)
+  if not ok then
+    return false
+  end
+  local pane = M.pane_for_buf(tabpage, bufnr)
+  if not pane then
+    return false
+  end
+  local ok_cursor, cursor = pcall(vim.api.nvim_win_get_cursor, win)
+  if not ok_cursor then
+    return false
+  end
+  local t = require("intentdiff.render.plan").target_at(pane, cursor[1])
+  if not t then
+    return false
+  end
+  local painted = M._painted[tabpage]
+  if not (painted and painted.sess and painted.sess.git_root) then
+    return false
+  end
+  local abs = painted.sess.git_root .. "/" .. t.file
+  vim.cmd("tabedit " .. vim.fn.fnameescape(abs))
+  pcall(vim.api.nvim_win_set_cursor, 0, { t.line, 0 })
+  return true
+end
+
 --- The painted panes of `tabpage`, as `{ { bufnr, pane }, ... }`.
 ---
 --- What lets the comment layer treat every surface as one COORDINATE SYSTEM:
@@ -508,6 +554,7 @@ M.VIEW_DESCS = {
   quit = "intent-diff: close",
   next_hunk = "intent-diff: next hunk in group",
   prev_hunk = "intent-diff: previous hunk in group",
+  open_file = "intent-diff: open the real file at the cursor's line",
 }
 
 --- Install the `keymaps.view` actions named in `handlers` on `buf`.
@@ -638,6 +685,9 @@ function M.install_keymaps(tabpage)
       end,
       quit = function()
         require("intentdiff").close(tabpage)
+      end,
+      open_file = function()
+        M.open_real_file(tabpage)
       end,
     })
     M.install_comment_keymaps(buf, tabpage)
