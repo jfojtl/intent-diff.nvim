@@ -33,6 +33,40 @@ local function uneven_file()
   }
 end
 
+--- A 20-line file with two one-line hunks, at lines 5 and 15.
+local function two_hunk_file()
+  local orig, mod = {}, {}
+  for i = 1, 20 do
+    orig[i] = "line" .. i
+    mod[i] = "line" .. i
+  end
+  mod[5] = "CHANGED5"
+  mod[15] = "CHANGED15"
+  return {
+    path = "a.lua", status = "M", filetype = "lua", binary = false,
+    original = orig, modified = mod,
+    hunks = {
+      { id = "a.lua:1", file = "a.lua", header = "@@ -5,1 +5,1 @@",
+        text = "@@ -5,1 +5,1 @@\n-line5\n+CHANGED5\n",
+        original = { start_line = 5, end_line = 6 },
+        modified = { start_line = 5, end_line = 6 },
+        additions = 1, deletions = 1 },
+      { id = "a.lua:2", file = "a.lua", header = "@@ -15,1 +15,1 @@",
+        text = "@@ -15,1 +15,1 @@\n-line15\n+CHANGED15\n",
+        original = { start_line = 15, end_line = 16 },
+        modified = { start_line = 15, end_line = 16 },
+        additions = 1, deletions = 1 },
+    },
+  }
+end
+
+local function is_folded(p, row)
+  for _, range in ipairs(p.folds) do
+    if row >= range[1] and row <= range[2] then return true end
+  end
+  return false
+end
+
 describe("plan.build side-by-side", function()
   it("renders the whole file, not just the hunk", function()
     local p = plan.build({ modified_file() }, { ["a.lua:1"] = true }, "side-by-side")
@@ -446,5 +480,175 @@ describe("plan.build inline", function()
         assert.truthy(vim.tbl_contains(rows, row))
       end
     end
+  end)
+end)
+
+describe("plan.build folds", function()
+  it("leaves a visible hunk and its context unfolded", function()
+    local p = plan.build({ two_hunk_file() }, { ["a.lua:1"] = true },
+      "side-by-side", { context = 2 })
+    -- row 1 is the separator; file line N is row N+1
+    assert.is_false(is_folded(p, 6), "the changed line itself")
+    assert.is_false(is_folded(p, 4), "2 lines of context above")
+    assert.is_false(is_folded(p, 8), "2 lines of context below")
+  end)
+
+  it("folds everything outside the visible hunk", function()
+    local p = plan.build({ two_hunk_file() }, { ["a.lua:1"] = true },
+      "side-by-side", { context = 2 })
+    assert.is_true(is_folded(p, 2), "far above the hunk")
+    assert.is_true(is_folded(p, 16), "the other hunk is not visible")
+    assert.is_true(is_folded(p, 21), "far below")
+  end)
+
+  it("never folds a separator row", function()
+    local p = plan.build({ two_hunk_file() }, { ["a.lua:1"] = true },
+      "side-by-side", { context = 2 })
+    assert.is_false(is_folded(p, 1))
+  end)
+
+  it("keeps both hunks open when both are visible", function()
+    local p = plan.build({ two_hunk_file() },
+      { ["a.lua:1"] = true, ["a.lua:2"] = true }, "side-by-side", { context = 2 })
+    assert.is_false(is_folded(p, 6))
+    assert.is_false(is_folded(p, 16))
+    assert.is_true(is_folded(p, 10), "the stretch between them still folds")
+  end)
+
+  it("folds nothing when no hunk is visible", function()
+    local p = plan.build({ two_hunk_file() }, {}, "side-by-side", { context = 2 })
+    assert.same({}, p.folds)
+  end)
+
+  it("produces fold ranges valid for both panes", function()
+    local p = plan.build({ two_hunk_file() }, { ["a.lua:1"] = true },
+      "side-by-side", { context = 2 })
+    assert.equals(#p.original.lines, #p.modified.lines)
+    for _, range in ipairs(p.folds) do
+      assert.is_true(range[2] <= #p.original.lines)
+      assert.is_true(range[1] >= 1)
+    end
+  end)
+
+  it("emits maximal runs, never two adjacent ranges", function()
+    local p = plan.build({ two_hunk_file() },
+      { ["a.lua:1"] = true, ["a.lua:2"] = true }, "side-by-side", { context = 2 })
+    -- sep(1) protected, rows 4..8 and 14..18 kept, 21 rows in all
+    assert.same({ { 2, 3 }, { 9, 13 }, { 19, 21 } }, p.folds)
+  end)
+
+  it("defaults context to 3 when opts says nothing", function()
+    local p = plan.build({ two_hunk_file() }, { ["a.lua:1"] = true }, "side-by-side")
+    -- the hunk is row 6; 3 rows of context reach rows 3 and 9
+    assert.is_false(is_folded(p, 3), "3 rows of context above")
+    assert.is_false(is_folded(p, 9), "3 rows of context below")
+    assert.is_true(is_folded(p, 2), "but not a 4th")
+    assert.is_true(is_folded(p, 10))
+  end)
+
+  it("keeps a second file's visible hunk open at its own offset", function()
+    local a, b = two_hunk_file(), two_hunk_file()
+    b.path = "b.lua"
+    for _, h in ipairs(b.hunks) do
+      h.file = "b.lua"
+      h.id = h.id:gsub("^a%.lua", "b.lua")
+    end
+    local p = plan.build({ a, b }, { ["b.lua:1"] = true }, "side-by-side",
+      { context = 2 })
+    -- a.lua: sep(1) + 20 rows, so b.lua's separator is row 22 and its line N is row 22+N
+    assert.truthy(p.modified.lines[22]:find("b.lua", 1, true))
+    assert.is_false(is_folded(p, 27), "b.lua's changed line")
+    assert.is_false(is_folded(p, 1), "a.lua's separator")
+    assert.is_false(is_folded(p, 22), "b.lua's separator")
+    assert.is_true(is_folded(p, 6), "a.lua's hunk is not visible")
+  end)
+
+  it("folds an inline plan by emitted rows, not by file rows", function()
+    -- Inline emits TWO rows for a 1-for-1 change, so a fold computed from a
+    -- flat file-row offset drifts by one row per changed run before it.
+    local p = plan.build({ two_hunk_file() }, { ["a.lua:1"] = true },
+      "inline", { context = 2 })
+    -- sep(1) line1..4(2..5) -line5(6) +CHANGED5(7) line6..(8..)
+    assert.equals("line5", p.modified.lines[6])
+    assert.equals("CHANGED5", p.modified.lines[7])
+    assert.is_false(is_folded(p, 6), "the deletion row")
+    assert.is_false(is_folded(p, 7), "the addition row")
+    assert.is_false(is_folded(p, 4), "2 rows of context above")
+    assert.is_false(is_folded(p, 9), "2 rows of context below the addition")
+    assert.is_true(is_folded(p, 3), "a 3rd row above still folds")
+    assert.is_true(is_folded(p, 10), "a 3rd row below still folds")
+    for _, range in ipairs(p.folds) do
+      assert.is_true(range[2] <= #p.modified.lines)
+    end
+  end)
+end)
+
+describe("plan.build fallback", function()
+  it("renders hunks only when content is missing and disables its folds", function()
+    local file = two_hunk_file()
+    file.original, file.modified = nil, nil
+    local p = plan.build({ file }, { ["a.lua:1"] = true }, "side-by-side", { context = 2 })
+    assert.is_true(p.files[1].fallback)
+    assert.same({}, p.folds, "a partial render must not fold")
+    -- separator + the two hunks' rows only, not 20 lines
+    assert.is_true(#p.modified.lines < 10)
+  end)
+
+  it("says on the separator that the content was unavailable", function()
+    local file = two_hunk_file()
+    file.original, file.modified = nil, nil
+    local p = plan.build({ file }, { ["a.lua:1"] = true }, "side-by-side", { context = 2 })
+    assert.truthy(p.modified.lines[1]:find("content unavailable", 1, true))
+  end)
+
+  it("falls back and says so when a file exceeds the line budget", function()
+    local file = two_hunk_file()
+    local p = plan.build({ file }, { ["a.lua:1"] = true },
+      "side-by-side", { context = 2, line_budget = 5 })
+    assert.is_true(p.files[1].fallback)
+    assert.truthy(p.modified.lines[1]:find("budget", 1, true),
+      "the separator states why it fell back")
+    assert.same({}, p.folds)
+  end)
+
+  it("does not fall back when the file fits the budget", function()
+    local p = plan.build({ two_hunk_file() }, { ["a.lua:1"] = true },
+      "side-by-side", { context = 2, line_budget = 20000 })
+    assert.is_false(p.files[1].fallback)
+  end)
+
+  it("defaults the line budget to 20000", function()
+    local p = plan.build({ two_hunk_file() }, { ["a.lua:1"] = true },
+      "side-by-side", { context = 2 })
+    assert.is_false(p.files[1].fallback)
+    assert.is_nil(p.modified.lines[1]:find("budget", 1, true))
+  end)
+
+  it("disables folds for the whole plan when any one file fell back", function()
+    local whole = two_hunk_file()
+    local partial = two_hunk_file()
+    partial.path = "b.lua"
+    partial.original, partial.modified = nil, nil
+    for _, h in ipairs(partial.hunks) do
+      h.file = "b.lua"
+      h.id = h.id:gsub("^a%.lua", "b.lua")
+    end
+    local p = plan.build({ whole, partial }, { ["a.lua:1"] = true },
+      "side-by-side", { context = 2 })
+    assert.is_false(p.files[1].fallback)
+    assert.is_true(p.files[2].fallback)
+    assert.same({}, p.folds,
+      "a fold range spans the whole pane, so one partial file disables every fold")
+  end)
+
+  it("leaves a binary file's marker row unfolded without disabling folds", function()
+    local bin = { path = "logo.png", status = "M", filetype = "", binary = true,
+                  original = {}, modified = {}, hunks = {} }
+    local p = plan.build({ bin, two_hunk_file() }, { ["a.lua:1"] = true },
+      "side-by-side", { context = 2 })
+    assert.is_false(p.files[1].fallback)
+    assert.is_true(#p.folds > 0, "a binary file must not disable the plan's folds")
+    assert.is_false(is_folded(p, 1), "the binary marker row")
+    assert.is_false(is_folded(p, 2), "a.lua's separator")
   end)
 end)

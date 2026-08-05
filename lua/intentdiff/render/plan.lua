@@ -16,6 +16,16 @@
 -- `M.rows_for` is the inverse direction, derived by SCANNING that same array
 -- rather than being built alongside it, so the two can never disagree about
 -- where a comment lives.
+--
+-- `folds` is ONE list of inclusive `{first, last}` row ranges for the WHOLE
+-- plan, valid on both panes because both panes are the same height. Separator
+-- rows never fold. It is empty in three cases, each deliberate:
+--   * no hunk was visible      — the caller asked for no narrowing, and a plan
+--                                folded end to end shows nothing;
+--   * some file fell back      — a range spans the whole pane, so mixing a
+--                                whole-file render with a hunks-only one would
+--                                fold real content with nothing to unfold to;
+--   * every row was kept open.
 local M = {}
 
 local WHOLE_LINE = -1
@@ -43,13 +53,64 @@ local function file_stats(file)
   return additions, deletions
 end
 
-local function separator(file)
+--- `fallback_reason` is nil for a normal, whole-file render; when set it names
+--- WHY the file rendered hunks-only, on the row the reader is looking at. The
+--- old preview's max_lines truncated silently, which read as a renderer bug.
+local function separator(file, fallback_reason)
   if file.binary then
     return ("── %s   %s   binary"):format(file.path, file.status or "M")
   end
   local additions, deletions = file_stats(file)
-  return ("── %s   %s   +%d -%d")
+  local base = ("── %s   %s   +%d -%d")
     :format(file.path, file.status or "M", additions, deletions)
+  if fallback_reason then
+    return base .. "   (" .. fallback_reason .. ")"
+  end
+  return base
+end
+
+-- --------------------------------------------------------------- fold ranges --
+
+--- Mark the FILE-RELATIVE row indices to keep open: every visible hunk's span,
+--- grown by `context` on each side. `hunk_spans` is hunk id -> {first, last} in
+--- indices into the file's own row array.
+---
+--- Deliberately file-relative rather than pane-relative: an inline plan emits
+--- two pane rows for a 1-for-1 change and none for a filler, so a single
+--- pane-row offset per file would drift. The caller translates each file row to
+--- the pane rows it actually emitted.
+--- @return boolean whether any visible hunk was found at all
+local function visible_rows(hunk_spans, visible, context, keep)
+  local any = false
+  for id, span in pairs(hunk_spans) do
+    if visible[id] then
+      any = true
+      for r = math.max(1, span[1] - context), span[2] + context do
+        keep[r] = true
+      end
+    end
+  end
+  return any
+end
+
+--- Maximal runs of rows in `1..total` that are neither kept nor protected.
+--- Inclusive `{first, last}`. `protected` holds the separator rows, which must
+--- never fold: a closed fold over a separator hides which file follows.
+local function fold_ranges(total, keep, protected)
+  local ranges, start = {}, nil
+  for row = 1, total do
+    local hidden = not keep[row] and not protected[row]
+    if hidden and not start then
+      start = row
+    elseif not hidden and start then
+      ranges[#ranges + 1] = { start, row - 1 }
+      start = nil
+    end
+  end
+  if start then
+    ranges[#ranges + 1] = { start, total }
+  end
+  return ranges
 end
 
 --- Pair a hunk body into aligned original/modified rows, carrying the real
@@ -133,7 +194,9 @@ end
 local function file_rows(file, runs)
   local orig = file.original or {}
   local mod = file.modified or {}
-  local rows, spans = {}, {}
+  -- Named `hunk_spans`, not `spans`: `pane.spans` is the highlight list, an
+  -- entirely different thing.
+  local rows, hunk_spans = {}, {}
   local o, m = 1, 1
 
   local function unchanged()
@@ -160,7 +223,7 @@ local function file_rows(file, runs)
     for _, row in ipairs(pair_body(body_of(h), o, m, runs, file.path)) do
       rows[#rows + 1] = row
     end
-    spans[h.id] = { first, #rows }
+    hunk_spans[h.id] = { first, #rows }
     o = h.original.end_line
     m = h.modified.end_line
   end
@@ -176,14 +239,14 @@ local function file_rows(file, runs)
     m = m + 1
   end
 
-  return rows, spans
+  return rows, hunk_spans
 end
 
 --- Rows for a file whose content could not be fetched: the hunk bodies alone,
 --- exactly as the old preview rendered them. Folds are disabled for such a
 --- file by the caller, because the rows are not the whole file.
 local function fallback_rows(file, runs)
-  local rows, spans = {}, {}
+  local rows, hunk_spans = {}, {}
   for _, h in ipairs(file.hunks or {}) do
     local first = #rows + 1
     local o = (h.original or {}).start_line or 1
@@ -191,9 +254,9 @@ local function fallback_rows(file, runs)
     for _, row in ipairs(pair_body(body_of(h), o, m, runs, file.path)) do
       rows[#rows + 1] = row
     end
-    spans[h.id] = { first, #rows }
+    hunk_spans[h.id] = { first, #rows }
   end
-  return rows, spans
+  return rows, hunk_spans
 end
 
 -- ------------------------------------------------------------------- panes --
@@ -261,11 +324,15 @@ end
 --- @param files table[] file entries carrying full content and ALL their hunks
 --- @param visible table set of hunk ids to leave unfolded
 --- @param layout string "inline" | "side-by-side"
---- @param opts table|nil { context = integer, line_budget = integer }
+--- @param opts table|nil { context = integer (default 3), line_budget = integer
+---   (default 20000) — a file with more lines than this on either side renders
+---   hunks-only and says so on its separator }
 --- @return table plan
 function M.build(files, visible, layout, opts)
   opts = opts or {}
   visible = visible or {}
+  local context = opts.context or 3
+  local budget = opts.line_budget or 20000
   local inline = layout == "inline"
   local original
   if not inline then
@@ -274,29 +341,62 @@ function M.build(files, visible, layout, opts)
   local modified = new_pane()
   local runs, meta = {}, {}
 
-  for _, file in ipairs(files or {}) do
-    local sep = separator(file)
+  -- Fold bookkeeping, in MODIFIED-pane rows. One set for the whole plan, not
+  -- one per file and not one per pane: side-by-side panes are always the same
+  -- height, so a row range means the same thing on both sides.
+  local keep, protected = {}, {}
+  local any_visible, any_fallback = false, false
+
+  local function add_separator(sep)
     if original then
       original.add(sep, "IntentDiffFileSeparator")
     end
-    modified.add(sep, "IntentDiffFileSeparator")
+    protected[modified.add(sep, "IntentDiffFileSeparator")] = true
+  end
 
+  for _, file in ipairs(files or {}) do
     if file.binary then
+      -- The separator IS the binary marker row, and binary files have no rows
+      -- to fold, so they neither contribute folds nor disable anyone else's.
+      add_separator(separator(file))
       meta[#meta + 1] = { path = file.path, filetype = file.filetype,
                           status = file.status, binary = true, fallback = false }
     else
+      -- The reason has to be known before the separator is written, because
+      -- the separator states it.
       local has_content = file.original ~= nil and file.modified ~= nil
-      local rows
-      if has_content then
-        rows = file_rows(file, runs)
-      else
-        rows = fallback_rows(file, runs)
+      local fallback_reason
+      if not has_content then
+        fallback_reason = "content unavailable"
+      elseif #file.original > budget or #file.modified > budget then
+        fallback_reason = "over line budget"
       end
+
+      local rows, hunk_spans
+      if fallback_reason then
+        rows, hunk_spans = fallback_rows(file, runs)
+        any_fallback = true
+      else
+        rows, hunk_spans = file_rows(file, runs)
+      end
+
+      add_separator(separator(file, fallback_reason))
       meta[#meta + 1] = { path = file.path, filetype = file.filetype,
                           status = file.status, binary = false,
-                          fallback = not has_content }
+                          fallback = fallback_reason ~= nil }
 
-      for _, row in ipairs(rows) do
+      -- File-relative rows to keep open. A fallback file's rows are not the
+      -- whole file, so it contributes nothing here either way.
+      local keep_row = {}
+      if not fallback_reason then
+        any_visible = visible_rows(hunk_spans, visible, context, keep_row) or any_visible
+      end
+
+      for i, row in ipairs(rows) do
+        -- Translate the file row to the pane rows it emits by bracketing the
+        -- emission, rather than by a fixed offset: inline emits two rows for a
+        -- 1-for-1 change and none for a filler, so no offset would hold.
+        local before = #modified.lines
         if inline then
           -- One buffer, so a row's SIDE comes from its kind. A filler row has
           -- no content on either side and simply is not emitted here: inline
@@ -356,8 +456,23 @@ function M.build(files, visible, layout, opts)
             end
           end
         end
+        if keep_row[i] then
+          for r = before + 1, #modified.lines do
+            keep[r] = true
+          end
+        end
       end
     end
+  end
+
+  -- No hunk visible means fold NOTHING, not fold everything: the caller asked
+  -- for no narrowing, and a plan folded end to end shows the reader nothing.
+  -- Any fallback file anywhere disables every fold, because a fold range spans
+  -- the whole pane and would otherwise hide a whole file's real content behind
+  -- a fold there is nothing to unfold to.
+  local folds = {}
+  if any_visible and not any_fallback then
+    folds = fold_ranges(#modified.lines, keep, protected)
   end
 
   return {
@@ -366,7 +481,7 @@ function M.build(files, visible, layout, opts)
     modified = modified,
     files = meta,
     runs = runs,
-    folds = {},
+    folds = folds,
   }
 end
 
