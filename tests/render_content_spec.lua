@@ -21,6 +21,24 @@ describe("render.content", function()
     assert.same({ "one", "TWO", "three" }, content.get(sess, "a.lua", "new"))
   end)
 
+  it('treats the "WORKING" sentinel as the working tree, not a revision', function()
+    -- init.lua sets target_revision = "WORKING" for a plain `:IntentDiff`, so
+    -- this is the MAINSTREAM path, not an edge case. `git show WORKING:path`
+    -- always fails; taking that branch left every file rendering hunks-only.
+    local repo = helpers.make_repo({ ["a.lua"] = "one\ntwo" })
+    local base = vim.trim(helpers.git(repo, "rev-parse", "HEAD"))
+    helpers.write_file(repo, "a.lua", "one\nTWO\nthree")
+
+    local sess = { git_root = repo, base_revision = base, target_revision = "WORKING" }
+    local done = false
+    content.ensure(sess, { { path = "a.lua", status = "M", binary = false } },
+      function() done = true end)
+    assert.truthy(helpers.wait_for(function() return done end, 5000))
+
+    assert.same({ "one", "two" }, content.get(sess, "a.lua", "old"))
+    assert.same({ "one", "TWO", "three" }, content.get(sess, "a.lua", "new"))
+  end)
+
   it("gives an added file an empty old side", function()
     local repo = helpers.make_repo({ ["a.lua"] = "x" })
     local base = vim.trim(helpers.git(repo, "rev-parse", "HEAD"))

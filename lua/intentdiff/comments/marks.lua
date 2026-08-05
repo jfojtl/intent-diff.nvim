@@ -1,9 +1,15 @@
--- Rendering comments into the diff panes and the sidebar.
+-- Rendering comments into the painted panes and the sidebar.
+--
+-- ONE render path. A pane is a coordinate system — `pane.map` says which
+-- (file, line, side) each row shows — so a comment is placed by asking the map
+-- where its line landed, whether the panes hold a single file or a whole
+-- intent. There is no second, file-shaped path any more, and therefore no way
+-- for the two to disagree about where a comment lives.
 --
 -- Two namespaces: `ns` for the comments themselves, `ns_padding` for the blank
 -- virt_lines that keep the two panes the same height. A box on one side makes
--- that side taller, and codediff's scroll sync aligns by filler count — without
--- the padding the panes drift apart as soon as you comment on one side.
+-- that side taller, and scrollbind aligns by row — without the padding the
+-- panes drift apart as soon as you comment on one side.
 --
 -- Every render takes the STORE it is rendering, never a global one: with two
 -- review tabs open there are two stores, and the only thing that says which
@@ -28,7 +34,7 @@ local MIN_BOX_WIDTH = 20
 local touched = setmetatable({}, { __mode = "k" })
 
 --- Note this store drew into `bufnr`. Recorded even when the render placed no
---- extmark: render_buffer CLEARS the namespace first, so a buffer it touched
+--- extmark: render_pane CLEARS the namespace first, so a buffer it touched
 --- is one whose marks this review owns and must clean up.
 local function remember(store, bufnr)
   if not (store and bufnr) then
@@ -80,58 +86,49 @@ function M.build_box(text, type_name, hl_group)
   return out
 end
 
---- The 1-indexed (first, final) LINES a line/range comment actually occupies
---- in a buffer of `last` lines, clamped into `[1, last]`. A persisted comment
---- that drifted past EOF (in `line`, `line_end`, or both) clamps onto the last
---- line rather than being dropped, so it stays visible and exportable.
+--- The rows of `pane` that comment `c` is DRAWN on, ascending.
 ---
---- This is the ONE definition of "where did that comment end up", and it is
---- public because the action layer needs the same answer: `marks` clamps the
---- box onto the last line while `store.get_at_line` matches on the RAW stored
---- line, so edit/delete/jump used to miss a drifted comment entirely — visible,
---- but un-editable, un-deletable and un-jumpable. Everything that has to agree
---- about a drifted comment's position (render_buffer, align's heights(),
---- comments/init.lua's at_cursor / jump / place_cursor) goes through here, so
---- they cannot drift apart again.
---- @return integer first, integer final
-function M.clamped_span(c, last)
-  local max_line = math.max(last or 1, 1)
-  local line = c.line or 1
-  local first = math.min(line, max_line)
-  local final = math.min(c.line_end or line, max_line)
-  if final < first then
-    final = first
+--- Normally the rows its (file, line, side) maps to — `plan.rows_for`, the
+--- inverse of the very map a cursor is resolved through, so a comment is drawn
+--- exactly where commenting again would land.
+---
+--- The second return says the comment DRIFTED: its lines are not in this render
+--- but its file is, so it clamps onto the last row of that file on that side
+--- rather than vanishing. A persisted comment can outlive the code it pointed
+--- at, and dropping it would leave it exportable but invisible. Clamping is
+--- deliberately scoped to the file's own rows — clamping to the pane's last row
+--- would land a comment of one file on top of another's, which is the mirror
+--- image of the same bug.
+---
+--- This is the ONE definition of "where did that comment end up". The renderer
+--- draws with it and the action layer reads back with it (comments/init.lua's
+--- at_cursor / jump / place_cursor), so edit, delete and `]n` can never again
+--- miss a comment the user can plainly see.
+--- @return integer[] rows, boolean drifted
+function M.rows_for_comment(pane, c)
+  if not (pane and pane.map and c and c.file) then
+    return {}, false
   end
-  return first, final
-end
-
---- `clamped_span` against a live buffer's current line count, or nil when the
---- buffer is gone (a pane can be torn down between a keypress and this call).
---- @return integer|nil first, integer|nil final
-function M.clamped_span_in_buf(c, bufnr)
-  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
-    return nil
+  if not c.line or c.line == 0 or c.intent_title then
+    return {}, false
   end
-  local ok, last = pcall(vim.api.nvim_buf_line_count, bufnr)
-  if not ok then
-    return nil
+  local rows = require("intentdiff.render.plan").rows_for(pane, c)
+  if #rows > 0 then
+    return rows, false
   end
-  return M.clamped_span(c, last)
-end
-
---- The 0-indexed anchor rows, for the extmark API. A thin adapter over
---- `clamped_span` so the rendering path and the action layer can never
---- disagree about where a drifted comment's box landed.
-local function clamp_rows(c, last)
-  local first, final = M.clamped_span(c, last)
-  return first - 1, final - 1
-end
-
---- Rendered height of a comment's box, and the 0-indexed row it hangs from,
---- clamped exactly as `render_buffer` clamps the extmark itself.
-local function box_height(c, last)
-  local _, final = clamp_rows(c, last)
-  return #vim.split(c.text or "", "\n") + 2, final
+  local side = c.side or "new"
+  local last
+  -- Numeric loop, NOT ipairs: `map` is sparse by construction.
+  for row = 1, #pane.lines do
+    local t = pane.map[row]
+    if t and t.file == c.file and t.side == side then
+      last = row
+    end
+  end
+  if not last then
+    return {}, false -- this render does not show that file at all
+  end
+  return { last }, true
 end
 
 --- After anchoring a file-level comment's box above line 0 with
@@ -195,169 +192,142 @@ local function draw_rows(bufnr, c, rows)
   })
 end
 
---- Draw a file-level comment's box above line 1.
-local function draw_file_level(bufnr, c)
+--- Draw a file-level comment's box above `row0` — the first row of its file in
+--- this render, which is line 1 when the panes show that file alone and the row
+--- after its separator when they show a whole intent.
+local function draw_file_level(bufnr, c, row0)
   local info = type_info(c.type)
   local sign_hl = hl.comment_groups(c.type)
   local box = M.build_box(c.text, info.name, sign_hl)
-  local ok = pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, 0, 0, {
+  local ok = pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, row0, 0, {
     sign_text = info.icon,
     sign_hl_group = sign_hl,
     virt_lines = box,
     virt_lines_above = true,
   })
-  if ok then
+  -- Only the box hanging above the very first row can be scrolled off the top;
+  -- anywhere else there are real lines above it to hold it on screen.
+  if ok and row0 == 0 then
     nudge_topfill(bufnr, #box)
   end
 end
 
---- Clear and re-render every comment for `file` on `side` into `bufnr`, from
---- `store` — the store of the review this buffer belongs to.
-function M.render_buffer(store, bufnr, file, side)
-  if not (store and bufnr and vim.api.nvim_buf_is_valid(bufnr) and file) then
-    return
-  end
-  vim.api.nvim_buf_clear_namespace(bufnr, M.ns, 0, -1)
-  remember(store, bufnr)
-  local last = vim.api.nvim_buf_line_count(bufnr)
+-- ---------------------------------------------------- the painted panes --
 
-  for _, c in ipairs(store.get_for_file(file, side)) do
-    if (c.line or 0) == 0 then
-      draw_file_level(bufnr, c)
-    else
-      -- A persisted comment can outlive the lines it pointed at (in `line`,
-      -- `line_end`, or both); clamp_rows clamps rather than dropping it, so
-      -- it stays visible and exportable.
-      local first, final = clamp_rows(c, last)
-      local rows = {}
-      for row = first, final do
-        rows[#rows + 1] = row
-      end
-      draw_rows(bufnr, c, rows)
-    end
-  end
-end
-
---- Blank-line padding so a box on one side does not make the panes drift.
-function M.align(store, orig_buf, mod_buf, file)
-  -- Not `ipairs({ orig_buf, mod_buf })`: with orig_buf nil that literal has a
-  -- hole at index 1 and ipairs stops before ever reaching mod_buf, leaving the
-  -- one buffer there IS uncleared. Same nil-hole trap M.refresh's own comment
-  -- below calls out.
-  local function reset(buf)
-    if buf and vim.api.nvim_buf_is_valid(buf) then
-      vim.api.nvim_buf_clear_namespace(buf, M.ns_padding, 0, -1)
-      remember(store, buf)
-    end
-  end
-  reset(orig_buf)
-  reset(mod_buf)
-  if not (store and orig_buf and mod_buf and file
-    and vim.api.nvim_buf_is_valid(orig_buf) and vim.api.nvim_buf_is_valid(mod_buf)) then
-    return
-  end
-
-  --- row → total box height on that side. `get_for_file(file, side)` already
-  --- filters to that side, so no side check belongs here. What excludes a
-  --- file-level comment (line 0) is `(c.line or 0) ~= 0` below: it renders
-  --- identically on both panes via render_buffer's own branch, not through
-  --- this alignment path, and has no single row of its own to key padding
-  --- on. Do not reintroduce a `(c.side or "new") == side` clause here — a
-  --- file-level comment has no `side` field, so it defaults to `"new"` and
-  --- such a clause would pass it through on the new-side pass rather than
-  --- excluding it; the `(c.line or 0) ~= 0` check is the only thing doing
-  --- that job.
-  local function heights(side, buf)
-    local map = {}
-    local last = vim.api.nvim_buf_line_count(buf)
-    for _, c in ipairs(store.get_for_file(file, side)) do
-      if (c.line or 0) ~= 0 then
-        local h, row = box_height(c, last)
-        map[row] = (map[row] or 0) + h
-      end
-    end
-    return map
-  end
-
-  local old_h, new_h = heights("old", orig_buf), heights("new", mod_buf)
-  local rows = {}
-  for row in pairs(old_h) do rows[row] = true end
-  for row in pairs(new_h) do rows[row] = true end
-
-  for row in pairs(rows) do
-    local diff = (old_h[row] or 0) - (new_h[row] or 0)
-    if diff ~= 0 then
-      local target = diff > 0 and mod_buf or orig_buf
-      local padding = {}
-      for _ = 1, math.abs(diff) do
-        padding[#padding + 1] = { { "", "Normal" } }
-      end
-      pcall(vim.api.nvim_buf_set_extmark, target, M.ns_padding, row, 0, { virt_lines = padding })
-    end
-  end
-end
-
--- ------------------------------------------- the whole-intent preview --
-
---- Every line/range comment `store` holds, paired with the rows of `pane` it
---- lands on. Rows come from `preview.rows_for`, the inverse of the very map
---- the cursor is resolved through — so a comment is drawn exactly where
---- commenting again would land, and nowhere else.
+--- The row each file's block starts on, valid on BOTH panes because a plan's
+--- two panes always have the same line count.
 ---
---- Comments whose lines are not in this render (another intent's files, or
---- past `preview.max_lines`) yield no rows and are skipped: they still exist,
---- still export, and must not error here. File-level and intent comments
---- address no line and are not drawn in a preview at all.
---- @return table[] { comment, rows } — rows 1-indexed, ascending
-local function preview_placements(store, pane)
+--- Scanned over both panes, earliest wins: a file whose first row is a pure
+--- addition has no original-side coordinate there, so each pane's own first row
+--- for it can differ by a line — anchoring a file-level box at a different row
+--- per pane is exactly the drift the padding below exists to prevent.
+--- @return table [file] = row (1-indexed)
+function M.file_anchors(plan)
   local out = {}
-  local preview = require("intentdiff.preview")
+  local function scan(pane)
+    if not pane then
+      return
+    end
+    -- Numeric loop, NOT ipairs: `map` is sparse by construction.
+    for row = 1, #pane.lines do
+      local t = pane.map[row]
+      if t and (out[t.file] == nil or row < out[t.file]) then
+        out[t.file] = row
+      end
+    end
+  end
+  if plan then
+    scan(plan.original)
+    scan(plan.modified)
+  end
+  return out
+end
+
+--- Every comment `store` holds that this pane draws, with the rows it draws it
+--- on. `above` marks a file-level box, which hangs ABOVE its anchor row.
+---
+--- Comments this render does not show — another intent's files, a file-level
+--- comment on a file that is not on screen — yield nothing and are skipped:
+--- they still exist, still export, and must not error here. Intent comments
+--- address no line at all and live on a sidebar row.
+--- @return table[] { comment, rows, above } — rows 1-indexed, ascending
+local function placements(store, pane, anchors)
+  local out = {}
   for _, c in ipairs(store.get_all()) do
-    local rows = preview.rows_for(pane, c)
-    if #rows > 0 then
-      out[#out + 1] = { comment = c, rows = rows }
+    -- Intent comments live on a sidebar row and address no line, so they are
+    -- simply not candidates here.
+    if not c.intent_title then
+      if (c.line or 0) == 0 then
+        local row = anchors[c.file]
+        if row then
+          out[#out + 1] = { comment = c, rows = { row }, above = true }
+        end
+      else
+        local rows = M.rows_for_comment(pane, c)
+        if #rows > 0 then
+          out[#out + 1] = { comment = c, rows = rows, above = false }
+        end
+      end
     end
   end
   return out
 end
 
---- Clear and re-render `store`'s comments into one preview pane buffer.
-function M.render_preview_buffer(store, bufnr, pane)
+--- Clear and re-render `store`'s comments into one painted pane buffer.
+---
+--- THE render path, for every surface: `pane.map` is what says which line each
+--- row shows, so one file and a whole intent are the same call.
+--- `anchors` may be omitted, in which case they are derived from this pane
+--- alone — correct whenever there is only one pane to be consistent with.
+function M.render_pane(store, bufnr, pane, anchors)
   if not (store and bufnr and vim.api.nvim_buf_is_valid(bufnr) and pane) then
     return
   end
+  anchors = anchors or M.file_anchors({ modified = pane })
   vim.api.nvim_buf_clear_namespace(bufnr, M.ns, 0, -1)
   remember(store, bufnr)
-  for _, placement in ipairs(preview_placements(store, pane)) do
-    local rows0 = {}
-    for i, row in ipairs(placement.rows) do
-      rows0[i] = row - 1
+  for _, placement in ipairs(placements(store, pane, anchors)) do
+    if placement.above then
+      draw_file_level(bufnr, placement.comment, placement.rows[1] - 1)
+    else
+      local rows0 = {}
+      for i, row in ipairs(placement.rows) do
+        rows0[i] = row - 1
+      end
+      draw_rows(bufnr, placement.comment, rows0)
     end
-    draw_rows(bufnr, placement.comment, rows0)
   end
 end
 
---- Blank-line padding between two preview panes, so a box on one side does not
---- slide the other out of scroll sync. The preview's own alignment already
---- guarantees equal line counts; this keeps that true once boxes are drawn.
+--- Blank-line padding between the two painted panes, so a box on one side does
+--- not slide the other out of scroll sync.
 ---
---- Keyed on preview ROWS rather than on file lines (which is what M.align
---- does): the two panes show the same rows, so the comparison is row by row.
-local function align_preview(store, panes)
+--- Keyed on pane ROWS: both panes show the same rows by construction (the plan
+--- pads with real filler rows), so the comparison is row by row. A file-level
+--- box is drawn identically on both panes at the same anchor row, so it
+--- contributes the same height to each and cancels out — it is included rather
+--- than special-cased so that stays true by arithmetic rather than by comment.
+---
+--- The ONLY place that clears `ns_padding`. Callers that skip it (a single
+--- pane, nothing painted) must still clear, which is why the clearing loop runs
+--- before the early return: padding set while a buffer was previously shown
+--- side-by-side would otherwise survive a layout toggle forever.
+function M.align_panes(store, panes, anchors)
   for _, entry in ipairs(panes) do
     if vim.api.nvim_buf_is_valid(entry.bufnr) then
       pcall(vim.api.nvim_buf_clear_namespace, entry.bufnr, M.ns_padding, 0, -1)
       remember(store, entry.bufnr)
     end
   end
-  if #panes ~= 2 then
-    return -- inline preview: one buffer, nothing to keep aligned
+  if #panes ~= 2 or not store then
+    return -- inline layout: one buffer, nothing to keep aligned
   end
+  anchors = anchors or {}
 
-  --- 0-indexed row → total box height drawn on it in this pane.
-  local function heights(pane)
+  --- 0-indexed row -> total box height drawn on it in this pane.
+  local function heights(entry)
     local map = {}
-    for _, placement in ipairs(preview_placements(store, pane.pane)) do
+    for _, placement in ipairs(placements(store, entry.pane, anchors)) do
       local row = placement.rows[#placement.rows] - 1
       map[row] = (map[row] or 0) + #vim.split(placement.comment.text or "", "\n") + 2
     end
@@ -371,7 +341,12 @@ local function align_preview(store, panes)
   for row in pairs(rows) do
     local diff = (left[row] or 0) - (right[row] or 0)
     if diff ~= 0 then
-      local target = (diff > 0) and panes[2].bufnr or panes[1].bufnr
+      local target
+      if diff > 0 then
+        target = panes[2].bufnr
+      else
+        target = panes[1].bufnr
+      end
       local padding = {}
       for _ = 1, math.abs(diff) do
         padding[#padding + 1] = { { "", "Normal" } }
@@ -379,19 +354,6 @@ local function align_preview(store, panes)
       pcall(vim.api.nvim_buf_set_extmark, target, M.ns_padding, row, 0, { virt_lines = padding })
     end
   end
-end
-
---- Re-render every comment into `tabpage`'s live preview panes.
----
---- The preview is a coordinate system, not a storage concept: nothing here
---- consults `_last_shown`, because a preview shows a whole intent's files at
---- once and every comment is placed by its own (file, line, side).
-function M.render_preview(store, tabpage)
-  local panes = require("intentdiff.view").preview_panes(tabpage)
-  for _, entry in ipairs(panes) do
-    M.render_preview_buffer(store, entry.bufnr, entry.pane)
-  end
-  align_preview(store, panes)
 end
 
 --- Sign the sidebar rows whose intent carries a comment. No box: the sidebar
@@ -439,70 +401,24 @@ end
 ---
 --- Resolves the store from the tabpage's session, so a caller that only knows
 --- "this tab changed" (view.lua) still renders the right review's comments.
+---
+--- Nothing here asks WHAT the panes are showing: the painted plan is a
+--- coordinate system, and every comment is placed by its own (file, line, side)
+--- through that plan's map. That is what makes one file and a whole intent the
+--- same render.
 function M.refresh(tabpage)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local store = require("intentdiff.comments").store_for(tabpage)
-  local view = require("intentdiff.view")
   if not store then
     return
   end
-  -- A preview buffer concatenates many files, so `_last_shown` (the last file
-  -- RENDERED, which is not what the panes display) says nothing about it.
-  -- Place every comment through the render's own row map instead. Checked
-  -- BEFORE _last_shown: previewing an intent before any file has ever been
-  -- selected is an ordinary first sidebar move, and its comments must still
-  -- draw.
-  if view._preview_active[tabpage] then
-    return M.render_preview(store, tabpage)
+  local view = require("intentdiff.view")
+  local panes = view.painted_panes(tabpage)
+  local anchors = M.file_anchors(view.current_plan(tabpage))
+  for _, entry in ipairs(panes) do
+    M.render_pane(store, entry.bufnr, entry.pane, anchors)
   end
-  local shown = view._last_shown[tabpage]
-  local session = view.get_session(tabpage)
-  if not (shown and shown.file_entry and session) then
-    return
-  end
-  local file = shown.file_entry.path
-  local orig_buf = session.original_win and vim.api.nvim_win_is_valid(session.original_win)
-    and vim.api.nvim_win_get_buf(session.original_win) or nil
-  local mod_buf = session.modified_win and vim.api.nvim_win_is_valid(session.modified_win)
-    and vim.api.nvim_win_get_buf(session.modified_win) or nil
-  -- Inline layout puts one buffer in both windows; render it once, as "new".
-  -- Old-side comments are therefore deliberately invisible/unreachable in
-  -- inline layout — do NOT "fix" this by rendering them here too. The single
-  -- buffer inline shows is the MODIFIED file's content; an old-side line
-  -- number addresses a row of the ORIGINAL file, which simply has no
-  -- corresponding row in this buffer to anchor a box to. The check just below
-  -- (`orig_buf ~= mod_buf`) is what skips the old-side render; it exists to
-  -- avoid exactly that mis-positioned render, not merely to avoid rendering
-  -- the same buffer twice.
-  if orig_buf and orig_buf ~= mod_buf then
-    M.render_buffer(store, orig_buf, file, "old")
-  end
-  if mod_buf then
-    M.render_buffer(store, mod_buf, file, "new")
-  end
-  if orig_buf and mod_buf and orig_buf ~= mod_buf then
-    M.align(store, orig_buf, mod_buf, file)
-  else
-    -- M.align is the ONLY place that clears ns_padding. Skipping it here
-    -- (inline layout, or a whole-file pane with only one side populated)
-    -- must not also skip that cleanup, or padding extmarks set while this
-    -- buffer was previously shown side-by-side survive a layout toggle:
-    -- e.g. a working-tree review's modified buffer picks up old-side-driven
-    -- padding in side-by-side layout, the user toggles to inline (which
-    -- reuses that same buffer), and without this the blank filler lines
-    -- would render forever under a comment box that isn't even shown here.
-    -- Not `ipairs({ orig_buf, mod_buf })`: a table literal with a nil first
-    -- element (orig_buf nil, mod_buf set) makes ipairs stop before ever
-    -- looking at index 2 — the same nil-hole this codebase's pane_windows
-    -- helper (view.lua) exists to avoid — so each buffer is cleared
-    -- explicitly instead.
-    if orig_buf then
-      pcall(vim.api.nvim_buf_clear_namespace, orig_buf, M.ns_padding, 0, -1)
-    end
-    if mod_buf then
-      pcall(vim.api.nvim_buf_clear_namespace, mod_buf, M.ns_padding, 0, -1)
-    end
-  end
+  M.align_panes(store, panes, anchors)
 end
 
 return M

@@ -171,10 +171,7 @@ describe(":IntentDiff end-to-end", function()
   end
 
   --- True once OUR buffer-local override of codediff's layout-toggle key is
-  --- the one installed on `buf`. codediff reinstalls its own version at the end
-  --- of every render, so this is the only reliable "intent-diff has finished
-  --- reacting to this render" signal — polling window/fold state alone can
-  --- observe a window that merely kept its options from the previous render.
+  --- the one installed on `buf`.
   local function ours_bound(buf)
     local key = require("codediff.config").options.keymaps.view.toggle_layout
     for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
@@ -185,6 +182,52 @@ describe(":IntentDiff end-to-end", function()
     return false
   end
 
+  --- The row of `tab`'s painted plan showing new-side `line` of `path`.
+  ---
+  --- A pane row is NOT a file line any more: the panes hold a render plan,
+  --- which pairs both sides and can concatenate several files. Every assertion
+  --- about "is this line folded" has to go through the plan's map.
+  local function plan_row(tab, path, line)
+    local plan = require("intentdiff.view").current_plan(tab)
+    if not plan then
+      return nil
+    end
+    for row = 1, #plan.modified.lines do
+      local t = plan.modified.map[row]
+      if t and t.file == path and t.side == "new" and t.line == line then
+        return row
+      end
+    end
+    return nil
+  end
+
+  --- `path` is the ONLY file the panes show, with the file's line `visible`
+  --- open and its line `folded` closed. Returns the modified window, or nil.
+  local function shows(tab, path, visible, folded)
+    local view = require("intentdiff.view")
+    local plan = view.current_plan(tab)
+    if not (plan and #plan.files == 1 and plan.files[1].path == path) then
+      return nil
+    end
+    local win = view.pane_wins(tab).modified
+    if not (win and vim.api.nvim_win_is_valid(win)) then
+      return nil
+    end
+    if visible then
+      local row = plan_row(tab, path, visible)
+      if not row or fold_state(win, row) ~= -1 then
+        return nil
+      end
+    end
+    if folded then
+      local row = plan_row(tab, path, folded)
+      if not row or not (fold_state(win, row) > 0) then
+        return nil
+      end
+    end
+    return win
+  end
+
   --- Move the cursor to `line` in the sidebar (the <CR> keymap reads it).
   local function focus_row(session, line)
     assert.truthy(line, "no such sidebar row")
@@ -192,41 +235,19 @@ describe(":IntentDiff end-to-end", function()
     vim.api.nvim_win_set_cursor(session.sidebar.winid, { line, 0 })
   end
 
-  --- Select group/file from the sidebar via <CR> and wait until the pane shows
-  --- `path` with our group foldexpr in force and `visible`/`folded` in the
-  --- expected fold state. Waiting on the fold state (not just on the foldexpr)
-  --- matters when the selection re-renders the SAME file under a different
-  --- group: the previous selection already left our foldexpr installed, so
-  --- anything weaker returns before the new group's folds are applied.
+  --- Select group/file from the sidebar via <CR> and wait until the panes hold
+  --- a plan over `path` with `visible`/`folded` in the expected fold state.
+  --- Waiting on the fold state (not just on the render) matters when the
+  --- selection re-renders the SAME file under a different group.
   --- Returns the modified window.
   local function select_and_wait(session, group_i, file_i, path, visible, folded)
     local line = sidebar_line(session.sidebar, "file", group_i, file_i)
     assert.truthy(line, ("no sidebar row for group %d file %d"):format(group_i, file_i))
     focus_row(session, line)
     press(session.sidebar.winid, "<CR>")
-    local view = require("intentdiff.view")
     local tab = session.sess.tabpage
     local win = helpers.wait_for(function()
-      local cd_session = view.get_session(tab)
-      local w = cd_session and cd_session.modified_win
-      if not (w and vim.api.nvim_win_is_valid(w)) then
-        return nil
-      end
-      local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w))
-      if not name:find(path, 1, true)
-          or vim.wo[w].foldexpr ~= "v:lua.require'intentdiff.view'.foldexpr()" then
-        return nil
-      end
-      if not ours_bound(cd_session.modified_bufnr) then
-        return nil
-      end
-      if visible and fold_state(w, visible) ~= -1 then
-        return nil
-      end
-      if folded and not (fold_state(w, folded) > 0) then
-        return nil
-      end
-      return w
+      return shows(tab, path, visible, folded)
     end, 10000)
     assert.truthy(win, ("pane never rendered %s with the group's folds"):format(path))
     return win
@@ -255,20 +276,18 @@ describe(":IntentDiff end-to-end", function()
     make_two_group_repo()
     local session, tab = open_two_groups()
 
-    -- The codediff session and the sidebar share ONE tab.
-    local cd_session = require("intentdiff.view").get_session(tab)
-    assert.truthy(cd_session, "codediff session missing from the review tab")
+    -- The diff panes and the sidebar share ONE tab.
+    local wins = require("intentdiff.view").pane_wins(tab)
+    assert.truthy(wins.modified, "no diff pane in the review tab")
     assert.equals(tab, vim.api.nvim_win_get_tabpage(session.sidebar.winid))
-    assert.equals(tab, vim.api.nvim_win_get_tabpage(cd_session.modified_win))
+    assert.equals(tab, vim.api.nvim_win_get_tabpage(wins.modified))
     -- Sidebar is left of the diff panes.
     assert.is_true(vim.api.nvim_win_get_position(session.sidebar.winid)[2]
-      < vim.api.nvim_win_get_position(cd_session.modified_win)[2])
+      < vim.api.nvim_win_get_position(wins.modified)[2])
 
     -- 1) group 1 / a.lua: hunk at 5 visible, group 2's hunk at 55 folded.
     local win = select_and_wait(session, 1, 1, "a.lua", 5, 55)
     assert.equals("expr", vim.wo[win].foldmethod)
-    assert.equals(-1, fold_state(win, 5))
-    assert.is_true(fold_state(win, 55) > 0)
 
     -- The sidebar survived the selection and still lists both groups.
     assert.is_true(vim.api.nvim_win_is_valid(session.sidebar.winid))
@@ -279,12 +298,9 @@ describe(":IntentDiff end-to-end", function()
 
     -- 2) ANOTHER group, same file: the fold filter inverts.
     win = select_and_wait(session, 2, 1, "a.lua", 55, 5)
-    assert.equals(-1, fold_state(win, 55))
-    assert.is_true(fold_state(win, 5) > 0)
 
     -- 3) ANOTHER group, another file: still driven from the same sidebar.
     win = select_and_wait(session, 2, 2, "b.lua", 5)
-    assert.equals(-1, fold_state(win, 5))
     assert.is_true(vim.api.nvim_win_is_valid(session.sidebar.winid))
     assert.truthy(require("intentdiff")._session(tab), "session lost after 3 selections")
 
@@ -339,261 +355,54 @@ describe(":IntentDiff end-to-end", function()
     assert.is_true(m.group_head, "<Tab> did not land on group 2's head line")
   end)
 
-  it("codediff's layout toggle key re-renders and re-applies the group folds", function()
+  it("the layout toggle re-renders and keeps the group folds", function()
     make_two_group_repo()
     local session, tab = open_two_groups()
     local view = require("intentdiff.view")
 
     local win = select_and_wait(session, 1, 1, "a.lua", 5, 55)
-    local layout_of = function() return view.get_session(tab).layout end
-    local start_layout = layout_of()
-
-    -- Whether the pane actually holds a rendered INLINE diff, rather than the
-    -- plain file codediff's own (explorer-only) re-render path left behind:
-    -- inline rendering is entirely extmark-based (codediff.ui.inline).
-    local function inline_marks(cd_session)
-      local ns = require("codediff.ui.inline").ns_inline
-      return #vim.api.nvim_buf_get_extmarks(cd_session.modified_bufnr, ns, 0, -1, {})
-    end
+    assert.equals("side-by-side", view.current_plan(tab).layout)
 
     local function toggle_and_assert(expected_layout)
-      -- Press codediff's own toggle key in the diff pane: the whole point of
-      -- the fix is that codediff's buffer-local `t` now reaches our toggle.
+      -- Press codediff's own toggle key in the pane: it is bound to OUR
+      -- toggle, which re-renders the current plan in the other layout.
       press(win, require("codediff.config").options.keymaps.view.toggle_layout)
       local ok = helpers.wait_for(function()
-        local cd_session = view.get_session(tab)
-        local w = cd_session and cd_session.modified_win
-        if not (w and vim.api.nvim_win_is_valid(w)) or cd_session.layout ~= expected_layout then
+        local plan = view.current_plan(tab)
+        if not (plan and plan.layout == expected_layout) then
           return nil
         end
-        -- A real re-render happened in the new layout: inline ⇒ one pane with
-        -- inline extmarks; side-by-side ⇒ two live panes and no inline marks.
         if expected_layout == "inline" then
-          if cd_session.original_win ~= w or inline_marks(cd_session) == 0 then
+          if plan.original ~= nil or view.pane_wins(tab).original ~= nil then
             return nil
           end
-        else
-          local o = cd_session.original_win
-          if not (o and o ~= w and vim.api.nvim_win_is_valid(o)) or inline_marks(cd_session) > 0 then
-            return nil
-          end
+        elseif plan.original == nil or view.pane_wins(tab).original == nil then
+          return nil
         end
-        return ours_bound(cd_session.modified_bufnr)
-          and vim.wo[w].foldexpr == "v:lua.require'intentdiff.view'.foldexpr()"
-          and fold_state(w, 5) == -1 and fold_state(w, 55) > 0 and w or nil
+        return shows(tab, "a.lua", 5, 55)
       end, 10000)
-      assert.truthy(ok, "no re-rendered diff with group folds after toggling to " .. expected_layout)
+      assert.truthy(ok, "no re-render with the group folds after toggling to " .. expected_layout)
       win = ok
-      local cd_session = view.get_session(tab)
-      assert.equals(expected_layout, layout_of())
       assert.equals("expr", vim.wo[win].foldmethod)
-      assert.equals(-1, fold_state(win, 5))
-      assert.is_true(fold_state(win, 55) > 0, "other group's hunk not folded in " .. expected_layout)
-      -- The file is still the file we selected, not a plain buffer.
-      assert.truthy(vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win)):find("a.lua", 1, true))
-      if expected_layout == "inline" then
-        assert.is_true(inline_marks(cd_session) > 0, "inline diff not rendered")
-      else
-        assert.equals(0, inline_marks(cd_session))
-        assert.is_true(cd_session.original_win ~= win
-          and vim.api.nvim_win_is_valid(cd_session.original_win),
-          "original pane lost when toggling back to side-by-side")
-        assert.equals(tab, vim.api.nvim_win_get_tabpage(cd_session.original_win))
-      end
+      assert.is_true(ours_bound(vim.api.nvim_win_get_buf(win)),
+        "our keys must be reinstalled on the freshly painted buffer")
+      assert.equals(1, #view.current_plan(tab).files,
+        "the toggle must re-render the SAME plan, not something else")
     end
 
-    local other = start_layout == "inline" and "side-by-side" or "inline"
-    toggle_and_assert(other)
-    toggle_and_assert(start_layout)
-    toggle_and_assert(other)
+    toggle_and_assert("inline")
+    toggle_and_assert("side-by-side")
+    toggle_and_assert("inline")
     assert.is_true(vim.api.nvim_win_is_valid(session.sidebar.winid), "sidebar lost across toggles")
   end)
 
-  -- ------------------------------------------------------------------------
-  -- Whole-file statuses ("??"/"A"/"D") toggled with `t`: view.lua's
-  -- M.toggle_layout used to unconditionally call codediff's own
-  -- cd.view.toggle_layout, whose standalone rerender rebuilds a two-sided
-  -- SessionConfig from session.original/session.modified — one of which is
-  -- always path.empty() for these statuses (show_untracked_file /
-  -- show_added_virtual_file / show_deleted_virtual_file only ever populate
-  -- ONE side). codediff resolves that empty Path to Neovim's shared buffer
-  -- #1, asynchronously for "A"/"D", so the 2nd press left the pane bound to
-  -- buffer #1 with session.layout stuck, and the 3rd press left a permanent
-  -- phantom window. Drive the real sidebar-select → toggle flow and assert
-  -- after EVERY press that none of that happened.
-  -- ------------------------------------------------------------------------
-
-  --- The single window currently showing a whole-file pane's content,
-  --- regardless of which session field codediff parked it on: modified_win
-  --- for "??"/"A" and for anything in inline layout (inline always uses a
-  --- single window aliased to both original_win/modified_win); original_win
-  --- for "D" in side-by-side layout (show_deleted_virtual_file keeps only the
-  --- original pane and leaves modified_win nil).
-  local function whole_file_win(cd_session)
-    local m, o = cd_session.modified_win, cd_session.original_win
-    if m and vim.api.nvim_win_is_valid(m) then
-      return m
-    end
-    if o and vim.api.nvim_win_is_valid(o) then
-      return o
-    end
-  end
-
-  --- Select a whole-file entry from the sidebar via the real <CR> keymap and
-  --- wait until its pane shows real content (not buffer #1) containing
-  --- `expect_text` AND our `t` override has actually landed (M.install_keymaps
-  --- runs asynchronously — see M.show_file). Without waiting on ours_bound
-  --- here, a synchronous next keypress can race codediff's own un-patched `t`
-  --- (which still calls cd.view.toggle_layout directly), reproducing the very
-  --- corruption this test exists to catch as a false failure. Returns the
-  --- content window.
-  local function select_whole_file_and_wait(session, tab, group_i, file_i, path, expect_text)
-    local line = sidebar_line(session.sidebar, "file", group_i, file_i)
-    assert.truthy(line, ("no sidebar row for group %d file %d"):format(group_i, file_i))
-    focus_row(session, line)
-    press(session.sidebar.winid, "<CR>")
-    local view = require("intentdiff.view")
-    local win = helpers.wait_for(function()
-      local cd_session = view.get_session(tab)
-      local w = cd_session and whole_file_win(cd_session)
-      if not w then
-        return nil
-      end
-      local buf = vim.api.nvim_win_get_buf(w)
-      if buf == 1 then
-        return nil
-      end
-      if not vim.api.nvim_buf_get_name(buf):find(path, 1, true) then
-        return nil
-      end
-      local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-      if not text:find(expect_text, 1, true) then
-        return nil
-      end
-      if not ours_bound(buf) then
-        return nil
-      end
-      return w
-    end, 10000)
-    assert.truthy(win, ("whole-file pane never rendered %s"):format(path))
-    return win
-  end
-
-  --- Press codediff's layout-toggle key on a whole-file pane up to `times`
-  --- times, asserting after EVERY press: the pane is not bound to buffer #1
-  --- and still shows `expect_text`, the tab's window count never grows past
-  --- what it was right after selection (no phantom windows), the sidebar
-  --- window+buffer are still valid, and session.layout actually alternated.
-  --- Each press waits for ours_bound on the new buffer before returning —
-  --- same reasoning as select_whole_file_and_wait: the NEXT press must not
-  --- race codediff's own un-patched `t`.
-  local function toggle_whole_file_and_assert(session, tab, path, expect_text, times)
-    local view = require("intentdiff.view")
-    local toggle_key = require("codediff.config").options.keymaps.view.toggle_layout
-    local cd_session = view.get_session(tab)
-    local win = whole_file_win(cd_session)
-    assert.truthy(win, "no whole-file pane before toggling")
-    local baseline_wins = #vim.api.nvim_tabpage_list_wins(tab)
-    local prev_layout = cd_session.layout
-
-    for i = 1, times do
-      press(win, toggle_key)
-      local ok = helpers.wait_for(function()
-        local s = view.get_session(tab)
-        if not s or s.layout == prev_layout then
-          return nil -- hasn't actually flipped (yet)
-        end
-        local w = whole_file_win(s)
-        if not w then
-          return nil
-        end
-        local buf = vim.api.nvim_win_get_buf(w)
-        if buf == 1 then
-          return nil
-        end
-        local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-        if not text:find(expect_text, 1, true) then
-          return nil
-        end
-        if not ours_bound(buf) then
-          return nil
-        end
-        return w
-      end, 10000)
-      assert.truthy(ok, ("press %d: %s never re-rendered with real content after toggling layout"):format(i, path))
-      win = ok
-
-      local s = view.get_session(tab)
-      assert.is_true(s.layout ~= prev_layout,
-        ("press %d: session.layout did not alternate for %s"):format(i, path))
-      assert.is_true(#vim.api.nvim_tabpage_list_wins(tab) <= baseline_wins,
-        ("press %d: tab window count grew (phantom window) for %s"):format(i, path))
-      assert.is_true(vim.api.nvim_win_is_valid(session.sidebar.winid),
-        ("press %d: sidebar window lost for %s"):format(i, path))
-      assert.is_true(vim.api.nvim_buf_is_valid(session.sidebar.bufnr),
-        ("press %d: sidebar buffer lost for %s"):format(i, path))
-
-      prev_layout = s.layout
-    end
-  end
-
-  it("toggling layout on an untracked (??) whole-file pane never corrupts it", function()
-    local repo = helpers.make_repo({ ["tracked.lua"] = "x" })
-    helpers.write_file(repo, "new_file.txt", "UNTRACKED LINE ONE\nUNTRACKED LINE TWO")
-    vim.cmd("cd " .. repo)
-
-    require("intentdiff").setup({
-      cache_dir = vim.fn.tempname(),
-      provider = fake_provider({
-        { title = "New file", hunk_ids = { "new_file.txt:1" } },
-      }),
-    })
-    require("intentdiff").open("")
-    local tab = vim.api.nvim_get_current_tabpage()
-    local session = helpers.wait_for(function()
-      local s = require("intentdiff")._session(tab)
-      return s and s.model.state == "ready" and s or nil
-    end, 10000)
-    assert.truthy(session, "session never reached ready")
-
-    select_whole_file_and_wait(session, tab, 1, 1, "new_file.txt", "UNTRACKED LINE ONE")
-    toggle_whole_file_and_assert(session, tab, "new_file.txt", "UNTRACKED LINE ONE", 3)
-  end)
-
-  it("toggling layout on an added (A) whole-file pane never corrupts it", function()
-    local repo = helpers.make_repo({ ["base.lua"] = "x" })
-    local git = require("codediff.core.git")
-    local base_hash
-    git.resolve_revision("HEAD", repo, function(_, hash) base_hash = hash end)
-    helpers.wait_for(function() return base_hash end)
-
-    helpers.write_file(repo, "added.txt", "ADDED LINE ONE\nADDED LINE TWO")
-    helpers.git(repo, "add", "-A")
-    helpers.git(repo, "commit", "-q", "-m", "add file")
-    local target_hash
-    git.resolve_revision("HEAD", repo, function(_, hash) target_hash = hash end)
-    helpers.wait_for(function() return target_hash end)
-
-    vim.cmd("cd " .. repo)
-    require("intentdiff").setup({
-      cache_dir = vim.fn.tempname(),
-      provider = fake_provider({
-        { title = "Add file", hunk_ids = { "added.txt:1" } },
-      }),
-    })
-    require("intentdiff").open(base_hash .. " " .. target_hash)
-    local tab = vim.api.nvim_get_current_tabpage()
-    local session = helpers.wait_for(function()
-      local s = require("intentdiff")._session(tab)
-      return s and s.model.state == "ready" and s or nil
-    end, 10000)
-    assert.truthy(session, "session never reached ready")
-
-    select_whole_file_and_wait(session, tab, 1, 1, "added.txt", "ADDED LINE ONE")
-    toggle_whole_file_and_assert(session, tab, "added.txt", "ADDED LINE ONE", 3)
-  end)
-
-  it("toggling layout on a deleted (D) whole-file pane never corrupts it", function()
+  -- Whole-file statuses ("??"/"A"/"D") used to need three separate tests, one
+  -- per codediff single-file entry point, because toggling layout on them
+  -- corrupted the pane in three different ways. There is one render path now
+  -- and these statuses are ordinary plans whose old (or new) side is empty, so
+  -- one test over the awkward one is enough: a deleted file, whose content
+  -- lives only on the original side.
+  it("toggling layout on a whole-file (D) pane keeps its content", function()
     local repo = helpers.make_repo({ ["gone.txt"] = "GONE LINE ONE\nGONE LINE TWO" })
     local git = require("codediff.core.git")
     local base_hash
@@ -621,50 +430,28 @@ describe(":IntentDiff end-to-end", function()
     end, 10000)
     assert.truthy(session, "session never reached ready")
 
-    select_whole_file_and_wait(session, tab, 1, 1, "gone.txt", "GONE LINE ONE")
-    toggle_whole_file_and_assert(session, tab, "gone.txt", "GONE LINE ONE", 3)
-  end)
-
-  it("keeps ]c group-scoped after leaving and re-entering the review tab", function()
-    make_two_group_repo()
-    local session, tab = open_two_groups()
-    local win = select_and_wait(session, 1, 1, "a.lua", 5, 55)
-    local buf = vim.api.nvim_win_get_buf(win)
-
-    local function mapping_desc(key)
-      for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
-        if m.lhs == key then
-          return m.desc or ""
-        end
+    local view = require("intentdiff.view")
+    local function shows_content()
+      local plan = view.current_plan(tab)
+      if not plan then
+        return nil
       end
-      return nil
+      local pane = plan.original or plan.modified
+      return table.concat(pane.lines, "\n"):find("GONE LINE ONE", 1, true) ~= nil or nil
     end
-    assert.truthy((mapping_desc("]c") or ""):find("intent-diff", 1, true))
+    assert.truthy(helpers.wait_for(shows_content, 10000), "the deleted file never rendered")
 
-    -- codediff deletes its keymaps.view lhs's — ours included — from the pane
-    -- buffers on TabLeave and reinstalls its own all-hunks versions on
-    -- TabEnter, so ]c silently stopped being group-scoped after any tab switch.
-    vim.cmd("tabnew")
-    local scratch = vim.api.nvim_get_current_tabpage()
-    vim.api.nvim_set_current_tabpage(tab)
-    local reattached = helpers.wait_for(function()
-      return (mapping_desc("]c") or ""):find("intent-diff", 1, true) and true or nil
-    end, 10000)
-    assert.truthy(reattached, "]c was not re-attached after TabEnter: "
-      .. tostring(mapping_desc("]c")))
-
-    -- Functional proof it is OUR ]c: sitting on group 1's only hunk in this
-    -- file, group-scoped navigation has nowhere to go (group 2's hunk at 55 is
-    -- not ours), whereas codediff's all-hunks ]c would jump to line 55.
-    win = require("intentdiff.view").get_session(tab).modified_win
-    vim.api.nvim_set_current_win(win)
-    vim.api.nvim_win_set_cursor(win, { 5, 0 })
-    press(win, "]c")
-    assert.equals(5, vim.api.nvim_win_get_cursor(win)[1])
-
-    if vim.api.nvim_tabpage_is_valid(scratch) then
-      vim.api.nvim_set_current_tabpage(scratch)
-      vim.cmd("tabclose")
+    local baseline_wins = #vim.api.nvim_tabpage_list_wins(tab)
+    for i = 1, 3 do
+      local before = view.current_plan(tab).layout
+      assert.is_true(view.toggle_layout(tab), ("press %d: toggle refused"):format(i))
+      assert.truthy(helpers.wait_for(function()
+        return view.current_plan(tab).layout ~= before and shows_content() or nil
+      end, 10000), ("press %d: the deleted file lost its content"):format(i))
+      assert.is_true(#vim.api.nvim_tabpage_list_wins(tab) <= baseline_wins,
+        ("press %d: tab window count grew (phantom window)"):format(i))
+      assert.is_true(vim.api.nvim_win_is_valid(session.sidebar.winid),
+        ("press %d: sidebar window lost"):format(i))
     end
   end)
 
@@ -706,7 +493,7 @@ describe(":IntentDiff end-to-end", function()
   end
 
   -- Direct, isolated coverage for the IDENTITY gate in open_file's on_ready
-  -- (`view._last_shown[tab].file_entry == file_entry`). Previously this was
+  -- (`entry.shown.file_entry == file_entry`). Previously this was
   -- exercised only incidentally, as a side effect of the "keeps ]c
   -- group-scoped" test's setup above. Positive case: a <CR> that lands on the
   -- SAME file a still-in-flight auto-open is rendering must still end up with
@@ -715,7 +502,7 @@ describe(":IntentDiff end-to-end", function()
     -- open_two_groups() only waits for model.state == "ready";
     -- classify_and_render's own auto_open_first (group1/file1 = a.lua) is
     -- kicked off synchronously in that SAME completion callback, but its
-    -- show_file()'s on_ready (where navigation.attach would normally run)
+    -- render's on_ready (where navigation.attach would normally run)
     -- only fires later, once when_diff_ready's poll succeeds — so the <CR>
     -- below reliably (though not necessarily) lands inside that gap. Either
     -- way the assertions below must hold: settled-before-<CR> takes
@@ -723,7 +510,7 @@ describe(":IntentDiff end-to-end", function()
     -- same_as_shown short-circuit and leaves the auto-open's own on_ready to
     -- pass the identity gate — both must end up with OUR ]c attached.
     make_two_group_repo()
-    local session = open_two_groups()
+    local session, tab = open_two_groups()
     local win = select_and_wait(session, 1, 1, "a.lua", 5, 55)
     local buf = vim.api.nvim_win_get_buf(win)
     local desc
@@ -731,13 +518,15 @@ describe(":IntentDiff end-to-end", function()
       if m.lhs == "]c" then desc = m.desc end
     end
     assert.truthy((desc or ""):find("intent-diff", 1, true),
-      "]c must be group-scoped (intentdiff's own attach), not codediff's default")
+      "]c must be group-scoped (intentdiff's own attach)")
     -- Functional proof, not just the desc string: group 1's only hunk in this
-    -- file has nowhere to go — codediff's own all-hunks ]c would jump to 55.
+    -- file has nowhere to go, so a group-scoped ]c leaves the cursor alone.
+    local row = plan_row(tab, "a.lua", 5)
+    assert.truthy(row)
     vim.api.nvim_set_current_win(win)
-    vim.api.nvim_win_set_cursor(win, { 5, 0 })
+    vim.api.nvim_win_set_cursor(win, { row, 0 })
     press(win, "]c")
-    assert.equals(5, vim.api.nvim_win_get_cursor(win)[1])
+    assert.equals(row, vim.api.nvim_win_get_cursor(win)[1])
   end)
 
   -- Negative-case counterpart: a newer selection that lands on a DIFFERENT
@@ -755,7 +544,7 @@ describe(":IntentDiff end-to-end", function()
   --     happened over time.
   --  2. A navigation.attach-spy version that instead waited on REAL timing
   --     for x.lua's on_ready to fire late *still* didn't discriminate:
-  --     once y.lua's own show_file() runs cd.view.update, codediff's shared
+  --     once y.lua's own render ran, codediff's shared
   --     session only tracks ONE "current" diff target
   --     (session.modified.absolute) — x.lua's when_diff_ready poll can
   --     never again match its own path once y.lua has taken over, so it
@@ -764,25 +553,24 @@ describe(":IntentDiff end-to-end", function()
   --     exercises the code path this test exists to guard, no matter how
   --     long it waits.
   --
-  -- Stub view.show_file to CAPTURE on_ready instead of letting (as shown
-  -- above, sometimes structurally unreachable) async rendering decide when
-  -- it fires, and invoke the captured callbacks in a chosen order —
-  -- deterministic, independent of codediff's internals or timing.
+  -- Stub view.show to CAPTURE on_ready instead of letting (as shown above,
+  -- sometimes structurally unreachable) async rendering decide when it fires,
+  -- and invoke the captured callbacks in a chosen order — deterministic and
+  -- independent of timing. entry.shown, the one side effect the identity gate
+  -- reads, is set by show_one BEFORE view.show is called, so it still moves
+  -- exactly as it would in a real render.
   it("does not attach a stale ctx when a newer selection lands on a different file "
       .. "while an auto-open is still in flight", function()
     make_two_file_two_group_repo()
     local view = require("intentdiff.view")
     local navigation = require("intentdiff.navigation")
-    local real_show_file = view.show_file
+    local real_show = view.show
     local real_attach = navigation.attach
-    local pending = {} -- captured show_file() calls, in call order
+    local pending = {} -- captured renders, in call order
     local attach_calls = {}
-    view.show_file = function(sess, file_entry, opts)
-      -- Mirror the one side effect same_as_shown/still_current depend on —
-      -- set synchronously at the top of the real show_file (see view.lua) —
-      -- without doing any real, asynchronous rendering.
-      view._last_shown[sess.tabpage] = { sess = sess, file_entry = file_entry }
-      pending[#pending + 1] = { file_entry = file_entry, on_ready = opts and opts.on_ready }
+    view.show = function(_, files, _, opts)
+      pending[#pending + 1] = { files = files, on_ready = opts and opts.on_ready }
+      return true
     end
     navigation.attach = function(tabpage, ctx)
       attach_calls[#attach_calls + 1] = { group_i = ctx.group_i, file_i = ctx.file_i }
@@ -790,25 +578,24 @@ describe(":IntentDiff end-to-end", function()
     end
     local ok, err = pcall(function()
       local session = open_two_file_groups()
-      assert.equals(1, #pending, "auto-open must have captured exactly one show_file() call")
+      assert.equals(1, #pending, "auto-open must have captured exactly one render")
       local x_call = pending[1]
-      assert.equals("x.lua", x_call.file_entry.path)
+      assert.equals("x.lua", x_call.files[1].path)
 
       -- Newer selection on a DIFFERENT file: y.lua, group 2. Goes through
       -- the full open_file() path (not same_as_shown, since the path
-      -- differs), capturing its own show_file() call rather than x.lua's
-      -- being re-used.
+      -- differs), capturing its own render rather than re-using x.lua's.
       local y_line = sidebar_line(session.sidebar, "file", 2, 1)
       assert.truthy(y_line, "no sidebar row for y.lua")
       focus_row(session, y_line)
       press(session.sidebar.winid, "<CR>")
-      assert.equals(2, #pending, "selecting y.lua must have called show_file() again")
-      assert.equals("y.lua", pending[2].file_entry.path)
+      assert.equals(2, #pending, "selecting y.lua must have rendered again")
+      assert.equals("y.lua", pending[2].files[1].path)
 
       -- Fire x.lua's STALE on_ready now, simulating it arriving late — after
-      -- the newer selection has already moved _last_shown on to y.lua —
+      -- the newer selection has already moved entry.shown on to y.lua —
       -- exactly what open_file's on_ready IDENTITY gate has to reject.
-      assert.truthy(x_call.on_ready, "auto-open's show_file() call had no on_ready")
+      assert.truthy(x_call.on_ready, "auto-open's render had no on_ready")
       x_call.on_ready()
 
       for i, c in ipairs(attach_calls) do
@@ -817,7 +604,7 @@ describe(":IntentDiff end-to-end", function()
             .. "after y.lua's own selection had already taken over the panes"):format(i))
       end
     end)
-    view.show_file = real_show_file
+    view.show = real_show
     navigation.attach = real_attach
     assert.is_true(ok, tostring(err))
   end)
@@ -882,8 +669,8 @@ describe(":IntentDiff end-to-end", function()
     vim.cmd("tabclose")
 
     assert.is_nil(require("intentdiff")._session(tab))
-    assert.is_nil(require("intentdiff.view")._active_folds[tab])
-    assert.is_nil(require("intentdiff.view")._last_shown[tab])
+    assert.is_nil(require("intentdiff.view")._painted[tab])
+    assert.is_nil(require("intentdiff.view")._wins[tab])
   end)
 
   it("closes the opened tab and session when the merge-base cannot be resolved", function()
@@ -911,65 +698,29 @@ describe(":IntentDiff end-to-end", function()
   -- keypress and assert real content shows up on its own.
   -- ------------------------------------------------------------------------
 
-  --- True once `buf`'s name is a real file path, not one of codediff's empty
-  --- placeholder buffers ("CodeDiff N.N" — nvim resolves the relative name
-  --- against cwd, so it may show up prefixed with the repo path).
-  local function is_placeholder_name(name)
-    return name:match("CodeDiff %d+%.%d+$") ~= nil
-  end
-
-  --- Wait for the modified pane to show `path` with real content (line count
-  --- > 1) and, if given, the fold state at `visible`/`folded` lines. Returns
-  --- the window.
+  --- Wait for the panes to hold a plan over `path` and, if given, the fold
+  --- state at the file's `visible`/`folded` lines. Returns the window.
   local function wait_auto_opened(tab, path, visible, folded)
-    local view = require("intentdiff.view")
     return helpers.wait_for(function()
-      local cd_session = view.get_session(tab)
-      local w = cd_session and cd_session.modified_win
-      if not (w and vim.api.nvim_win_is_valid(w)) then
-        return nil
-      end
-      local buf = vim.api.nvim_win_get_buf(w)
-      local name = vim.api.nvim_buf_get_name(buf)
-      if not name:find(path, 1, true) then
-        return nil
-      end
-      if vim.api.nvim_buf_line_count(buf) <= 1 then
-        return nil
-      end
-      if vim.wo[w].foldmethod ~= "expr" then
-        return nil
-      end
-      if visible and fold_state(w, visible) ~= -1 then
-        return nil
-      end
-      if folded and not (fold_state(w, folded) > 0) then
-        return nil
-      end
-      return w
+      return shows(tab, path, visible, folded)
     end, 10000)
   end
 
-  --- Wait for the modified pane to show ANY real (non-placeholder) content,
-  --- regardless of which file. Used while classification is still loading,
-  --- before groups (and thus a specific expected path) exist.
+  --- Wait for the panes to hold ANY render with real content, regardless of
+  --- which file. Used while classification is still loading, before groups
+  --- (and thus a specific expected path) exist.
   local function wait_content_pane(tab)
     local view = require("intentdiff.view")
     return helpers.wait_for(function()
-      local cd_session = view.get_session(tab)
-      local w = cd_session and cd_session.modified_win
-      if not (w and vim.api.nvim_win_is_valid(w)) then
+      local plan = view.current_plan(tab)
+      if not (plan and #plan.modified.lines > 1) then
         return nil
       end
-      local buf = vim.api.nvim_win_get_buf(w)
-      local name = vim.api.nvim_buf_get_name(buf)
-      if is_placeholder_name(name) then
+      local win = view.pane_wins(tab).modified
+      if not (win and vim.api.nvim_win_is_valid(win)) then
         return nil
       end
-      if vim.api.nvim_buf_line_count(buf) <= 1 then
-        return nil
-      end
-      return w
+      return win
     end, 10000)
   end
 
@@ -983,16 +734,12 @@ describe(":IntentDiff end-to-end", function()
     local win = wait_auto_opened(tab, "a.lua", 5, 55)
     assert.truthy(win, "modified pane never auto-opened a.lua with group one's folds")
 
-    local cd_session = require("intentdiff.view").get_session(tab)
-    local mbuf = vim.api.nvim_win_get_buf(cd_session.modified_win)
-    local obuf = vim.api.nvim_win_get_buf(cd_session.original_win)
+    local wins = require("intentdiff.view").pane_wins(tab)
+    local mbuf = vim.api.nvim_win_get_buf(wins.modified)
+    local obuf = vim.api.nvim_win_get_buf(wins.original)
     assert.is_true(vim.api.nvim_buf_line_count(mbuf) > 1, "modified pane still empty")
     assert.is_true(vim.api.nvim_buf_line_count(obuf) > 1, "original pane still empty")
-    assert.is_false(is_placeholder_name(vim.api.nvim_buf_get_name(mbuf)))
-    assert.is_false(is_placeholder_name(vim.api.nvim_buf_get_name(obuf)))
     assert.equals("expr", vim.wo[win].foldmethod)
-    assert.equals(-1, fold_state(win, 5))
-    assert.is_true(fold_state(win, 55) > 0)
 
     local focused = helpers.wait_for(function()
       return vim.api.nvim_get_current_win() == session.sidebar.winid or nil
@@ -1005,7 +752,7 @@ describe(":IntentDiff end-to-end", function()
     -- hunk, the flat "All changes" group's first file and the real first
     -- group's first file are necessarily the exact same file with the exact
     -- same (one-hunk) hunk set — the mainstream double-render case the
-    -- de-dupe guard exists for. Without it, view.show_file() would fire
+    -- de-dupe guard exists for. Without it, view.show() would fire
     -- twice for this file (a wasted second cd.view.update()/diff recompute).
     local repo = helpers.make_repo({ ["only.lua"] = table.concat(vim.fn.range(1, 20), "\n") })
     local lines = vim.fn.range(1, 20)
@@ -1014,11 +761,11 @@ describe(":IntentDiff end-to-end", function()
     vim.cmd("cd " .. repo)
 
     local view = require("intentdiff.view")
-    local orig_show_file = view.show_file
+    local orig_show = view.show
     local call_count = 0
-    view.show_file = function(...)
+    view.show = function(...)
       call_count = call_count + 1
-      return orig_show_file(...)
+      return orig_show(...)
     end
 
     require("intentdiff").setup({
@@ -1036,23 +783,13 @@ describe(":IntentDiff end-to-end", function()
     assert.truthy(session, "session never reached ready")
 
     local rendered = helpers.wait_for(function()
-      local cd_session = view.get_session(tab)
-      local w = cd_session and cd_session.modified_win
-      if not (w and vim.api.nvim_win_is_valid(w)) then
-        return nil
-      end
-      local buf = vim.api.nvim_win_get_buf(w)
-      local name = vim.api.nvim_buf_get_name(buf)
-      if not name:find("only.lua", 1, true) or vim.api.nvim_buf_line_count(buf) <= 1 then
-        return nil
-      end
-      return w
+      return shows(tab, "only.lua")
     end, 10000)
-    view.show_file = orig_show_file -- restore before any assertion can fail
+    view.show = orig_show -- restore before any assertion can fail
     assert.truthy(rendered, "only.lua never auto-opened with content")
 
     assert.equals(1, call_count,
-      "expected exactly one show_file() render when loading-phase and ready-phase targets coincide, got "
+      "expected exactly one render when loading-phase and ready-phase targets coincide, got "
         .. call_count)
   end)
 
@@ -1110,7 +847,7 @@ describe(":IntentDiff end-to-end", function()
 
     -- Wait for the loading-phase auto-open to actually render something
     -- first, so the manual selection below is a clean, unambiguous override
-    -- rather than a race against the auto-open's own async show_file().
+    -- rather than a race against the auto-open's own async render.
     assert.truthy(wait_content_pane(tab), "no auto-opened content before manual selection")
 
     -- Manually select b.lua (file_i=2 in the flat "All changes" group; a.lua
@@ -1121,15 +858,7 @@ describe(":IntentDiff end-to-end", function()
     press(session.sidebar.winid, "<CR>")
 
     local view = require("intentdiff.view")
-    local win = helpers.wait_for(function()
-      local cd_session = view.get_session(tab)
-      local w = cd_session and cd_session.modified_win
-      if not (w and vim.api.nvim_win_is_valid(w)) then
-        return nil
-      end
-      local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w))
-      return name:find("b.lua", 1, true) and w or nil
-    end, 10000)
+    local win = helpers.wait_for(function() return shows(tab, "b.lua") end, 10000)
     assert.truthy(win, "manual selection of b.lua never rendered")
 
     assert.truthy(deferred_cb, "provider never invoked")
@@ -1146,10 +875,10 @@ describe(":IntentDiff end-to-end", function()
     -- Give any (incorrect) auto-open a moment to fire, then assert b.lua is
     -- STILL what's shown — auto-open must never steal a manual selection.
     vim.wait(300)
-    local cd_session = view.get_session(tab)
-    local final_name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(cd_session.modified_win))
-    assert.truthy(final_name:find("b.lua", 1, true),
-      "auto-open stole the user's manual selection: " .. final_name)
+    local final_plan = view.current_plan(tab)
+    assert.equals(1, #final_plan.files)
+    assert.equals("b.lua", final_plan.files[1].path,
+      "auto-open stole the user's manual selection")
   end)
 
   it("re-folds a manually-selected added file once classification narrows it to one sub-hunk", function()
@@ -1194,19 +923,14 @@ describe(":IntentDiff end-to-end", function()
     press(session.sidebar.winid, "<CR>")
 
     local view = require("intentdiff.view")
-    local win = helpers.wait_for(function()
-      local cd_session = view.get_session(tab)
-      local w = cd_session and cd_session.modified_win
-      if not (w and vim.api.nvim_win_is_valid(w)) then
-        return nil
-      end
-      local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w))
-      return name:find("added.lua", 1, true) and w or nil
-    end, 10000)
+    local win = helpers.wait_for(function() return shows(tab, "added.lua") end, 10000)
     assert.truthy(win, "manual selection of added.lua never rendered")
-    -- Sanity: nothing folded yet — the flat group owns both sub-hunks.
-    assert.equals(-1, fold_state(win, added_hunks[1].modified.start_line))
-    assert.equals(-1, fold_state(win, added_hunks[#added_hunks].modified.start_line))
+    -- Sanity: nothing folded yet — the flat group owns every sub-hunk.
+    -- Ten lines INTO the last sub-hunk, past the context the renderer keeps
+    -- around the previous one.
+    local last_line = added_hunks[#added_hunks].modified.start_line + 10
+    assert.equals(-1, fold_state(win, plan_row(tab, "added.lua", added_hunks[1].modified.start_line)))
+    assert.equals(-1, fold_state(win, plan_row(tab, "added.lua", last_line)))
 
     assert.truthy(deferred_cb, "provider never invoked")
     -- Real grouping: sub-hunk 1 in its own group, the rest elsewhere — the
@@ -1229,16 +953,19 @@ describe(":IntentDiff end-to-end", function()
     -- refold_shown_file must narrow the still-open added.lua pane to the
     -- group it now belongs to: sub-hunk 1 visible, the rest folded away —
     -- without moving the user off their manual selection.
-    helpers.wait_for(function()
-      return fold_state(win, added_hunks[#added_hunks].modified.start_line) > 0
-    end, 10000)
-    assert.equals(-1, fold_state(win, added_hunks[1].modified.start_line))
-    assert.is_true(fold_state(win, added_hunks[#added_hunks].modified.start_line) > 0)
-    local final_name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
-    assert.truthy(final_name:find("added.lua", 1, true))
+    assert.truthy(helpers.wait_for(function()
+      local row = plan_row(tab, "added.lua", last_line)
+      return row and fold_state(view.pane_wins(tab).modified, row) > 0 or nil
+    end, 10000), "the other sub-hunks were never folded away")
+    win = view.pane_wins(tab).modified
+    assert.equals(-1, fold_state(win, plan_row(tab, "added.lua", added_hunks[1].modified.start_line)))
+    assert.is_true(fold_state(win, plan_row(tab, "added.lua", last_line)) > 0)
+    local final_plan = view.current_plan(tab)
+    assert.equals(1, #final_plan.files)
+    assert.equals("added.lua", final_plan.files[1].path)
   end)
 
-  it("auto_open = false leaves the placeholder panes until a manual selection", function()
+  it("auto_open = false leaves the panes empty until a manual selection", function()
     make_two_group_repo()
     require("intentdiff").setup({
       cache_dir = vim.fn.tempname(),
@@ -1256,15 +983,12 @@ describe(":IntentDiff end-to-end", function()
     end, 10000)
     assert.truthy(session, "session never reached ready with 2 groups")
 
-    -- Give any (wrongly-firing) auto-open a moment, then assert the panes
-    -- are still codediff's empty placeholders.
+    -- Give any (wrongly-firing) auto-open a moment, then assert nothing was
+    -- painted at all.
     vim.wait(300)
     local view = require("intentdiff.view")
-    local cd_session = view.get_session(tab)
-    local mbuf = vim.api.nvim_win_get_buf(cd_session.modified_win)
-    local mname = vim.api.nvim_buf_get_name(mbuf)
-    assert.truthy(is_placeholder_name(mname), "expected an empty placeholder pane, got " .. mname)
-    assert.is_true(vim.api.nvim_buf_line_count(mbuf) <= 1)
+    assert.is_nil(view.current_plan(tab), "auto_open = false must render nothing")
+    assert.truthy(view.pane_wins(tab).modified, "the pane windows must still exist")
 
     -- ...until a manual selection, which still works exactly as before.
     local win = select_and_wait(session, 1, 1, "a.lua", 5, 55)
@@ -1618,11 +1342,8 @@ describe("comments in a review tab", function()
   end)
 
   -- The wiring this task is actually about, against a real review tab: the
-  -- keys have to reach the buffer the pane DISPLAYS (codediff's
-  -- session.*_bufnr fields lag behind a render by a scheduled callback, so
-  -- installing from them alone can land the keys on a placeholder buffer
-  -- nobody is looking at), the marks have to survive the rebuild, and closing
-  -- the tab has to detach the store.
+  -- keys have to reach the buffer the pane DISPLAYS, the marks have to survive
+  -- the rebuild, and closing the tab has to detach the store.
   it("wires comments into a live review tab", function()
     local repo = helpers.make_repo({ ["a.lua"] = table.concat(vim.fn.range(1, 40), "\n") })
     helpers.write_file(repo, "a.lua", "CHANGED\n" .. table.concat(vim.fn.range(2, 40), "\n"))
@@ -1647,8 +1368,7 @@ describe("comments in a review tab", function()
 
     local view = require("intentdiff.view")
     local displayed = helpers.wait_for(function()
-      local session = view.get_session(tab)
-      local win = session and session.modified_win
+      local win = view.pane_wins(tab).modified
       if not (win and vim.api.nvim_win_is_valid(win)) then
         return nil
       end
@@ -1668,22 +1388,30 @@ describe("comments in a review tab", function()
     local marks = require("intentdiff.comments.marks")
     local st = entry.comment_store
     assert.truthy(st, "the review never got a comment store")
-    local shown = view._last_shown[tab]
-    assert.truthy(shown and shown.file_entry, "no file was ever shown")
-    st.add({ file = shown.file_entry.path, line = 2, side = "new",
-      type = "issue", text = "live comment" })
+    assert.truthy(entry.shown and entry.shown.file_entry, "no file was ever shown")
+    local path = entry.shown.file_entry.path
+    st.add({ file = path, line = 2, side = "new", type = "issue", text = "live comment" })
     marks.refresh(tab)
     assert.is_true(#vim.api.nvim_buf_get_extmarks(displayed, marks.ns, 0, -1, {}) > 0,
       "the comment left no extmark on the displayed pane buffer")
 
     -- `]n` against the REAL diff_wins. The navigation guard ("am I in a diff
-    -- pane?") reads codediff's session windows, so this is what proves those
-    -- agree with the window the user's cursor is actually in — a stub cannot.
-    local session = view.get_session(tab)
-    vim.api.nvim_set_current_win(session.modified_win)
-    vim.api.nvim_win_set_cursor(session.modified_win, { 1, 0 })
+    -- pane?") reads the painted panes, so this is what proves those agree with
+    -- the window the user's cursor is actually in — a stub cannot.
+    local modified = view.pane_wins(tab).modified
+    local row = nil
+    local plan = view.current_plan(tab)
+    for r = 1, #plan.modified.lines do
+      local t = plan.modified.map[r]
+      if t and t.file == path and t.side == "new" and t.line == 2 then
+        row = r
+      end
+    end
+    assert.truthy(row, "the plan does not show line 2 of the shown file")
+    vim.api.nvim_set_current_win(modified)
+    vim.api.nvim_win_set_cursor(modified, { 1, 0 })
     require("intentdiff.comments").next(tab)
-    assert.equals(2, vim.api.nvim_win_get_cursor(session.modified_win)[1],
+    assert.equals(row, vim.api.nvim_win_get_cursor(modified)[1],
       "]n did not reach the comment from inside a real diff pane")
 
     -- An intent comment signs the sidebar's group head row, and survives a
@@ -1741,8 +1469,7 @@ describe("comments in a review tab", function()
     -- Wait for the pane buffer to have OUR view keys on it: that is the moment
     -- install_comment_keymaps has run for it too.
     local displayed = helpers.wait_for(function()
-      local session = view.get_session(tab)
-      local win = session and session.modified_win
+      local win = view.pane_wins(tab).modified
       if not (win and vim.api.nvim_win_is_valid(win)) then
         return nil
       end
@@ -1821,10 +1548,10 @@ describe("comments in a review tab", function()
 
     local opened = {}
 
-    --- Open a review and wait until its comments have attached. codediff picks
-    --- the tab (and view.bootstrap records it a scheduled callback later), so
-    --- the review's tab is found by looking for a tab that did not exist before
-    --- rather than by reading the current one.
+    --- Open a review and wait until its comments have attached. The review's
+    --- tab is found by looking for a tab that did not exist before rather than
+    --- by reading the current one, so the lookup cannot be fooled by anything
+    --- that moves the cursor between tabs.
     local function open(args)
       local before = {}
       for _, t in ipairs(vim.api.nvim_list_tabpages()) do
@@ -1993,9 +1720,8 @@ describe("comments in a review tab", function()
     end, 10000)
     assert.truthy(entry, "the review never became ready")
 
-    local view = require("intentdiff.view")
     local shown = helpers.wait_for(function()
-      local s = view._last_shown[tab]
+      local s = entry.shown
       return s and s.file_entry and s.file_entry.path or nil
     end, 10000)
     assert.truthy(shown, "no file was ever auto-opened")
@@ -2013,7 +1739,7 @@ describe("comments in a review tab", function()
     assert.is_true(require("intentdiff").open_path(tab, other, function() fired = true end))
     assert.truthy(helpers.wait_for(function() return fired or nil end, 10000),
       "on_shown never fired for a file that had to be rendered")
-    assert.equals(other, view._last_shown[tab].file_entry.path)
+    assert.equals(other, entry.shown.file_entry.path)
 
     -- Asking again for the file now on screen takes select_file's
     -- same_as_shown short-circuit, which never calls open_file at all — its
@@ -2027,7 +1753,7 @@ describe("comments in a review tab", function()
     local ghost = false
     assert.is_false(require("intentdiff").open_path(tab, "nope.lua", function() ghost = true end))
     assert.is_false(ghost)
-    assert.equals(other, view._last_shown[tab].file_entry.path)
+    assert.equals(other, entry.shown.file_entry.path)
 
     require("intentdiff").close(tab)
   end)

@@ -116,8 +116,8 @@ describe("comments across concurrent review sessions", function()
 
     a.comment_store.add({ file = "a.lua", line = 3, side = "new", type = "issue", text = "in A" })
     b.comment_store.add({ file = "a.lua", line = 3, side = "new", type = "issue", text = "in B" })
-    marks.render_buffer(a.comment_store, buf_a, "a.lua", "new")
-    marks.render_buffer(b.comment_store, buf_b, "a.lua", "new")
+    marks.render_pane(a.comment_store, buf_a, helpers.fake_pane("a.lua", "new", 10))
+    marks.render_pane(b.comment_store, buf_b, helpers.fake_pane("a.lua", "new", 10))
     assert.equals(1, #vim.api.nvim_buf_get_extmarks(buf_a, marks.ns, 0, -1, {}))
     assert.equals(1, #vim.api.nvim_buf_get_extmarks(buf_b, marks.ns, 0, -1, {}))
 
@@ -140,9 +140,13 @@ describe("comments across concurrent review sessions", function()
     for _, pair in ipairs({ { a, old_a, new_a }, { b, old_b, new_b } }) do
       local entry, old_buf, new_buf = pair[1], pair[2], pair[3]
       entry.comment_store.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "one\ntwo" })
-      marks.render_buffer(entry.comment_store, old_buf, "a.lua", "old")
-      marks.render_buffer(entry.comment_store, new_buf, "a.lua", "new")
-      marks.align(entry.comment_store, old_buf, new_buf, "a.lua")
+      local panes = {
+        { bufnr = old_buf, pane = helpers.fake_pane("a.lua", "old", 10) },
+        { bufnr = new_buf, pane = helpers.fake_pane("a.lua", "new", 10) },
+      }
+      marks.render_pane(entry.comment_store, old_buf, panes[1].pane)
+      marks.render_pane(entry.comment_store, new_buf, panes[2].pane)
+      marks.align_panes(entry.comment_store, panes)
     end
     assert.equals(1, #vim.api.nvim_buf_get_extmarks(old_a, marks.ns_padding, 0, -1, {}))
     assert.equals(1, #vim.api.nvim_buf_get_extmarks(old_b, marks.ns_padding, 0, -1, {}))
@@ -167,7 +171,7 @@ describe("comments across concurrent review sessions", function()
     b.comment_store.add({ file = "a.lua", line = 5, side = "new", type = "praise", text = "in B" })
 
     comments.detach_session(a)
-    marks.render_buffer(b.comment_store, buf_b, "a.lua", "new")
+    marks.render_pane(b.comment_store, buf_b, helpers.fake_pane("a.lua", "new", 10))
 
     assert.equals(1, #vim.api.nvim_buf_get_extmarks(buf_b, marks.ns, 0, -1, {}))
     vim.api.nvim_buf_delete(buf_b, { force = true })
@@ -179,7 +183,7 @@ describe("comments across concurrent review sessions", function()
     local entry = attach(repo, "aaa", "bbb")
     local buf = scratch(10)
     entry.comment_store.add({ file = "a.lua", line = 2, side = "new", type = "note", text = "solo" })
-    marks.render_buffer(entry.comment_store, buf, "a.lua", "new")
+    marks.render_pane(entry.comment_store, buf, helpers.fake_pane("a.lua", "new", 10))
     assert.equals(1, #vim.api.nvim_buf_get_extmarks(buf, marks.ns, 0, -1, {}))
     assert.equals(1, #storage.load(key_of(repo, "aaa", "bbb")))
 

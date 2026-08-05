@@ -228,7 +228,7 @@ function M.create(callbacks)
   vim.cmd("topleft " .. width .. "vsplit")
   local winid = vim.api.nvim_get_current_win()
   -- The tab this sidebar belongs to, captured once: init.lua creates the
-  -- sidebar INSIDE the codediff tab it just bootstrapped, and hiding the
+  -- sidebar INSIDE the review tab view.open_tab() just created, and hiding the
   -- sidebar drops handle.winid, so re-deriving it later would fail exactly
   -- when a comment refresh still needs it.
   local tabpage = vim.api.nvim_win_get_tabpage(winid)

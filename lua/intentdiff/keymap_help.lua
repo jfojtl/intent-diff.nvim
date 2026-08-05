@@ -83,7 +83,7 @@ local function build_sections(keymaps)
     { vkm.next_hunk, "Next hunk in the current intent" },
     { vkm.prev_hunk, "Previous hunk in the current intent" },
     { vkm.toggle_sidebar, "Show/hide the sidebar (works in both)" },
-    { vkm.quit, "Close (whole-intent preview)" },
+    { vkm.quit, "Close the review" },
   }
   -- codediff owns this key; we only re-bind it so the group fold filter
   -- survives the toggle. Show it as the shared key it is.

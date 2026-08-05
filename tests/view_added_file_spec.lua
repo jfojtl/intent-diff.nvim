@@ -34,59 +34,75 @@ describe("view: added files", function()
     return base
   end
 
-  it("shows the real contents of a staged new file in working-tree mode", function()
-    local repo = repo_with_added(20)
+  local function added_hunks(repo)
     local inv
     require("intentdiff.hunks").collect({ git_root = repo }, function(i) inv = i end)
     helpers.wait_for(function() return inv end)
-    local added = vim.tbl_filter(function(h) return h.file == "added.lua" end, inv.hunks)
+    return vim.tbl_filter(function(h) return h.file == "added.lua" end, inv.hunks)
+  end
+
+  local function visible_all(hunks)
+    local visible = {}
+    for _, h in ipairs(hunks) do visible[h.id] = true end
+    return visible
+  end
+
+  --- The new-side lines of `path` the plan actually renders, in row order.
+  local function rendered_lines(plan, path)
+    local out = {}
+    for row = 1, #plan.modified.lines do
+      local t = plan.modified.map[row]
+      if t and t.file == path and t.side == "new" then
+        out[#out + 1] = plan.modified.lines[row]
+      end
+    end
+    return out
+  end
+
+  local function show(sess, entry, visible)
+    local ready = false
+    view.show(sess, { entry }, visible, { on_ready = function() ready = true end })
+    assert.truthy(helpers.wait_for(function() return ready end, 10000))
+    return view.current_plan(sess.tabpage)
+  end
+
+  it("shows the real contents of a staged new file in working-tree mode", function()
+    local repo = repo_with_added(20)
+    local added = added_hunks(repo)
     assert.equals(1, #added) -- 20 lines is below min_lines, so still whole
 
     local sess = { tabpage = view.open_tab(), git_root = repo,
-      base_revision = base_of(repo), target_revision = "WORKING" }
-    local ready = false
-    view.show_file(sess, { path = "added.lua", status = "A", hunks = added },
-      { on_ready = function() ready = true end })
-    helpers.wait_for(function() return ready end, 10000)
+      base_revision = base_of(repo), target_revision = nil }
+    local plan = show(sess, { path = "added.lua", status = "A", hunks = added },
+      visible_all(added))
 
-    local session = view.get_session(sess.tabpage)
-    local lines = vim.api.nvim_buf_get_lines(session.modified_bufnr, 0, -1, false)
+    local lines = rendered_lines(plan, "added.lua")
     assert.equals(20, #lines)
     assert.equals("added line 1", lines[1])
     assert.equals("added line 20", lines[20])
+    view.close_tab(sess)
   end)
 
-  -- An added file renders a SINGLE pane: codediff closes the window it does
-  -- not need and nils that side's session_win field. Nothing else covered
-  -- keymap installation for that shape, and the comment keys made it matter —
-  -- an untracked or added file is exactly where a reviewer wants to leave
-  -- notes. (This passes against the older `ipairs({ original_bufnr,
-  -- modified_bufnr })` loop too: the *bufnr* fields do stay populated here.
-  -- It pins the behaviour, not the fix.)
-  it("installs the buffer-local keys on an added file's single pane", function()
+  it("installs the buffer-local keys on every painted pane", function()
     local repo = repo_with_added(20)
     require("intentdiff.config").setup({ keymaps = { comments = { add_issue = "gI" } } })
-    local inv
-    require("intentdiff.hunks").collect({ git_root = repo }, function(i) inv = i end)
-    helpers.wait_for(function() return inv end)
-    local added = vim.tbl_filter(function(h) return h.file == "added.lua" end, inv.hunks)
+    local added = added_hunks(repo)
 
     local sess = { tabpage = view.open_tab(), git_root = repo,
-      base_revision = base_of(repo), target_revision = "WORKING" }
-    local ready = false
-    view.show_file(sess, { path = "added.lua", status = "A", hunks = added },
-      { on_ready = function() ready = true end })
-    helpers.wait_for(function() return ready end, 10000)
+      base_revision = base_of(repo), target_revision = nil }
+    show(sess, { path = "added.lua", status = "A", hunks = added }, visible_all(added))
 
-    local session = view.get_session(sess.tabpage)
-    assert.is_nil(session.original_win, "an added file must render a single pane")
-    local found = {}
-    for _, m in ipairs(vim.api.nvim_buf_get_keymap(
-      vim.api.nvim_win_get_buf(session.modified_win), "n")) do
-      found[m.lhs] = true
+    local wins = view.diff_wins(sess.tabpage)
+    assert.equals(2, #wins, "an added file still renders both panes; its old side is simply empty")
+    for _, win in ipairs(wins) do
+      local found = {}
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(vim.api.nvim_win_get_buf(win), "n")) do
+        found[m.lhs] = true
+      end
+      assert.is_true(found["gI"] or false, "the comment keys must reach an added file's pane")
+      assert.is_true(found["g?"] or false, "the view keys must reach an added file's pane")
     end
-    assert.is_true(found["gI"] or false, "the comment keys must reach an added file's pane")
-    assert.is_true(found["g?"] or false, "the view keys must reach an added file's pane")
+    view.close_tab(sess)
     require("intentdiff.config").setup({})
   end)
 
@@ -100,53 +116,56 @@ describe("view: added files", function()
     helpers.write_file(repo, "added.lua", table.concat(src, "\n"))
     helpers.git(repo, "add", "added.lua")
 
-    local inv
-    require("intentdiff.hunks").collect({ git_root = repo }, function(i) inv = i end)
-    helpers.wait_for(function() return inv end)
-    local added = vim.tbl_filter(function(h) return h.file == "added.lua" end, inv.hunks)
+    local added = added_hunks(repo)
     assert.is_true(#added > 1)
 
     local sess = { tabpage = view.open_tab(), git_root = repo,
-      base_revision = base_of(repo), target_revision = "WORKING" }
-    local ready = false
-    -- group owns ONLY the first sub-hunk
-    view.show_file(sess, { path = "added.lua", status = "A", hunks = { added[1] } },
-      { on_ready = function() ready = true end })
-    helpers.wait_for(function() return ready end, 10000)
+      base_revision = base_of(repo), target_revision = nil }
+    -- The intent owns ONLY the first sub-hunk.
+    local plan = show(sess, { path = "added.lua", status = "A", hunks = added },
+      { [added[1].id] = true })
 
-    local session = view.get_session(sess.tabpage)
-    local win = session.modified_win
-    assert.equals("expr", vim.wo[win].foldmethod)
-    local function foldclosed(l)
-      return vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(l) end)
+    local win = view.pane_wins(sess.tabpage).modified
+    local function row_of(line)
+      for row = 1, #plan.modified.lines do
+        local t = plan.modified.map[row]
+        if t and t.file == "added.lua" and t.side == "new" and t.line == line then
+          return row
+        end
+      end
     end
-    -- first sub-hunk visible, a line from the last sub-hunk folded away
-    assert.equals(-1, foldclosed(added[1].modified.start_line))
-    assert.is_true(foldclosed(added[#added].modified.start_line) > 0)
+    local function foldclosed(row)
+      return vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(row) end)
+    end
+    local open_row = row_of(added[1].modified.start_line)
+    -- Ten lines INTO the last sub-hunk, not its first line: the renderer pads
+    -- every visible hunk with `context_lines` on each side, and a split added
+    -- file's sub-hunks are adjacent partitions of one continuous addition — so
+    -- the first few lines of the next sub-hunk are deliberately in view, the
+    -- same way surrounding code is for a modified file.
+    local folded_row = row_of(added[#added].modified.start_line + 10)
+    assert.truthy(open_row)
+    assert.truthy(folded_row)
+    assert.equals(-1, foldclosed(open_row))
+    assert.is_true(foldclosed(folded_row) > 0)
+    view.close_tab(sess)
   end)
 
-  it("still uses the virtual-file path for a two-revision target", function()
+  it("reads the target REVISION's content, not the working tree, for a revision pair", function()
     local repo = repo_with_added(20)
     helpers.git(repo, "commit", "-q", "-m", "add file")
-    -- Diverge disk from the committed (HEAD) content: repo_with_added leaves
-    -- disk and HEAD identical, so before this mutation the assertions below
-    -- passed whether show_whole_file took the disk path or the virtual
-    -- (`git show HEAD:path`) path — the disk path is wrong for a
-    -- two-revision target and this test wouldn't have caught it. Only the
-    -- virtual-file path can still produce the 20 "added line N" lines
-    -- asserted below; the disk path would show this mutated text instead.
+    -- Diverge disk from the committed (HEAD) content: only a render that reads
+    -- `git show HEAD:added.lua` can still produce the 20 "added line N" lines
+    -- asserted below; reading the worktree would show this mutated text.
     helpers.write_file(repo, "added.lua", "MUTATED ON DISK, NOT COMMITTED")
     local sess = { tabpage = view.open_tab(), git_root = repo,
       base_revision = "HEAD~1", target_revision = "HEAD" }
-    local ready = false
-    view.show_file(sess, { path = "added.lua", status = "A", hunks = {} },
-      { on_ready = function() ready = true end })
-    helpers.wait_for(function() return ready end, 10000)
+    local plan = show(sess, { path = "added.lua", status = "A", hunks = {} }, {})
 
-    local session = view.get_session(sess.tabpage)
-    local lines = vim.api.nvim_buf_get_lines(session.modified_bufnr, 0, -1, false)
+    local lines = rendered_lines(plan, "added.lua")
     assert.equals(20, #lines)
     assert.equals("added line 1", lines[1])
     assert.equals("added line 20", lines[20])
+    view.close_tab(sess)
   end)
 end)

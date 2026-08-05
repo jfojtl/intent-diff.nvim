@@ -1,226 +1,232 @@
 local helpers = require("tests.helpers")
 
+--- A repo, its base revision, and the parsed file entries of its diff — the
+--- shape `view.show` takes.
+--- @return string repo, string base, table[] files, table hunks
+local function fixture(initial, edited)
+  local repo = helpers.make_repo(initial)
+  local base = vim.trim(helpers.git(repo, "rev-parse", "HEAD"))
+  for path, content in pairs(edited) do
+    helpers.write_file(repo, path, content)
+  end
+  local hs, files = require("intentdiff.hunks").parse(helpers.git(repo, "diff"))
+  for _, f in ipairs(files) do
+    f.hunks = vim.tbl_filter(function(h) return h.file == f.path end, hs)
+  end
+  return repo, base, files, hs
+end
+
+local function all_visible(hs)
+  local visible = {}
+  for _, h in ipairs(hs) do
+    visible[h.id] = true
+  end
+  return visible
+end
+
 describe("view adapter", function()
   local view
 
   before_each(function()
     package.loaded["intentdiff.view"] = nil
     view = require("intentdiff.view")
+    require("intentdiff.config").setup({})
   end)
 
-  it("loads codediff internals", function()
+  it("loads the codediff internals it still needs", function()
     assert.is_true(view.load())
     assert.is_true(view.available)
   end)
 
-  it("shows a modified file and folds away non-group hunks", function()
-    assert.is_true(view.load())
-    -- 60-line file with two edits far apart → two hunks
-    local lines = {}
-    for i = 1, 60 do lines[i] = "line " .. i end
-    local repo = helpers.make_repo({ ["big.lua"] = table.concat(lines, "\n") })
-    lines[5] = "CHANGED 5"
-    lines[55] = "CHANGED 55"
-    helpers.write_file(repo, "big.lua", table.concat(lines, "\n"))
-
-    local inv
-    require("intentdiff.hunks").collect({ git_root = repo }, function(i) inv = i end)
-    helpers.wait_for(function() return inv end)
-    assert.equals(2, #inv.hunks)
-
-    local git = require("codediff.core.git")
-    local base
-    git.resolve_revision("HEAD", repo, function(_, hash) base = hash end)
-    helpers.wait_for(function() return base end)
-
-    local sess = { tabpage = view.open_tab(), git_root = repo, base_revision = base,
-      target_revision = "WORKING" }
-    local ready = false
-    -- group = ONLY the first hunk (line 5 area)
-    view.show_file(sess, { path = "big.lua", status = "M", hunks = { inv.hunks[1] } },
-      { on_ready = function() ready = true end })
-    helpers.wait_for(function() return ready end, 10000)
-
-    local session = require("codediff.ui.lifecycle").get_session(sess.tabpage)
-    assert.truthy(session)
-    local win = session.modified_win
-    assert.equals("expr", vim.wo[win].foldmethod)
-    -- line 5 (group hunk) visible; line 55 (other hunk) folded
-    assert.equals(-1, vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(5) end))
-    assert.is_true(vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(55) end) > 0)
-    view.close_tab(sess)
+  it("opens a tab with both pane windows of its own", function()
+    local tab = view.open_tab()
+    assert.equals(tab, vim.api.nvim_get_current_tabpage())
+    local wins = view.pane_wins(tab)
+    assert.truthy(wins.original)
+    assert.truthy(wins.modified)
+    assert.are_not.equal(wins.original, wins.modified)
+    -- diff_wins stays an ARRAY: three call sites iterate it.
+    assert.equals(2, #view.diff_wins(tab))
+    view.close_tab({ tabpage = tab })
   end)
+end)
 
-  it("apply_group_folds returns false without a codediff session", function()
-    assert.is_true(view.load())
-    vim.cmd("tabnew")
-    local tab = vim.api.nvim_get_current_tabpage()
-    assert.is_false(view.apply_group_folds(tab, {}))
-    vim.cmd("tabclose")
-  end)
+describe("view.show renders both surfaces through one path", function()
+  local view
 
-  it("show_file for a deleted file waits for virtual content before firing on_ready", function()
-    assert.is_true(view.load())
-    local repo = helpers.make_repo({ ["gone.txt"] = "alpha\nbeta\ngamma" })
-    helpers.git(repo, "rm", "-q", "gone.txt")
-
-    local inv
-    require("intentdiff.hunks").collect({ git_root = repo }, function(i) inv = i end)
-    helpers.wait_for(function() return inv end)
-    local deleted = vim.tbl_filter(function(h) return h.file == "gone.txt" end, inv.hunks)
-
-    local git = require("codediff.core.git")
-    local base
-    git.resolve_revision("HEAD", repo, function(_, hash) base = hash end)
-    helpers.wait_for(function() return base end)
-
-    local sess = { tabpage = view.open_tab(), git_root = repo, base_revision = base }
-    local ready = false
-    local captured
-    view.show_file(sess, { path = "gone.txt", status = "D", hunks = deleted }, {
-      on_ready = function()
-        ready = true
-        -- Snapshot the buffer content at the exact moment on_ready fires —
-        -- this is what would have been empty before the fix (on_ready used
-        -- to fire via vim.schedule regardless of codediff's async virtual
-        -- file load).
-        local session = require("codediff.ui.lifecycle").get_session(sess.tabpage)
-        captured = session and vim.api.nvim_buf_get_lines(session.original_bufnr, 0, -1, false)
-      end,
-    })
-    helpers.wait_for(function() return ready end, 10000)
-    assert.is_true(ready)
-    assert.same({ "alpha", "beta", "gamma" }, captured)
-    view.close_tab(sess)
-  end)
-
-  it("toggling a deleted file to inline layout never collapses it to line 1", function()
-    assert.is_true(view.load())
+  before_each(function()
     require("intentdiff.config").setup({})
-    local repo = helpers.make_repo({ ["gone.txt"] = "alpha\nbeta\ngamma" })
-    helpers.git(repo, "rm", "-q", "gone.txt")
+    view = require("intentdiff.view")
+  end)
 
-    local inv
-    require("intentdiff.hunks").collect({ git_root = repo }, function(i) inv = i end)
-    helpers.wait_for(function() return inv end)
-    local deleted = vim.tbl_filter(function(h) return h.file == "gone.txt" end, inv.hunks)
+  it("renders a single file as a plan over one file", function()
+    local repo, base, files, hs = fixture({ ["a.lua"] = "one\ntwo\n" }, { ["a.lua"] = "one\nTWO\n" })
+    local sess = { git_root = repo, base_revision = base, target_revision = nil }
+    sess.tabpage = view.open_tab()
 
-    local git = require("codediff.core.git")
-    local base
-    git.resolve_revision("HEAD", repo, function(_, hash) base = hash end)
-    helpers.wait_for(function() return base end)
+    local shown = false
+    view.show(sess, files, { [hs[1].id] = true }, { on_ready = function() shown = true end })
+    assert.truthy(helpers.wait_for(function() return shown end, 5000))
 
-    local sess = { tabpage = view.open_tab(), git_root = repo, base_revision = base }
-    local ready = false
-    view.show_file(sess, { path = "gone.txt", status = "D", hunks = deleted },
-      { on_ready = function() ready = true end })
-    helpers.wait_for(function() return ready end, 10000)
-
-    -- Side-by-side: original_win holds the real content, modified_win is
-    -- unpopulated (nil) — nothing to fold. Toggle to inline, where codediff's
-    -- show_single_file collapses both sides onto ONE shared window
-    -- (session.modified_win == session.original_win) and — per
-    -- inline_view.show_single_file — sets session.modified_bufnr to a 1-line
-    -- empty scratch buffer while the shared window actually displays the real
-    -- content via session.original_bufnr. Before the fix, apply_group_folds
-    -- still ran for "D" and computed visible lines from that empty
-    -- modified_bufnr (line_count = 1), then applied the resulting
-    -- {[1]=true} foldexpr to the shared window that was actually showing the
-    -- real 3-line file — collapsing lines 2-3 into a closed fold.
-    assert.is_true(view.toggle_layout(sess.tabpage))
-    local session = view.get_session(sess.tabpage)
-    helpers.wait_for(function()
-      return session.layout == "inline"
-        and vim.api.nvim_buf_is_valid(session.modified_win and vim.api.nvim_win_get_buf(session.modified_win) or -1)
-        and table.concat(
-              vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(session.modified_win), 0, -1, false), "\n"
-            ) == "alpha\nbeta\ngamma"
-    end, 10000)
-
-    local win = session.modified_win
-    assert.truthy(win)
-    -- Not filtered to a group fold at all: "D" is excluded from
-    -- apply_group_folds, so no expr-foldmethod, no collapse.
-    assert.are_not.equal("expr", vim.wo[win].foldmethod)
-    assert.equals(-1, vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(1) end))
-    assert.equals(-1, vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(3) end))
-    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false)
-    assert.same({ "alpha", "beta", "gamma" }, lines)
-
+    local plan = view.current_plan(sess.tabpage)
+    assert.truthy(plan)
+    assert.equals(1, #plan.files)
+    assert.equals("a.lua", plan.files[1].path)
+    -- Whole file, not just the hunk body: the renderer has the real content.
+    assert.is_false(plan.files[1].fallback)
     view.close_tab(sess)
   end)
 
-  it("re-applies group folds after codediff's compact.refresh clobbers them on TabEnter", function()
-    assert.is_true(view.load())
-    -- 60-line file with two edits far apart → two hunks
+  it("renders an intent as a plan over several files, same call", function()
+    local repo, base, files, hs = fixture(
+      { ["a.lua"] = "one\n", ["b.lua"] = "x\n" },
+      { ["a.lua"] = "ONE\n", ["b.lua"] = "X\n" })
+    local sess = { git_root = repo, base_revision = base, target_revision = nil }
+    sess.tabpage = view.open_tab()
+
+    local shown = false
+    view.show(sess, files, all_visible(hs), { on_ready = function() shown = true end })
+    assert.truthy(helpers.wait_for(function() return shown end, 5000))
+
+    local plan = view.current_plan(sess.tabpage)
+    assert.equals(2, #plan.files)
+    -- One buffer holds both files: the map proves it.
+    local paths = {}
+    for row = 1, #plan.modified.lines do
+      local t = plan.modified.map[row]
+      if t then paths[t.file] = true end
+    end
+    assert.is_true(paths["a.lua"])
+    assert.is_true(paths["b.lua"])
+    view.close_tab(sess)
+  end)
+
+  it("puts the plan into the pane windows and answers pane_for_buf", function()
+    local repo, base, files, hs = fixture({ ["a.lua"] = "one\ntwo\n" }, { ["a.lua"] = "one\nTWO\n" })
+    local sess = { git_root = repo, base_revision = base, target_revision = nil }
+    sess.tabpage = view.open_tab()
+    local shown = false
+    view.show(sess, files, { [hs[1].id] = true }, { on_ready = function() shown = true end })
+    assert.truthy(helpers.wait_for(function() return shown end, 5000))
+
+    local plan = view.current_plan(sess.tabpage)
+    local wins = view.pane_wins(sess.tabpage)
+    local mod_buf = vim.api.nvim_win_get_buf(wins.modified)
+    local orig_buf = vim.api.nvim_win_get_buf(wins.original)
+    assert.equals(plan.modified, view.pane_for_buf(sess.tabpage, mod_buf))
+    assert.equals(plan.original, view.pane_for_buf(sess.tabpage, orig_buf))
+    assert.is_nil(view.pane_for_buf(sess.tabpage, vim.api.nvim_create_buf(false, true)))
+    assert.same(plan.modified.lines, vim.api.nvim_buf_get_lines(mod_buf, 0, -1, false))
+    view.close_tab(sess)
+  end)
+
+  it("folds away a hunk that is not in the visible set", function()
     local lines = {}
     for i = 1, 60 do lines[i] = "line " .. i end
-    local repo = helpers.make_repo({ ["big.lua"] = table.concat(lines, "\n") })
+    local before = table.concat(lines, "\n") .. "\n"
     lines[5] = "CHANGED 5"
     lines[55] = "CHANGED 55"
-    helpers.write_file(repo, "big.lua", table.concat(lines, "\n"))
+    local repo, base, files, hs = fixture({ ["big.lua"] = before },
+      { ["big.lua"] = table.concat(lines, "\n") .. "\n" })
+    assert.equals(2, #hs)
 
-    local inv
-    require("intentdiff.hunks").collect({ git_root = repo }, function(i) inv = i end)
-    helpers.wait_for(function() return inv end)
-    assert.equals(2, #inv.hunks)
+    local sess = { git_root = repo, base_revision = base, target_revision = nil }
+    sess.tabpage = view.open_tab()
+    local shown = false
+    -- ONLY the first hunk is in this intent.
+    view.show(sess, files, { [hs[1].id] = true }, { on_ready = function() shown = true end })
+    assert.truthy(helpers.wait_for(function() return shown end, 5000))
 
-    local git = require("codediff.core.git")
-    local base
-    git.resolve_revision("HEAD", repo, function(_, hash) base = hash end)
-    helpers.wait_for(function() return base end)
+    local plan = view.current_plan(sess.tabpage)
+    local win = view.pane_wins(sess.tabpage).modified
+    local function row_of(line)
+      for row = 1, #plan.modified.lines do
+        local t = plan.modified.map[row]
+        if t and t.side == "new" and t.line == line then return row end
+      end
+    end
+    local open_row, folded_row = row_of(5), row_of(55)
+    assert.truthy(open_row)
+    assert.truthy(folded_row)
+    assert.equals(-1, vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(open_row) end))
+    assert.is_true(vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(folded_row) end) > 0)
+    view.close_tab(sess)
+  end)
 
-    local sess = { tabpage = view.open_tab(), git_root = repo, base_revision = base,
-      target_revision = "WORKING" }
-    local ready = false
-    -- group = ONLY the first hunk (line 5 area)
-    view.show_file(sess, { path = "big.lua", status = "M", hunks = { inv.hunks[1] } },
-      { on_ready = function() ready = true end })
-    helpers.wait_for(function() return ready end, 10000)
+  it("toggles to inline layout, collapsing to one window", function()
+    local repo, base, files, hs = fixture({ ["a.lua"] = "one\ntwo\n" }, { ["a.lua"] = "one\nTWO\n" })
+    local sess = { git_root = repo, base_revision = base, target_revision = nil }
+    sess.tabpage = view.open_tab()
+    local shown = false
+    view.show(sess, files, { [hs[1].id] = true }, { on_ready = function() shown = true end })
+    assert.truthy(helpers.wait_for(function() return shown end, 5000))
+    assert.equals("side-by-side", view.current_plan(sess.tabpage).layout)
 
-    local session = require("codediff.ui.lifecycle").get_session(sess.tabpage)
-    local win = session.modified_win
-    -- Sanity: our group folds are in effect before the clobber.
-    assert.equals("v:lua.require'intentdiff.view'.foldexpr()", vim.wo[win].foldexpr)
+    local toggled = false
+    assert.is_true(view.toggle_layout(sess.tabpage, { on_done = function() toggled = true end }))
+    assert.truthy(helpers.wait_for(function() return toggled end, 5000))
 
-    -- Simulate the user having `diff.compact = true`: enabling compact mode
-    -- applies codediff's own all-hunks fold, clobbering our foldexpr/visible
-    -- lines exactly like session.lua's TabEnter -> reapply_keymaps ->
-    -- setup_all_keymaps -> compact.refresh(tabpage) does when compact is
-    -- already on.
-    local codediff_config = require("codediff.config")
-    local prev_compact = codediff_config.options.diff.compact
-    codediff_config.options.diff.compact = true
-    local compact = require("codediff.ui.view.compact")
-    assert.is_true(compact.enable(sess.tabpage))
-    assert.equals("v:lua.require'codediff.ui.view.compact'.foldexpr_eval()", vim.wo[win].foldexpr)
-    -- Clobbered: compact shows both hunks, so line 55 is no longer folded.
-    assert.equals(-1, vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(55) end))
+    local plan = view.current_plan(sess.tabpage)
+    assert.equals("inline", plan.layout)
+    assert.is_nil(plan.original)
+    assert.is_nil(view.pane_wins(sess.tabpage).original)
+    assert.equals(1, #view.diff_wins(sess.tabpage))
+    view.close_tab(sess)
+  end)
 
-    -- Fire a real TabEnter for sess.tabpage (switch away, then back), which
-    -- re-triggers codediff's session TabEnter handler (session.lua) — its
-    -- vim.schedule'd reapply_keymaps calls compact.refresh(tabpage) again,
-    -- re-clobbering our folds — followed by our own IntentDiffFolds TabEnter
-    -- handler re-asserting the group filter afterwards.
-    local scratch_tab
-    vim.cmd("tabnew")
-    scratch_tab = vim.api.nvim_get_current_tabpage()
-    vim.api.nvim_set_current_tabpage(sess.tabpage)
+  it("renders hunks-only, and says so, when the content cannot be fetched", function()
+    -- A base revision that does not exist: `git show <rev>:<path>` fails for
+    -- every file, so both sides stay nil and the plan falls back to the hunk
+    -- bodies. The point is that this SETTLES — content.ensure fires its
+    -- callback even when nothing arrived, and repainting from there
+    -- unconditionally would loop forever.
+    local repo, _, files, hs = fixture({ ["a.lua"] = "one\ntwo\n" }, { ["a.lua"] = "one\nTWO\n" })
+    local sess = { git_root = repo, base_revision = "0000000000000000000000000000000000000000",
+      target_revision = "0000000000000000000000000000000000000000" }
+    sess.tabpage = view.open_tab()
 
-    helpers.wait_for(function()
-      return vim.wo[win].foldexpr == "v:lua.require'intentdiff.view'.foldexpr()"
-        and vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(5) end) == -1
-        and vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(55) end) > 0
-    end, 10000)
+    local ready_count = 0
+    view.show(sess, files, { [hs[1].id] = true }, { on_ready = function()
+      ready_count = ready_count + 1
+    end })
+    assert.truthy(helpers.wait_for(function() return ready_count > 0 end, 5000))
 
-    assert.equals("v:lua.require'intentdiff.view'.foldexpr()", vim.wo[win].foldexpr)
-    assert.equals(-1, vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(5) end))
-    assert.is_true(vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(55) end) > 0)
+    local plan = view.current_plan(sess.tabpage)
+    assert.is_true(plan.files[1].fallback, "the file must render hunks-only")
+    assert.is_truthy(plan.modified.lines[1]:match("content unavailable"),
+      "the separator must say why: " .. tostring(plan.modified.lines[1]))
 
-    codediff_config.options.diff.compact = prev_compact
-    if scratch_tab and vim.api.nvim_tabpage_is_valid(scratch_tab) then
-      vim.api.nvim_set_current_tabpage(scratch_tab)
-      vim.cmd("tabclose")
+    -- Give the failing fetch's callback every chance to re-enter and loop.
+    vim.wait(400)
+    assert.equals(1, ready_count, "on_ready must fire exactly once")
+    assert.equals(plan, view.current_plan(sess.tabpage), "a failed fetch must not repaint")
+    view.close_tab(sess)
+  end)
+
+  it("has no preview-mode state left", function()
+    local view_mod = require("intentdiff.view")
+    assert.is_nil(view_mod._preview_active)
+    assert.is_nil(view_mod._preview_maps)
+    assert.is_nil(view_mod._preview_bufs)
+    assert.is_nil(view_mod._preview_sess)
+    assert.is_nil(view_mod._last_shown)
+    assert.is_nil(view_mod.show_preview)
+    assert.is_nil(view_mod.show_file)
+    assert.is_nil(view_mod.bootstrap)
+  end)
+
+  it("never creates a codediff session", function()
+    local repo, base, files, hs = fixture({ ["a.lua"] = "one\n" }, { ["a.lua"] = "ONE\n" })
+    local sess = { git_root = repo, base_revision = base, target_revision = nil }
+    sess.tabpage = view.open_tab()
+    local shown = false
+    view.show(sess, files, { [hs[1].id] = true }, { on_ready = function() shown = true end })
+    assert.truthy(helpers.wait_for(function() return shown end, 5000))
+
+    local ok, lifecycle = pcall(require, "codediff.ui.lifecycle")
+    if ok then
+      assert.is_nil(lifecycle.get_session(sess.tabpage),
+        "intent-diff must no longer register a codediff session")
     end
     view.close_tab(sess)
   end)

@@ -2,14 +2,17 @@ local M = {}
 
 --- Sessions are keyed by an internal token, NOT by tabpage.
 ---
---- codediff.ui.view.create() always opens its own tab (`tabnew`) rather than
---- rendering into the current one, so `sess.tabpage` is whatever tab codediff
---- decided to use — written by view.bootstrap(). If we keyed `sessions` by
---- tabpage directly, any future change to when/how that tab is (re)acquired
---- would silently orphan the entry under its old key. Keying by a stable
---- token — and looking up "the session for tabpage X" by scanning for
---- entry.sess.tabpage == X — means lookups keep working regardless.
-local sessions = {} -- [token] = { sess, model, sidebar, inventory, scope_key, elapsed_timer }
+--- `sess.tabpage` is the tab view.open_tab() created, and nothing moves it
+--- afterwards — but keying by a stable token, and looking up "the session for
+--- tabpage X" by scanning for entry.sess.tabpage == X, means a future change to
+--- when or how that tab is acquired cannot silently orphan the entry under a
+--- stale key.
+---
+--- `entry.shown` is what the panes currently display: `{ file_entry = ... }` for
+--- a single file, `{ group = ... }` for a whole intent. There is ONE renderer
+--- now, so this is the only thing that distinguishes the two — no preview mode,
+--- no second code path.
+local sessions = {} -- [token] = { sess, model, sidebar, inventory, shown, scope_key, elapsed_timer }
 local next_token = 0
 
 function M.setup(opts)
@@ -76,9 +79,7 @@ function M.show_log()
   vim.api.nvim_win_set_cursor(0, { #lines, 0 })
 end
 
---- Find the session whose *current* tabpage is `tabpage`. Safe to call at any
---- point, including after view.show_file() has reconciled sess.tabpage away
---- from the tab :IntentDiff originally opened.
+--- Find the session whose tabpage is `tabpage`.
 function M._session(tabpage)
   for _, entry in pairs(sessions) do
     if entry.sess.tabpage == tabpage then
@@ -153,6 +154,124 @@ local function grouped_model(inventory, groups, info, provider_label)
     provider_label = provider_label,
     message = info and info.skipped,
   }
+end
+
+-- ------------------------------------------------------------- rendering --
+
+--- The render entry for `path`: the file's metadata plus EVERY hunk of it in
+--- the review, whichever intent owns them.
+---
+--- The renderer walks a file's full content and uses its hunks to know where the
+--- changed stretches are, so it needs all of them: a hunk left out would make
+--- the walk pair the wrong lines from that point on. Which hunks stay UNFOLDED
+--- is a separate question, answered by the `visible` set — that is where the
+--- intent filter lives now, and it is the whole reason the two used to be
+--- conflated in one `file_entry.hunks` field.
+local function render_entry(entry, path)
+  local inventory = entry.inventory or {}
+  local meta
+  for _, f in ipairs(inventory.files or {}) do
+    if f.path == path then
+      meta = f
+      break
+    end
+  end
+  local hunks = {}
+  for _, h in ipairs(inventory.hunks or {}) do
+    if h.file == path then
+      hunks[#hunks + 1] = h
+    end
+  end
+  local out = { path = path, hunks = hunks, status = "M", binary = false }
+  if meta then
+    out.status = meta.status or "M"
+    out.old_path = meta.old_path
+    -- Not `meta.binary or false`: an explicit `false` is the common case and
+    -- reads identically, but writing the branch out keeps this honest if the
+    -- field ever becomes tri-state.
+    if meta.binary then
+      out.binary = true
+    end
+  end
+  return out
+end
+
+--- The set of hunk ids to leave unfolded.
+local function visible_set(hunks)
+  local visible = {}
+  for _, h in ipairs(hunks or {}) do
+    visible[h.id] = true
+  end
+  return visible
+end
+
+--- Render ONE file: its whole content, with `file_entry`'s (i.e. its intent's)
+--- hunks unfolded.
+local function show_one(entry, file_entry, opts)
+  entry.shown = { file_entry = file_entry }
+  -- The last real file, so a sidebar cursor leaving an intent row can put it
+  -- back (see apply_hover) without re-deriving it from the model.
+  entry.last_file = file_entry
+  return require("intentdiff.view").show(
+    entry.sess,
+    { render_entry(entry, file_entry.path) },
+    visible_set(file_entry.hunks),
+    opts)
+end
+
+--- Files in the same order the sidebar tree shows them, so the panes and the
+--- sidebar always agree about ordering.
+local function ordered_files(group)
+  local tree = require("intentdiff.tree")
+  local files, seen = {}, {}
+  for _, row in ipairs(tree.flatten(tree.build(group.files or {}), {})) do
+    if row.kind == "file" and not seen[row.file_i] then
+      seen[row.file_i] = true
+      files[#files + 1] = group.files[row.file_i]
+    end
+  end
+  return files
+end
+
+--- Render a whole intent: every file it touches, with only its own hunks
+--- unfolded. Exactly the same call `show_one` makes — an intent view is a plan
+--- over several files, a file view a plan over one.
+local function show_group(entry, group, opts)
+  local files, hunks = {}, {}
+  for _, f in ipairs(ordered_files(group)) do
+    files[#files + 1] = render_entry(entry, f.path)
+    vim.list_extend(hunks, f.hunks or {})
+  end
+  entry.shown = { group = group }
+  return require("intentdiff.view").show(entry.sess, files, visible_set(hunks), opts)
+end
+
+--- Is a whole intent (rather than a single file) on screen?
+local function showing_intent(entry)
+  if not (entry and entry.shown) then
+    return false
+  end
+  return entry.shown.group ~= nil
+end
+
+--- The row of the modified pane showing new-side `line` of `path`, or nil.
+---
+--- A pane row is NOT a file line any more: the panes hold a render plan, which
+--- pairs both sides and can concatenate several files. Every jump into the panes
+--- has to go through the plan's map.
+local function plan_row(plan, path, line)
+  if not (plan and plan.modified) then
+    return nil
+  end
+  local pane = plan.modified
+  -- Numeric loop, not ipairs: `map` is sparse by construction.
+  for row = 1, #pane.lines do
+    local t = pane.map[row]
+    if t and t.file == path and t.side == "new" and t.line == line then
+      return row
+    end
+  end
+  return nil
 end
 
 -- Forward-declared: resolve_args' merge-base failure branch needs to close
@@ -295,17 +414,15 @@ local function classify_and_render(token, opts)
     -- in which case their view is left alone and just re-folded to match
     -- whichever group it now belongs to.
     --
-    -- A hover preview owning the panes counts as "leave the view alone" too,
+    -- An intent view owning the panes counts as "leave the view alone" too,
     -- and this is the DEFAULT first-use path: auto-open returns focus to the
-    -- sidebar, the user presses `j` onto a group row, a preview appears, and
+    -- sidebar, the user presses `j` onto a group row, the intent appears, and
     -- the provider answers a second later. Rendering a file into the panes
-    -- here would replace that preview while the sidebar cursor still sits on a
-    -- group row — and apply_hover's hover_key de-dupe makes re-entering that
-    -- same row a no-op, so the cursor would name one intent while the panes
-    -- showed another, with no way back. Refold instead (view.rebind_shown_file
-    -- defers it to the eventual restore, since the file is off screen), then
-    -- re-derive the preview itself from the new grouping.
-    if current.user_selected or require("intentdiff.view")._preview_active[current.sess.tabpage] then
+    -- here would replace it while the sidebar cursor still sits on a group row
+    -- — and apply_hover's hover_key de-dupe makes re-entering that same row a
+    -- no-op, so the cursor would name one intent while the panes showed
+    -- another, with no way back. Re-render from the new grouping instead.
+    if current.user_selected or showing_intent(current) then
       refold_shown_file(token)
     else
       auto_open_first(token)
@@ -361,20 +478,11 @@ local function locate_in_model(model, file_entry)
 end
 
 --- Move focus to the diff pane of `tabpage`. Prefers the modified side; falls
---- back to the original, which is the only populated side for a deleted file.
+--- back to the original, which is the only pane inline layout does not have.
 --- @return boolean whether focus moved
 local function focus_diff_pane(tabpage)
-  local session = require("intentdiff.view").get_session(tabpage)
-  if not session then
-    return false
-  end
-  -- Deliberately NOT `ipairs({ modified_win, original_win })`: ipairs stops at
-  -- the first nil, and a deleted file populates only the original side. That
-  -- exact nil-hole has already shipped twice in this codebase.
-  local win = (session.modified_win and vim.api.nvim_win_is_valid(session.modified_win)
-      and session.modified_win)
-    or (session.original_win and vim.api.nvim_win_is_valid(session.original_win)
-      and session.original_win)
+  local wins = require("intentdiff.view").pane_wins(tabpage)
+  local win = wins.modified or wins.original
   if not win then
     return false
   end
@@ -392,23 +500,18 @@ end
 --- now answered by one mechanism each:
 ---
 ---  * IDENTITY — "is this render still what the panes are showing?" Answered
----    by `view._last_shown[tabpage].file_entry == file_entry`, since
----    show_file sets _last_shown synchronously at its top (view.lua) and
----    nothing but a NEWER show_file — or rebind_shown_file re-pointing it at
----    a freshly classified entry — can move it on. Everything that describes
----    the CONTENT of the panes (navigation.attach, opts.jump) is gated on it,
----    because installing either against content that is no longer on screen
----    is simply wrong. This replaces the previous opts.auto-only
----    `superseded`/`still_current` pair, which left every non-auto (hover)
----    render's attach ungated: an "A"/"D" virtual file's on_ready fires from
----    a buffer-scoped User autocmd (view.lua's wait_for_virtual_file) and so
----    can still land long after a newer hover has taken the panes.
----    It keeps the case that pair existed for: select_file's same_as_shown
----    short-circuit skips its own show_file() call, so an in-flight
----    auto-open's on_ready is the only place that will ever attach navigation
----    for that file — and _last_shown still names exactly this file_entry
----    there, so the gate passes (integration_spec's "attaches OUR ]c/[c
----    navigation when a same-file <CR> races a still-pending auto-open").
+---    by `entry.shown.file_entry == file_entry`, since show_one sets
+---    entry.shown synchronously before handing the render to view.show and
+---    nothing but a NEWER render can move it on. Everything that describes the
+---    CONTENT of the panes (navigation.attach, opts.jump) is gated on it,
+---    because installing either against content that is no longer on screen is
+---    simply wrong.
+---    It keeps the case the previous `superseded`/`still_current` pair existed
+---    for: select_file's same_as_shown short-circuit skips its own render, so
+---    an in-flight auto-open's on_ready is the only place that will ever attach
+---    navigation for that file — and entry.shown still names exactly this
+---    file_entry there, so the gate passes (integration_spec's "attaches OUR
+---    ]c/[c navigation when a same-file <CR> races a still-pending auto-open").
 ---
 ---  * RECENCY — "has anyone made a newer decision about WHERE FOCUS BELONGS?"
 ---    Answered by entry.render_seq (below). Only the focus effects are gated
@@ -453,36 +556,31 @@ local function open_file(token, group_i, file_i, opts)
   local my_seq = entry.render_seq
   local navigation = require("intentdiff.navigation")
   navigation.set_position(entry.sess.tabpage, group_i, file_i)
-  require("intentdiff.view").show_file(entry.sess, file_entry, {
+  show_one(entry, file_entry, {
     on_ready = function()
       local current = sessions[token]
       if not current then
-        return -- closed while show_file() was in flight
+        return -- closed while the render was in flight
       end
-      -- Read sess.tabpage fresh: show_file() may have just reconciled it to
-      -- the tab codediff actually created (see module-level note above).
       local tabpage = current.sess.tabpage
       local is_latest = current.render_seq == my_seq
       local view = require("intentdiff.view")
       -- IDENTITY gate (see the doc comment above): is this render still what
-      -- the panes are showing? False exactly when a newer show_file() — or a
-      -- classification re-pointing the deferred restore via
-      -- rebind_shown_file — has moved _last_shown on, which is precisely when
-      -- attaching this render's ctx, or placing its cursor, would name
-      -- content that is no longer on screen.
-      local shown = view._last_shown[tabpage]
+      -- the panes are showing? False exactly when a newer render has moved
+      -- entry.shown on, which is precisely when attaching this render's ctx, or
+      -- placing its cursor, would name content that is no longer on screen.
+      local shown = current.shown
       if not (shown and shown.file_entry == file_entry) then
         return
       end
       -- Re-derive the indices against the CURRENT model rather than trusting
       -- the ones this call was made with: a classification can complete
-      -- between show_file() and this on_ready (the >=50ms when_diff_ready
-      -- poll leaves a wide window, and an "A"/"D" virtual file waits on an
-      -- autocmd instead), replacing entry.model wholesale. The captured
-      -- group_i/file_i index into the model that is gone — attaching them
-      -- against current.model is what produced ]c's "Invalid cursor line: out
-      -- of range". The file on screen has not changed (the gate above just
-      -- proved it), so its position in the new model is the answer.
+      -- between the render and this on_ready, replacing entry.model wholesale.
+      -- The captured group_i/file_i index into the model that is gone —
+      -- attaching them against current.model is what produced ]c's "Invalid
+      -- cursor line: out of range". The file on screen has not changed (the
+      -- gate above just proved it), so its position in the new model is the
+      -- answer.
       local gi, fi = locate_in_model(current.model, file_entry)
       if not gi then
         return -- the current model doesn't mention this file at all
@@ -496,18 +594,21 @@ local function open_file(token, group_i, file_i, opts)
           select_file(token, g, f, o)
         end,
       })
-      local session = view.get_session(tabpage)
-      local win = session and session.modified_win
+      local win = view.pane_wins(tabpage).modified
       -- Cursor placement, NOT gated on is_latest — see entry.render_seq's
       -- doc comment above. Uses the CURRENT model's entry, for the same
       -- reason the indices above do: after a mid-render classification the
-      -- pane has already been re-folded to that entry's hunks
+      -- pane has already been re-rendered to that entry's hunks
       -- (refold_shown_file), so jumping to one of the flat model's would risk
       -- landing inside a closed fold.
       local hunks = current_entry and current_entry.hunks or file_entry.hunks
       if opts and opts.jump and win and vim.api.nvim_win_is_valid(win) and #hunks > 0 then
         local h = opts.jump == "last" and hunks[#hunks] or hunks[1]
-        pcall(vim.api.nvim_win_set_cursor, win, { h.modified.start_line, 0 })
+        -- Through the plan's map: a pane row is not a file line.
+        local row = plan_row(view.current_plan(tabpage), file_entry.path, h.modified.start_line)
+        if row then
+          pcall(vim.api.nvim_win_set_cursor, win, { row, 0 })
+        end
       end
       -- Also a CONTENT effect, not a focus one (see the doc comment above), so
       -- it sits with opts.jump on the identity side of the gate: the caller
@@ -548,19 +649,18 @@ local function open_file(token, group_i, file_i, opts)
 end
 
 --- True when `file_entry`'s hunks are exactly (same objects, same order)
---- what's already displayed for `tabpage` (view._last_shown, set
---- synchronously at the START of show_file — see view.lua — so this is
---- reliable even while that earlier show_file()'s own diff/render is still
---- asynchronously in flight). Hunks are shared objects between the flat and
---- grouped models (both ultimately index the same inventory.hunks — see
---- flat_model and classify.reconcile), so comparing by identity is exact,
---- not a content/heuristic match.
-local function same_as_shown(tabpage, file_entry)
-  local shown = require("intentdiff.view")._last_shown[tabpage]
-  if not shown or shown.file_entry.path ~= file_entry.path then
+--- what's already displayed for `entry` (entry.shown, set synchronously by
+--- show_one before the render starts, so this is reliable even while that
+--- earlier render's content fetch is still in flight). Hunks are shared objects
+--- between the flat and grouped models (both ultimately index the same
+--- inventory.hunks — see flat_model and classify.reconcile), so comparing by
+--- identity is exact, not a content/heuristic match.
+local function same_as_shown(entry, file_entry)
+  local shown = entry and entry.shown and entry.shown.file_entry
+  if not shown or shown.path ~= file_entry.path then
     return false
   end
-  local a, b = shown.file_entry.hunks, file_entry.hunks
+  local a, b = shown.hunks, file_entry.hunks
   if #a ~= #b then
     return false
   end
@@ -590,28 +690,22 @@ select_file = function(token, group_i, file_i, opts)
   -- panes are already correct, so re-rendering would spend a codediff diff to
   -- produce identical output.
   --
-  -- Guarded on NOT _preview_active: same_as_shown reads view._last_shown,
-  -- which a hover PREVIEW never touches (show_preview swaps the pane buffers
-  -- without updating it — see view.show_preview). With a preview up,
-  -- _last_shown still names whatever file was rendered before the preview
-  -- took over, so without this guard same_as_shown would report "already
-  -- shown" for it, the short-circuit would fire, hover_key would already be
-  -- set to this row (above) so the pending debounced hover never renders the
-  -- file either, and focus_diff_pane would move focus INTO the preview
-  -- buffer instead of a real diff pane — the file is never actually shown.
-  -- auto_open_first (below) already guards the identical hazard; on defaults
-  -- (debounce_ms = 120) this is reachable just by pressing `j` onto a file
-  -- row and Enter before the hover fires.
-  if opts and opts.focus_diff and entry
-      and not require("intentdiff.view")._preview_active[entry.sess.tabpage] then
+  -- Guarded on NOT showing_intent: with a whole intent on screen, entry.shown
+  -- names the group rather than a file, so same_as_shown answers false and the
+  -- short-circuit correctly does not fire. The guard is kept explicit because
+  -- the hazard it was written for is real and cheap to reintroduce: firing the
+  -- short-circuit while an intent owns the panes would set hover_key to this
+  -- row (above), so the pending debounced hover never renders the file either,
+  -- and focus_diff_pane would move focus into a pane still showing the intent.
+  if opts and opts.focus_diff and entry and not showing_intent(entry) then
     local _, file_entry = group_file(entry.model, group_i, file_i)
     -- Navigation (]c/[c) for this file is already attached, or will be: if a
     -- same-file render is still in flight (same_as_shown true, but that
     -- render's own on_ready hasn't run yet), this short-circuit leaves
-    -- view._last_shown naming exactly that render's file_entry, so its
+    -- entry.shown naming exactly that render's file_entry, so its
     -- on_ready still passes open_file's IDENTITY gate and attaches once ready
     -- — this short-circuit only needs to move focus.
-    if file_entry and same_as_shown(entry.sess.tabpage, file_entry) then
+    if file_entry and same_as_shown(entry, file_entry) then
       -- Bump render_seq even though we're not calling open_file: this IS a
       -- fresh, authoritative focus decision, and a same-file render that's
       -- still in flight (e.g. a hover's restore_focus=true open_file call)
@@ -672,19 +766,12 @@ end
 --- SAME file with the SAME hunks — the mainstream case where the flat "All
 --- changes" group's first file IS the first real group's first file (always
 --- true for a single-file diff, and for any file whose hunks all land in one
---- group). Without this, the ready-phase call here would invoke open_file
---- again and trigger a second, wasted cd.view.update()/diff recompute
---- (codediff/ui/view/side_by_side.lua) on top of the loading-phase's
---- still-in-flight one — and which of the two fold applications "won" would
---- depend on poll-scheduling order, not on anything guaranteed. Because the
---- hunk sets are identical here, the fix doesn't need to out-race that
---- in-flight render at all: applying the SAME hunks directly is correct
---- regardless of whether the pending render has finished yet (a harmless
---- no-op if the diff isn't ready — session.stored_diff_result missing — or a
---- redundant-but-correct confirmation if it is), and if it's still pending,
---- that render's own on_ready reads entry.model fresh (see open_file above),
---- so it ends up wiring the correct (already-updated) grouped ctx on its
---- own. The result is invariant to poll ordering rather than depending on it.
+--- group). Without this, the ready-phase call here would render the very same
+--- plan a second time on top of the loading-phase's still-in-flight one. Since
+--- the hunk sets are identical, the render already on screen is already right,
+--- and that render's own on_ready reads entry.model fresh (see open_file
+--- above), so it ends up wiring the correct (already-updated) grouped ctx on
+--- its own.
 auto_open_first = function(token)
   local cfg = require("intentdiff.config").options
   if not cfg.auto_open then
@@ -698,41 +785,32 @@ auto_open_first = function(token)
   if not file_entry then
     return
   end
-  local tabpage = entry.sess.tabpage
-  -- A hover preview owns the panes: auto-open must never yank it out from
-  -- under the sidebar cursor. Both branches below would: the de-dupe branch
-  -- would fold the preview buffers, the open_file branch would silently
-  -- replace the preview with a file. classify_and_render's completion handler
-  -- routes around this case explicitly, but the LOADING-phase call above (and
-  -- any future caller) reaches it with a preview up whenever `r` is pressed
-  -- from a group row, so the guard belongs here too.
-  if require("intentdiff.view")._preview_active[tabpage] then
+  -- A whole intent owns the panes: auto-open must never yank it out from under
+  -- the sidebar cursor. classify_and_render's completion handler routes around
+  -- this case explicitly, but the LOADING-phase call above (and any future
+  -- caller) reaches it with an intent up whenever `r` is pressed from a group
+  -- row, so the guard belongs here too.
+  if showing_intent(entry) then
     return
   end
-  if same_as_shown(tabpage, file_entry) then
-    require("intentdiff.view").apply_group_folds(tabpage, file_entry.hunks)
-    return
+  if same_as_shown(entry, file_entry) then
+    return -- the panes already show exactly this plan
   end
   open_file(token, 1, 1, { auto = true })
 end
 
 --- When classification completes and the user already has a file open
---- (manual or ]c/[c-driven selection), don't yank their view — but that
---- file's folds were computed against the flat "All changes" group (which
---- shows the WHOLE file — for added/untracked files, every sub-hunk from
---- hunks.split_added — with no group filtering), so if it also appears in
---- the real grouped model its folds are now wrong. Re-apply the correct
---- group's fold filter in place, without touching what's displayed or where
---- focus is — for "??"/"A" with `context = 0`, matching M.show_file's
---- whole-file branch (hunks.split_added's sub-hunks are adjacent partitions
---- of one continuous addition, so the usual context padding would leak the
---- next, unowned sub-hunk into view). "D" is excluded: it always carries a
---- single hunk spanning the whole file (nothing to fold), and applying group
---- folds to it can collapse the pane to line 1 in inline layout — see the
---- comment on the equivalent "D" skip in M.show_file. A shown file that the
---- new grouping doesn't mention at all (shouldn't happen given reconcile's
---- completeness invariant, but guarded per spec) is left alone rather than
---- guessed at.
+--- (manual or ]c/[c-driven selection), don't yank their view — but that file
+--- was rendered with the flat "All changes" group's hunks all unfolded, so if
+--- it also appears in the real grouped model the wrong stretches are open now.
+--- Re-render it with the correct group's visible set, without touching WHICH
+--- file is displayed or where focus is. The cursor survives, because view.show
+--- restores it by (file, line, side) rather than by row.
+---
+--- A shown file that the new grouping doesn't mention at all (shouldn't happen
+--- given reconcile's completeness invariant, but guarded per spec) is left
+--- alone rather than guessed at. So is an intent view: classify_and_render
+--- re-derives that from the sidebar row (rerender_preview) instead.
 ---
 --- It ALSO re-points ]c/[c at the shown file's new position, which is not
 --- optional bookkeeping: navigation.update_model has just run (see
@@ -742,9 +820,9 @@ end
 --- default settings with the cursor alone — moving onto a file row during the
 --- loading phase renders it AND sets user_selected (apply_hover), which is
 --- what routes classification completion here instead of to auto_open_first.
---- That resync is deliberately NOT gated on auto_open: the fold half is (its
---- caller is auto_open_first's else-branch), but a file put on screen by a
---- hover or <CR> with auto_open = false goes just as stale.
+--- That resync is deliberately NOT gated on auto_open: the re-render half is,
+--- but a file put on screen by a hover or <CR> with auto_open = false goes just
+--- as stale.
 refold_shown_file = function(token)
   local entry = sessions[token]
   if not entry then
@@ -754,9 +832,8 @@ refold_shown_file = function(token)
   if not (tabpage and vim.api.nvim_tabpage_is_valid(tabpage)) then
     return
   end
-  local view = require("intentdiff.view")
-  local shown = view._last_shown[tabpage]
-  if not shown then
+  local shown = entry.shown
+  if not (shown and shown.file_entry) then
     return
   end
   local group_i, file_i = locate_in_model(entry.model, shown.file_entry)
@@ -768,22 +845,7 @@ refold_shown_file = function(token)
   if not require("intentdiff.config").options.auto_open then
     return
   end
-  local status = shown.file_entry.status
-  if status == "D" then
-    return -- see comment above: never fold a deleted whole-file pane
-  end
-  local fold_opts = (status == "??" or status == "A") and { context = 0 } or nil
-  if view._preview_active[tabpage] then
-    -- The shown file is NOT on screen — a hover preview is. Folding now would
-    -- fold the preview's buffers (view.apply_group_folds refuses, by design),
-    -- so hand the new hunk set to the deferred restore instead: leaving the
-    -- preview re-renders the file, and it must do so with the classified
-    -- group's filter rather than the flat "All changes" one it was opened
-    -- with.
-    view.rebind_shown_file(tabpage, f)
-  else
-    view.apply_group_folds(tabpage, f.hunks, fold_opts)
-  end
+  show_one(entry, f)
 end
 
 --- Drop a session's bookkeeping WITHOUT touching windows/tabs. Shared by the
@@ -901,8 +963,8 @@ end
 --- Sessions whose tab was closed behind our back (`:tabclose`, `:q` of the
 --- last window in the tab, codediff's own `q` keymap) used to linger in
 --- `sessions` forever: the entry kept the (dead) model, navigation kept its
---- per-tab ctx, and view kept _active_folds/_last_shown for the tab, so a
---- recycled tab id could inherit stale fold state. TabClosed fires after the
+--- per-tab ctx, and view kept the painted generation for the tab, so a
+--- recycled tab id could inherit stale render state. TabClosed fires after the
 --- tab is gone and only reports its NUMBER, so match by validity instead.
 local tab_augroup
 local function ensure_tab_augroup()
@@ -964,7 +1026,6 @@ local function apply_hover(token)
   if not m then
     return
   end
-  local view = require("intentdiff.view")
   local key
   if m.kind == "group" then
     key = "g" .. m.group_i
@@ -982,11 +1043,15 @@ local function apply_hover(token)
 
   if m.kind == "file" then
     if not require("intentdiff.config").options.preview.hover_opens_files then
-      view.restore(entry.sess)
+      -- Put the last real file back when an intent is on screen; with a file
+      -- already there, the panes are right and there is nothing to restore to.
+      if showing_intent(entry) and entry.last_file then
+        show_one(entry, entry.last_file)
+      end
       return
     end
     -- Opening on the cursor marks the selection: a classification completing
-    -- while the user browses must re-fold their current file in place
+    -- while the user browses must re-render their current file in place
     -- (refold_shown_file), not yank them to the first group. Hovering a GROUP
     -- deliberately does not set this — rerender_preview handles that path.
     entry.user_selected = true
@@ -997,10 +1062,14 @@ local function apply_hover(token)
   if not group then
     return
   end
-  view.show_preview(entry.sess, m.kind == "dir" and subtree_group(group, m.dir_path) or group)
+  if m.kind == "dir" then
+    show_group(entry, subtree_group(group, m.dir_path))
+  else
+    show_group(entry, group)
+  end
 end
 
---- Re-derive an already-on-screen hover preview from the CURRENT model.
+--- Re-derive an already-on-screen INTENT view from the CURRENT model.
 ---
 --- Called after every model swap (classification starting and completing).
 --- The sidebar has just been redrawn, so the row the cursor sits on may now
@@ -1010,15 +1079,15 @@ end
 --- re-derive possible; the row itself, not a remembered key, is the source of
 --- truth for what the panes should show.
 ---
---- No-op unless a preview is actually up: with a file in the panes, the model
---- swap is handled by refold_shown_file/auto_open_first and re-running the
---- hover would be a spurious render.
+--- No-op unless an intent is actually on screen: with a file in the panes, the
+--- model swap is handled by refold_shown_file/auto_open_first and re-running
+--- the hover would be a spurious render.
 rerender_preview = function(token)
   local entry = sessions[token]
   if not entry or not entry.sess then
     return
   end
-  if not require("intentdiff.view")._preview_active[entry.sess.tabpage] then
+  if not showing_intent(entry) then
     return
   end
   entry.hover_key = nil
@@ -1074,26 +1143,18 @@ function M.open(argline)
     return vim.notify("intent-diff: not inside a git repository", vim.log.levels.ERROR)
   end
 
-  -- Bootstrap the codediff session and the sidebar synchronously, before any
-  -- of the async work below (git diff collection, revision resolution,
-  -- classification). Two reasons:
+  -- Open the review tab and its two pane windows synchronously, before any of
+  -- the async work below (git diff collection, revision resolution,
+  -- classification): the rest of this function is entirely async (vim.system,
+  -- provider calls), so deferring tab creation until the first async step
+  -- completed would mean nvim_get_current_tabpage() called right after
+  -- M.open() returns (which callers — including tests — legitimately do) would
+  -- observe the PREVIOUS tab, not this session's.
   --
-  --  * the rest of this function is entirely async (vim.system, provider
-  --    calls), so deferring tab creation until the first async step completed
-  --    would mean nvim_get_current_tabpage() called right after M.open()
-  --    returns (which callers — including tests — legitimately do) would
-  --    observe the PREVIOUS tab, not this session's;
-  --  * the codediff session must exist BEFORE the sidebar, because
-  --    codediff.ui.view.create() opens its own tab. Creating the sidebar
-  --    first (in a placeholder tab) meant the first file selection had to
-  --    close that tab — wiping the sidebar's window and (bufhidden=wipe)
-  --    buffer, after which handle.update() silently no-op'd and no further
-  --    file or group could be selected. Now the sidebar is a plain
-  --    `topleft vsplit` INSIDE codediff's tab and survives every selection.
+  -- The sidebar is then a plain `topleft vsplit` INSIDE that tab, so it sits
+  -- left of both panes and survives every render.
   local sess = { git_root = git_root }
-  if not view.bootstrap(sess) then
-    return vim.notify("intent-diff: codediff failed to open a diff view", vim.log.levels.ERROR)
-  end
+  sess.tabpage = view.open_tab()
   local tabpage = sess.tabpage
   next_token = next_token + 1
   local token = next_token
@@ -1219,7 +1280,7 @@ function M.open(argline)
   sessions[token].model = flat_model({ hunks = {} }, "loading")
   sidebar.update(sessions[token].model)
   attach_hover(token)
-  vim.cmd("wincmd l") -- focus codediff's panes, right of the sidebar
+  vim.cmd("wincmd l") -- focus the diff panes, right of the sidebar
 
   resolve_args(argline, git_root, token, function(collect_opts, base_rev, target_rev)
     require("intentdiff.hunks").collect(collect_opts, function(inventory, err)

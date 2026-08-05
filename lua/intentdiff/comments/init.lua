@@ -6,11 +6,12 @@
 -- never write under each other's storage key. The keymaps already pass the
 -- tabpage they were installed for; `store_for` turns that into the right
 -- store via the plugin's own session registry, which is the one lookup that
--- keeps working when codediff moves a session's tabpage under us.
+-- keeps working however the review tab was acquired.
 --
--- The pure decision functions (side_for_win, visual_range, next_line,
--- prev_line, list_entries) are separated from the Neovim plumbing so they can
--- be tested without a review tab.
+-- The pure decision functions (visual_range, list_entries) are separated from
+-- the Neovim plumbing so they can be tested without a review tab. Everything
+-- that used to reason about WHICH SIDE a window shows is gone: the painted
+-- plan's row map answers that, for every surface.
 local M = {}
 
 local store = require("intentdiff.comments.store")
@@ -20,16 +21,29 @@ local popup = require("intentdiff.comments.popup")
 local export = require("intentdiff.comments.export")
 local config = require("intentdiff.config")
 
---- Which side of the diff a window shows. Inline layout puts the same window
---- in both roles, and only ever shows the modified file — so "new".
-function M.side_for_win(winid, session)
-  if not session then
-    return "new"
+--- The painted pane `win` displays, or nil when it shows something else.
+---
+--- Every surface resolves through this: the SIDE of a row comes from the plan's
+--- map, never from which window the cursor is in. Window identity said nothing
+--- useful even before the unification (inline puts both sides in one buffer),
+--- and says nothing at all now.
+--- @return table|nil pane, integer|nil row
+local function pane_for_win(tabpage, win)
+  local ok, bufnr = pcall(vim.api.nvim_win_get_buf, win)
+  if not ok then
+    return nil
   end
-  if session.original_win == winid and session.modified_win ~= winid then
-    return "old"
+  local pane = require("intentdiff.view").pane_for_buf(tabpage, bufnr)
+  if not pane then
+    return nil
   end
-  return "new"
+  return pane, vim.api.nvim_win_get_cursor(win)[1]
+end
+
+--- `pane_for_win` for the window the cursor is actually in.
+--- @return table|nil pane, integer|nil row
+local function pane_at_cursor(tabpage)
+  return pane_for_win(tabpage, vim.api.nvim_get_current_win())
 end
 
 --- Normalize a visual selection into (line, line_end). A single-line selection
@@ -41,38 +55,6 @@ function M.visual_range(a, b)
     return first, nil
   end
   return first, last
-end
-
-local function line_comments(st, file, side)
-  local out = {}
-  for _, c in ipairs(st.get_for_file(file, side)) do
-    if (c.line or 0) ~= 0 then
-      out[#out + 1] = c
-    end
-  end
-  table.sort(out, function(x, y) return x.line < y.line end)
-  return out
-end
-
---- @return integer|nil
-function M.next_line(st, file, from, side)
-  for _, c in ipairs(line_comments(st, file, side)) do
-    if c.line > from then
-      return c.line
-    end
-  end
-  return nil
-end
-
---- @return integer|nil
-function M.prev_line(st, file, from, side)
-  local best
-  for _, c in ipairs(line_comments(st, file, side)) do
-    if c.line < from then
-      best = c.line
-    end
-  end
-  return best
 end
 
 --- Human-readable label for one comment: `[TYPE] where — first text line`.
@@ -229,97 +211,54 @@ function M.detach_session(entry)
   marks.clear_for(st)
 end
 
---- Refusals for the whole-intent preview. Both name the fix, not just the
---- failure: a row that shows no line of any file cannot carry a comment, and a
---- comment records ONE file.
+--- Refusals. Each names the fix, not just the failure: a row that shows no line
+--- of any file cannot carry a comment, and a comment records ONE file.
 local NOT_A_LINE =
   "nothing to comment on here — put the cursor on an added, removed or context "
-  .. "line (file separators, @@ headers and filler rows show no line)"
+  .. "line (file separators and filler rows show no line)"
 local SPANS_FILES =
   "a comment records one file — select lines inside a single file's diff"
-local NOT_A_PREVIEW_PANE =
-  "put the cursor in the intent preview to comment on it"
+local NOT_A_PANE =
+  "put the cursor in a diff pane to comment"
 
---- What the cursor is pointing at inside a live whole-intent preview.
+--- The file a row belongs to even when the row itself addresses no line.
 ---
---- The preview is a COORDINATE SYSTEM, never a storage concept: this returns
---- exactly the ctx shape the file-diff branch returns — { file, side, line,
---- line_end? } — so the record that reaches the store is indistinguishable
---- from one made in that file's own diff. `side` comes from the render's map,
---- NOT from `side_for_win`: in a preview both windows hold scratch buffers of
---- ours, so window identity says nothing, and in the inline layout the two
---- sides are interleaved inside one buffer.
+--- Scans FORWARD first: the row that most often needs this is a file
+--- separator, and a separator introduces the file BELOW it — a backward scan
+--- would answer with the previous file, which is the wrong file to hang a
+--- file-level comment on.
+--- @return string|nil path
+local function file_at(pane, row)
+  for r = row, #pane.lines do
+    local t = pane.map[r]
+    if t then
+      return t.file
+    end
+  end
+  for r = row - 1, 1, -1 do
+    local t = pane.map[r]
+    if t then
+      return t.file
+    end
+  end
+  return nil
+end
+
+--- What the cursor is pointing at: a line in a painted pane, or an intent in
+--- the sidebar.
+---
+--- ONE pane branch for every surface. The painted plan is a COORDINATE SYSTEM,
+--- never a storage concept: a row resolves to the real (file, line, side) it
+--- displays, so the record a comment made over a whole intent produces is
+--- indistinguishable from one made in that file's own diff. `side` comes from
+--- the map rather than from window identity — in inline layout one buffer
+--- interleaves both sides, so the window could never have answered it.
 ---
 --- A visual range resolves through the rows it actually covers, so an
 --- unaddressed row inside it (a separator, a filler) is skipped rather than
 --- refusing a selection that is otherwise fine — but a range covering rows of
 --- TWO files refuses, because no single record can express it. Its side is the
---- side of its first addressed row; in the inline layout, where one buffer
---- interleaves both sides, that is what keeps a `-`-first selection an
---- old-side range and a context/`+`-first one a new-side range.
---- @return table|nil ctx, string|nil err
-local function preview_context(tabpage, win, opts)
-  local view = require("intentdiff.view")
-  local ok_buf, bufnr = pcall(vim.api.nvim_win_get_buf, win)
-  if not ok_buf then
-    return nil, NOT_A_PREVIEW_PANE
-  end
-  local pane = view.preview_pane_for_buf(tabpage, bufnr)
-  if not pane then
-    return nil, NOT_A_PREVIEW_PANE
-  end
-
-  local first_row, last_row
-  if opts.visual then
-    local mark_start, mark_end = vim.fn.line("'<"), vim.fn.line("'>")
-    -- An unset visual mark reports line 0; see the file-diff branch below.
-    if mark_start == 0 or mark_end == 0 then
-      return nil, "no visual selection"
-    end
-    local a, b = M.visual_range(mark_start, mark_end)
-    first_row, last_row = a, b or a
-  else
-    first_row = vim.api.nvim_win_get_cursor(win)[1]
-    last_row = first_row
-  end
-
-  local preview = require("intentdiff.preview")
-  local targets = {}
-  for row = first_row, last_row do
-    local t = preview.target_at(pane, row)
-    if t then
-      targets[#targets + 1] = t
-    end
-  end
-  if #targets == 0 then
-    return nil, NOT_A_LINE
-  end
-  local file = targets[1].file
-  for _, t in ipairs(targets) do
-    if t.file ~= file then
-      return nil, SPANS_FILES
-    end
-  end
-  if opts.file_level then
-    return { file = file, line = 0 }
-  end
-  local side = targets[1].side
-  local first, last
-  for _, t in ipairs(targets) do
-    if t.side == side then
-      if not first or t.line < first then first = t.line end
-      if not last or t.line > last then last = t.line end
-    end
-  end
-  local ctx = { file = file, side = side, line = first }
-  if last > first then
-    ctx.line_end = last
-  end
-  return ctx
-end
-
---- What the cursor is pointing at: a line in a pane, or an intent in the
---- sidebar.
+--- side of its first addressed row.
 --- @return table|nil ctx, string|nil err
 function M.context(tabpage, opts)
   opts = opts or {}
@@ -346,41 +285,75 @@ function M.context(tabpage, opts)
     return nil, "no intent under the cursor"
   end
 
-  -- Whole-intent preview. Resolved BEFORE the `_last_shown` check: a preview
-  -- can own the panes before any file has ever been selected in the tab, and
-  -- `_last_shown` names the last file rendered, which is not what a preview
-  -- displays.
-  local view = require("intentdiff.view")
-  if view._preview_active[tabpage] then
-    return preview_context(tabpage, win, opts)
+  local pane, cursor_row = pane_for_win(tabpage, win)
+  if not pane then
+    return nil, NOT_A_PANE
   end
 
-  -- Diff pane.
-  local shown = view._last_shown[tabpage]
-  if not (shown and shown.file_entry) then
-    return nil, "no file open"
-  end
-  local session = view.get_session(tabpage)
-  local side = M.side_for_win(win, session)
-  local ctx = { file = shown.file_entry.path, side = side }
-  if opts.file_level then
-    ctx.line = 0
-    ctx.side = nil
-    return ctx
-  end
+  local first_row, last_row
   if opts.visual then
     local mark_start, mark_end = vim.fn.line("'<"), vim.fn.line("'>")
-    -- An unset visual mark reports line 0 (not the cursor line, not an
-    -- error). Taking that at face value falls straight into visual_range and
-    -- produces line = 0 — silently creating a FILE-LEVEL comment instead of a
-    -- line comment. Refuse instead: there is no selection to record.
+    -- An unset visual mark reports line 0 (not the cursor line, not an error).
+    -- Taking that at face value falls straight into visual_range and produces
+    -- line = 0 — silently creating a FILE-LEVEL comment instead of a line one.
     if mark_start == 0 or mark_end == 0 then
       return nil, "no visual selection"
     end
-    local first, last = M.visual_range(mark_start, mark_end)
-    ctx.line, ctx.line_end = first, last
+    local a, b = M.visual_range(mark_start, mark_end)
+    first_row = a
+    if b then
+      last_row = b
+    else
+      last_row = a
+    end
   else
-    ctx.line = vim.api.nvim_win_get_cursor(win)[1]
+    first_row, last_row = cursor_row, cursor_row
+  end
+
+  local plan = require("intentdiff.render.plan")
+  local targets = {}
+  for row = first_row, last_row do
+    local t = plan.target_at(pane, row)
+    if t then
+      targets[#targets + 1] = t
+    end
+  end
+
+  if opts.file_level then
+    -- A file-level comment addresses no line, so it does not need an addressed
+    -- row — only a file. The separator is the most natural place to put one.
+    local file
+    if targets[1] then
+      file = targets[1].file
+    else
+      file = file_at(pane, first_row)
+    end
+    if not file then
+      return nil, NOT_A_LINE
+    end
+    return { file = file, line = 0 }
+  end
+
+  if #targets == 0 then
+    return nil, NOT_A_LINE
+  end
+  local file = targets[1].file
+  for _, t in ipairs(targets) do
+    if t.file ~= file then
+      return nil, SPANS_FILES
+    end
+  end
+  local side = targets[1].side
+  local first, last
+  for _, t in ipairs(targets) do
+    if t.side == side then
+      if not first or t.line < first then first = t.line end
+      if not last or t.line > last then last = t.line end
+    end
+  end
+  local ctx = { file = file, side = side, line = first }
+  if last > first then
+    ctx.line_end = last
   end
   return ctx
 end
@@ -441,28 +414,35 @@ local function current_buf()
   return bufnr
 end
 
---- The comment whose RENDERED box covers `line` in `bufnr` — the fallback for
---- a comment that drifted past the end of the buffer.
+--- The comment whose RENDERED box covers the cursor's ROW — the fallback for a
+--- comment whose lines this render no longer shows.
 ---
---- `store.get_at_line` matches on the RAW stored line, while `marks` clamps a
---- past-EOF comment onto the buffer's last line so it stays visible. Without
---- this, a comment stored at line 500 of a file that is now 5 lines long draws
---- a box the user can see and reports "no comment here" for every edit/delete
---- on it — visible, but unreachable. The clamp is `marks.clamped_span_in_buf`,
---- the very function the renderer places the box with, so the two answers
---- cannot disagree.
+--- `store.get_at_line` matches on the RAW stored line, while the renderer clamps
+--- such a comment onto the last row of its file so it stays visible. Without
+--- this, a comment stored at line 500 of a file that is now 5 lines long draws a
+--- box the user can see and reports "no comment here" for every edit/delete on
+--- it — visible, but unreachable. The clamp is `marks.rows_for_comment`, the very
+--- function the renderer places the box with, so the two answers cannot
+--- disagree.
+---
+--- Only DRIFTED comments are considered: an undrifted one is already found by
+--- `get_at_line` on the exact coordinate the map gave, and matching it again by
+--- row would let a row shared with another file's comment answer for it.
 --- @return intentdiff.Comment|nil
-local function drifted_at_line(st, ctx, bufnr)
-  local line = ctx.line
-  if not (bufnr and line) then
+local function drifted_at_row(st, tabpage)
+  local pane, row = pane_at_cursor(tabpage)
+  if not (pane and row) then
     return nil
   end
-  for _, c in ipairs(st.get_for_file(ctx.file, ctx.side)) do
-    -- File-level comments hang above line 1 and address no line at all.
-    if (c.line or 0) ~= 0 then
-      local first, final = marks.clamped_span_in_buf(c, bufnr)
-      if first and line >= first and line <= final then
-        return c
+  for _, c in ipairs(st.get_all()) do
+    if not c.intent_title and (c.line or 0) ~= 0 then
+      local rows, drifted = marks.rows_for_comment(pane, c)
+      if drifted then
+        for _, r in ipairs(rows) do
+          if r == row then
+            return c
+          end
+        end
       end
     end
   end
@@ -478,7 +458,7 @@ end
 --- disambiguation: `store.collides` enforces exactly one per file.
 local function at_cursor(tabpage, st, cb)
   -- Resolved here, not left nil for M.context to default internally: the
-  -- preview check below reads a per-tabpage table with it.
+  -- drifted fallback below resolves the pane from it.
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local ctx = M.context(tabpage)
   if not ctx then
@@ -512,15 +492,8 @@ local function at_cursor(tabpage, st, cb)
     return cb(nil)
   end
   local found = st.get_at_line(ctx.file, ctx.line, ctx.side)
-  -- The drifted fallback measures a comment against the BUFFER's line count,
-  -- which only means anything when the buffer IS the file. A preview buffer is
-  -- a render of many files, so clamping there would match a comment stored at
-  -- line 500 onto whatever the preview's last row happens to be — the "checks
-  -- one thing, acts on another" failure this fallback was written to fix, in
-  -- mirror image. A preview simply does not draw a comment whose lines it does
-  -- not show, so there is nothing there to reach.
-  if not found and not require("intentdiff.view")._preview_active[tabpage] then
-    found = drifted_at_line(st, ctx, current_buf())
+  if not found then
+    found = drifted_at_row(st, tabpage)
   end
   return cb(found)
 end
@@ -576,92 +549,115 @@ local function in_diff_pane(tabpage, win)
   return false
 end
 
-local function jump(tabpage, finder)
+--- The rows of `pane` that carry a comment box, ascending and de-duplicated.
+---
+--- Rows, not stored line numbers: the panes hold a render plan, so `]n` walks
+--- what is actually drawn. It therefore reaches every comment on screen —
+--- including, in an intent view, comments in the OTHER files the render shows,
+--- which the old file-scoped walk could not express at all.
+local function comment_rows(st, pane)
+  local seen, rows = {}, {}
+  for _, c in ipairs(st.get_all()) do
+    if not c.intent_title and (c.line or 0) ~= 0 then
+      for _, row in ipairs(marks.rows_for_comment(pane, c)) do
+        if not seen[row] then
+          seen[row] = true
+          rows[#rows + 1] = row
+        end
+      end
+    end
+  end
+  table.sort(rows)
+  return rows
+end
+
+--- `]n` / `[n`: move to the next/previous comment box in this pane.
+---
+--- Refuses outside a diff pane. `]n`/`[n` are installed on the SIDEBAR as well
+--- (every comment key is, so the export keys are reachable from either
+--- surface), and a sidebar row is not a pane row — jumping on it moved the
+--- sidebar cursor to an arbitrary row, which then re-rendered the panes to
+--- whatever intent that row belongs to.
+local function jump(tabpage, forward)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local st = M.store_for(tabpage)
   if not st then
     return
   end
-  local view = require("intentdiff.view")
-  local shown = view._last_shown[tabpage]
-  if not (shown and shown.file_entry) then
-    return
-  end
-  -- Two guards. A preview buffer concatenates many files: M.context and
-  -- marks.refresh now RESOLVE that through the render's row map, but jumping
-  -- cannot — `finder` walks stored line numbers of ONE file, and the cursor
-  -- would have to land on whichever preview row that file's line happens to
-  -- occupy, per pane, per layout. M.list refuses for the same reason and opens
-  -- the real file instead. And the comment keys reach surfaces that are not
-  -- diff panes at all.
-  if view._preview_active[tabpage] then
-    return notify("comments are not shown in an intent preview", vim.log.levels.WARN)
-  end
   local win = vim.api.nvim_get_current_win()
-  if not in_diff_pane(tabpage, win) then
+  local pane, cur = pane_for_win(tabpage, win)
+  if not (in_diff_pane(tabpage, win) and pane) then
     return notify("comment navigation only works in a diff pane", vim.log.levels.WARN)
   end
-  local session = view.get_session(tabpage)
-  local side = M.side_for_win(win, session)
-  local cur = vim.api.nvim_win_get_cursor(win)[1]
-  local target = finder(st, shown.file_entry.path, cur, side)
-  if not target then
-    return notify("no more comments in this file")
-  end
-  -- A comment that outlived its lines is RENDERED on the last line (marks
-  -- clamps it there); its stored line can be far past EOF, and
-  -- nvim_win_set_cursor to a line that does not exist fails — silently, since
-  -- it is pcall'd — so `]n` did nothing at all, not even the "no more
-  -- comments" notice. Land on the box where it is actually drawn instead.
-  local line = target
-  local ok_buf, bufnr = pcall(vim.api.nvim_win_get_buf, win)
-  if ok_buf then
-    local first = marks.clamped_span_in_buf({ line = target }, bufnr)
-    if first then
-      line = first
+  local rows = comment_rows(st, pane)
+  local target
+  if forward then
+    for _, row in ipairs(rows) do
+      if row > cur then
+        target = row
+        break
+      end
+    end
+  else
+    for i = #rows, 1, -1 do
+      if rows[i] < cur then
+        target = rows[i]
+        break
+      end
     end
   end
-  pcall(vim.api.nvim_win_set_cursor, win, { line, 0 })
+  if not target then
+    return notify("no more comments")
+  end
+  pcall(vim.api.nvim_win_set_cursor, win, { target, 0 })
 end
 
 function M.next(tabpage)
-  jump(tabpage, M.next_line)
+  jump(tabpage, true)
 end
 
 function M.prev(tabpage)
-  jump(tabpage, M.prev_line)
+  jump(tabpage, false)
 end
 
---- Put the cursor on `c`'s line, in every pane of `tabpage` showing `c`'s side.
+--- Put the cursor on the row `c`'s box is drawn on, in every pane that draws it.
 ---
---- An old-side comment's line number only addresses a row of the ORIGINAL
---- pane; jumping it into the modified pane too would land on an unrelated line
---- that merely shares the same number. `zv` afterwards opens just enough of
---- the group fold filter for the line — and the comment box hanging off it —
---- to be visible, instead of leaving the cursor buried in a closed fold.
+--- Which pane that is falls out of the map: an old-side comment has rows only
+--- in the original pane of a side-by-side render, and in an inline render — one
+--- buffer interleaving both sides — it has rows there. No side/window
+--- comparison is needed, or possible.
+---
+--- `zv` afterwards opens just enough of the fold filter for the line — and the
+--- comment box hanging off it — to be visible, instead of leaving the cursor
+--- buried in a closed fold.
 local function place_cursor(tabpage, c)
   local view = require("intentdiff.view")
-  local session = view.get_session(tabpage)
   for _, win in ipairs(view.diff_wins(tabpage)) do
-    if (c.side or "new") == M.side_for_win(win, session) then
-      -- Clamped per window, exactly as marks draws the box: a comment whose
-      -- line outlived the file renders on the last line, and a cursor move to
-      -- its raw line simply fails (pcall'd, so silently) — the picker would
-      -- appear to do nothing.
-      local line = c.line
-      local ok_buf, bufnr = pcall(vim.api.nvim_win_get_buf, win)
-      if ok_buf then
-        local first = marks.clamped_span_in_buf(c, bufnr)
-        if first then
-          line = first
-        end
+    local pane = pane_for_win(tabpage, win)
+    if pane then
+      local rows = marks.rows_for_comment(pane, c)
+      if #rows > 0 then
+        pcall(vim.api.nvim_win_set_cursor, win, { rows[1], 0 })
+        pcall(vim.api.nvim_win_call, win, function()
+          vim.cmd("normal! zv")
+        end)
       end
-      pcall(vim.api.nvim_win_set_cursor, win, { line, 0 })
-      pcall(vim.api.nvim_win_call, win, function()
-        vim.cmd("normal! zv")
-      end)
     end
   end
+end
+
+--- Does the painted plan of `tabpage` render `path` at all?
+local function plan_shows(tabpage, path)
+  local plan = require("intentdiff.view").current_plan(tabpage)
+  if not plan then
+    return false
+  end
+  for _, f in ipairs(plan.files or {}) do
+    if f.path == path then
+      return true
+    end
+  end
+  return false
 end
 
 --- Show every comment in the review; picking one jumps the cursor to it,
@@ -696,19 +692,12 @@ function M.list(tabpage)
     if c.intent_title or (c.line or 0) == 0 then
       return
     end
-    -- `_last_shown` names the last file RENDERED, which is not the same thing
-    -- as what the panes currently DISPLAY: a hover preview swaps its own
-    -- buffers in without touching it (view.show_preview), so during a preview
-    -- _last_shown still names the pre-preview file while the panes hold a
-    -- concatenation of a whole intent's files. Jumping to `c.line` there lands
-    -- on an arbitrary line of an unrelated file — the exact wrong-file hazard
-    -- this function refuses to take elsewhere. Treat a live preview as "not
-    -- shown" so it falls through to open_path, which re-renders the real file
-    -- first. marks.refresh and M.context guard on the same flag.
-    local view = require("intentdiff.view")
-    local shown = view._last_shown[tabpage]
-    if shown and shown.file_entry and shown.file_entry.path == c.file
-        and not view._preview_active[tabpage] then
+    -- The painted plan is the authority on what is on screen, and it answers
+    -- for an intent view as readily as for a single file: if this render draws
+    -- the comment's file, the cursor can go straight to it. Anything else falls
+    -- through to open_path, which renders the real file first rather than
+    -- jumping to a line of whatever happens to be showing.
+    if plan_shows(tabpage, c.file) then
       return place_cursor(tabpage, c)
     end
     local opened = require("intentdiff").open_path(tabpage, c.file, function()

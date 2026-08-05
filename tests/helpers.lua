@@ -47,6 +47,19 @@ function M.fake_session(tab, entry)
   end
 end
 
+--- A synthetic painted pane showing lines 1..n of `file` on `side` — the shape
+--- render/plan.lua produces and the comment layer consumes. `map` is sparse in
+--- a real plan (separators and fillers address nothing); here every row
+--- addresses a line, which is what a whole-file render of one file looks like.
+function M.fake_pane(file, side, n)
+  local pane = { lines = {}, spans = {}, map = {} }
+  for i = 1, n do
+    pane.lines[i] = "line " .. i
+    pane.map[i] = { file = file, line = i, side = side }
+  end
+  return pane
+end
+
 --- Wait until fn() is truthy or timeout (ms). Returns fn()'s value.
 function M.wait_for(fn, timeout)
   local result

@@ -65,10 +65,14 @@ local function fetch(sess, cache, file)
       git_show(sess.git_root, sess.base_revision, file.old_path or path) or nil
   end
 
-  -- New side.
+  -- New side. "WORKING" is the plugin's sentinel for the working tree, not a
+  -- revision: init.lua sets target_revision unconditionally once a review
+  -- resolves, so a plain `:IntentDiff` arrives here with the string rather than
+  -- with nil. `git show WORKING:path` always fails, which left every
+  -- working-tree review's new side nil and every file rendering hunks-only.
   if status == "D" then
     cache.new[path] = {}
-  elseif sess.target_revision then
+  elseif sess.target_revision and sess.target_revision ~= "WORKING" then
     cache.new[path] = git_show(sess.git_root, sess.target_revision, path) or nil
   else
     cache.new[path] = read_worktree(sess.git_root, path) or nil

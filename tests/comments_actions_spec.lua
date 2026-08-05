@@ -15,70 +15,6 @@ describe("comments actions", function()
     st = store.new()
   end)
 
-  describe("side_for_win", function()
-    it("reads old from the original window and new from the modified one", function()
-      assert.equals("old", comments.side_for_win(10, { original_win = 10, modified_win = 11 }))
-      assert.equals("new", comments.side_for_win(11, { original_win = 10, modified_win = 11 }))
-    end)
-
-    it("defaults to new when the window is neither pane", function()
-      assert.equals("new", comments.side_for_win(99, { original_win = 10, modified_win = 11 }))
-    end)
-
-    it("is new in inline layout, where there is one pane", function()
-      assert.equals("new", comments.side_for_win(11, { original_win = 11, modified_win = 11 }))
-    end)
-  end)
-
-  describe("visual_range", function()
-    it("returns start and end for a multi-line selection", function()
-      local first, last = comments.visual_range(7, 3)
-      assert.equals(3, first)
-      assert.equals(7, last)
-    end)
-
-    it("collapses a single-line selection to no range", function()
-      local first, last = comments.visual_range(4, 4)
-      assert.equals(4, first)
-      assert.is_nil(last)
-    end)
-  end)
-
-  describe("next/prev targets", function()
-    it("finds the next comment line after the cursor", function()
-      st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
-      st.add({ file = "a.lua", line = 9, side = "new", type = "note", text = "y" })
-      assert.equals(9, comments.next_line(st, "a.lua", 3, "new"))
-      assert.equals(3, comments.next_line(st, "a.lua", 1, "new"))
-      assert.is_nil(comments.next_line(st, "a.lua", 9, "new"))
-    end)
-
-    it("finds the previous comment line before the cursor", function()
-      st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
-      st.add({ file = "a.lua", line = 9, side = "new", type = "note", text = "y" })
-      assert.equals(3, comments.prev_line(st, "a.lua", 9, "new"))
-      assert.is_nil(comments.prev_line(st, "a.lua", 3, "new"))
-    end)
-
-    it("returns the NEAREST previous comment, not the earliest", function()
-      -- With only comments at 3 and 9, prev_line(9) == 3 under both the
-      -- correct "nearest" implementation and a mutant that just returns the
-      -- first match found. A third comment at 5 pins down which one it is:
-      -- only "nearest" answers 5 here.
-      st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })
-      st.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "z" })
-      st.add({ file = "a.lua", line = 9, side = "new", type = "note", text = "y" })
-      assert.equals(5, comments.prev_line(st, "a.lua", 9, "new"))
-      assert.is_nil(comments.prev_line(st, "a.lua", 3, "new"))
-    end)
-
-    it("ignores file-level comments when navigating", function()
-      st.add({ file = "a.lua", line = 0, type = "note", text = "f" })
-      st.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "x" })
-      assert.equals(5, comments.next_line(st, "a.lua", 1, "new"))
-    end)
-  end)
-
   describe("list entries", function()
     it("labels each comment with type, location and first text line", function()
       st.add({ file = "a.lua", line = 3, side = "new", type = "issue", text = "bad thing\nmore" })
@@ -208,20 +144,12 @@ describe("comments actions", function()
   describe("edit/delete disambiguation for multiple intent comments", function()
     local popup = require("intentdiff.comments.popup")
     local view = require("intentdiff.view")
-    local real_context, real_select, real_open, real_get_session, restore_session
+    local real_context, real_select, real_open, restore_session
 
     before_each(function()
       real_context = comments.context
       real_select = vim.ui.select
       real_open = popup.open
-      -- edit/delete call marks.refresh() on success, which calls
-      -- view.get_session() unconditionally (even with no file shown for this
-      -- tabpage). The real one indexes codediff internals that view.load()
-      -- (never called in this spec) leaves nil, so it must be stubbed here —
-      -- these tests are about the disambiguation picker, not a real review
-      -- tab's pane rendering.
-      real_get_session = view.get_session
-      view.get_session = function() return nil end
       -- edit/delete take no tabpage here, so they resolve the CURRENT one; the
       -- store they act on is the one on that tab's session entry.
       restore_session = helpers.fake_session(vim.api.nvim_get_current_tabpage(),
@@ -232,7 +160,6 @@ describe("comments actions", function()
       comments.context = real_context
       vim.ui.select = real_select
       popup.open = real_open
-      view.get_session = real_get_session
       restore_session()
     end)
 
@@ -308,15 +235,46 @@ describe("comments actions", function()
   describe("list", function()
     local view = require("intentdiff.view")
     local tab
-    local real_select, real_get_session, real_diff_wins, real_open_path
+    local real_select, real_open_path
+    local real_view = {}
     local win_orig, win_mod, restore_session
+
+    --- Make `win_orig`/`win_mod` look like the painted panes of a render over
+    --- `paths`, each file five rows tall on each side. Everything the action
+    --- layer asks view for now goes through the painted plan.
+    local function stub_panes(paths)
+      local orig = { lines = {}, spans = {}, map = {} }
+      local mod = { lines = {}, spans = {}, map = {} }
+      local files = {}
+      for _, path in ipairs(paths) do
+        files[#files + 1] = { path = path }
+        for line = 1, 5 do
+          local row = #mod.lines + 1
+          orig.lines[row] = path .. ":" .. line
+          mod.lines[row] = path .. ":" .. line
+          orig.map[row] = { file = path, line = line, side = "old" }
+          mod.map[row] = { file = path, line = line, side = "new" }
+        end
+      end
+      local by_buf = {
+        [vim.api.nvim_win_get_buf(win_orig)] = orig,
+        [vim.api.nvim_win_get_buf(win_mod)] = mod,
+      }
+      view.diff_wins = function() return { win_orig, win_mod } end
+      view.pane_wins = function() return { original = win_orig, modified = win_mod } end
+      view.pane_for_buf = function(_, bufnr) return by_buf[bufnr] end
+      view.current_plan = function()
+        return { layout = "side-by-side", original = orig, modified = mod, files = files }
+      end
+    end
 
     before_each(function()
       tab = 900002 -- sentinel key, never a real tabpage id
       real_select = vim.ui.select
-      real_get_session = view.get_session
-      real_diff_wins = view.diff_wins
       real_open_path = require("intentdiff").open_path
+      for _, name in ipairs({ "diff_wins", "pane_wins", "pane_for_buf", "current_plan" }) do
+        real_view[name] = view[name]
+      end
       win_orig = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, {
         relative = "editor", row = 0, col = 0, width = 20, height = 5, style = "minimal",
       })
@@ -328,21 +286,18 @@ describe("comments actions", function()
         vim.api.nvim_buf_set_lines(vim.api.nvim_win_get_buf(w), 0, -1, false,
           { "1", "2", "3", "4", "5" })
       end
-      view.get_session = function() return { original_win = win_orig, modified_win = win_mod } end
-      view.diff_wins = function() return { win_orig, win_mod } end
-      view._last_shown[tab] = { file_entry = { path = "a.lua" } }
+      stub_panes({ "a.lua" })
       -- `list` resolves the review's store from this tab's session entry.
       restore_session = helpers.fake_session(tab, { comment_store = st })
     end)
 
     after_each(function()
       vim.ui.select = real_select
-      view.get_session = real_get_session
-      view.diff_wins = real_diff_wins
+      for name, fn in pairs(real_view) do
+        view[name] = fn
+      end
       require("intentdiff").open_path = real_open_path
       restore_session()
-      view._last_shown[tab] = nil
-      view._preview_active[tab] = nil
       pcall(vim.api.nvim_win_close, win_orig, true)
       pcall(vim.api.nvim_win_close, win_mod, true)
     end)
@@ -354,10 +309,10 @@ describe("comments actions", function()
       local asked_tab, asked_path
       require("intentdiff").open_path = function(tabpage, path, on_shown)
         asked_tab, asked_path = tabpage, path
-        -- The real one renders the file and folds it to its intent before
-        -- calling back; the cursor must be placed from THAT callback, not
-        -- before it.
+        -- The real one RENDERS the file before calling back; the cursor must be
+        -- placed from THAT callback, not before it.
         assert.equals(1, vim.api.nvim_win_get_cursor(win_mod)[1])
+        stub_panes({ path })
         on_shown()
         return true
       end
@@ -396,30 +351,30 @@ describe("comments actions", function()
       assert.equals(5, vim.api.nvim_win_get_cursor(win_mod)[1])
     end)
 
-    -- `_last_shown` names the last file RENDERED, not what the panes DISPLAY.
-    -- A hover preview swaps its own buffers in without touching it, so during
-    -- a preview _last_shown still names the pre-preview file while the panes
-    -- hold a whole intent's files concatenated. Jumping to c.line there lands
-    -- on an arbitrary line of an unrelated file — the same wrong-file hazard
-    -- this function refuses to take when the file simply isn't open.
-    it("does not jump into a hover preview's buffers, even for the last-shown file", function()
-      st.add({ file = "a.lua", line = 5, side = "new", type = "note", text = "x" })
+    -- The painted plan answers "is this file on screen?" for an intent render
+    -- as readily as for a single file, which is what the old `_last_shown`
+    -- check could never do: it named the last file RENDERED, so a whole-intent
+    -- render always looked like "some other file is showing".
+    it("jumps straight in when the comment's file is one of several on screen", function()
+      -- Two files' blocks: ten rows, so the buffers need ten lines.
+      for _, w in ipairs({ win_orig, win_mod }) do
+        vim.api.nvim_buf_set_lines(vim.api.nvim_win_get_buf(w), 0, -1, false,
+          { "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" })
+      end
+      stub_panes({ "a.lua", "b.lua" })
+      st.add({ file = "b.lua", line = 2, side = "new", type = "note", text = "x" })
       vim.ui.select = function(entries, _, cb) cb(entries[1]) end
-      view._preview_active[tab] = { title = "An intent" }
-      local asked_path
-      require("intentdiff").open_path = function(_, path)
-        asked_path = path
-        return true -- the real one re-renders the file; on_shown deliberately
-                    -- not called, so any cursor move here would be this
-                    -- function jumping on its own.
+      local opened = false
+      require("intentdiff").open_path = function()
+        opened = true
+        return true
       end
 
       comments.list(tab)
 
-      assert.equals("a.lua", asked_path,
-        "a live preview must route through open_path, not be treated as shown")
-      assert.equals(1, vim.api.nvim_win_get_cursor(win_mod)[1])
-      assert.equals(1, vim.api.nvim_win_get_cursor(win_orig)[1])
+      assert.is_false(opened, "a file the render already shows must not be re-opened")
+      -- b.lua's block starts at row 6, so its line 2 is row 7.
+      assert.equals(7, vim.api.nvim_win_get_cursor(win_mod)[1])
     end)
 
     it("jumps only the pane whose side matches an old-side comment", function()
@@ -432,9 +387,10 @@ describe("comments actions", function()
       assert.equals(1, vim.api.nvim_win_get_cursor(win_mod)[1])
     end)
 
-    -- `place_cursor` clamps like marks does, so the picker lands on the box
-    -- rather than failing a cursor move to a line that no longer exists.
-    it("jumps to the line a drifted comment's box is actually drawn on", function()
+    -- `place_cursor` resolves through the same rows_for_comment the renderer
+    -- draws with, so the picker lands on the box rather than failing a cursor
+    -- move to a line that no longer exists.
+    it("jumps to the row a drifted comment's box is actually drawn on", function()
       st.add({ file = "a.lua", line = 500, side = "new", type = "note", text = "drifted" })
       vim.ui.select = function(entries, _, cb) cb(entries[1]) end
 
@@ -454,7 +410,8 @@ describe("comments actions", function()
     local view = require("intentdiff.view")
     local popup = require("intentdiff.comments.popup")
     local tab
-    local real_get_session, real_diff_wins, real_open
+    local real_open
+    local real_view = {}
     local win_orig, win_mod, win_sidebar, restore_session
 
     local function float(rows)
@@ -467,16 +424,28 @@ describe("comments actions", function()
 
     before_each(function()
       tab = 900003 -- sentinel key, never a real tabpage id
-      real_get_session = view.get_session
-      real_diff_wins = view.diff_wins
       real_open = popup.open
-      -- Five-line panes: a comment stored at line 500 is well past EOF.
+      for _, name in ipairs({ "diff_wins", "pane_wins", "pane_for_buf", "current_plan" }) do
+        real_view[name] = view[name]
+      end
+      -- Five-line panes over a.lua: a comment stored at line 500 is well past
+      -- the last row the render gives that file.
       win_orig = float({ "1", "2", "3", "4", "5" })
       win_mod = float({ "1", "2", "3", "4", "5" })
       win_sidebar = float({ "s1", "s2", "s3", "s4", "s5" })
-      view.get_session = function() return { original_win = win_orig, modified_win = win_mod } end
+      local orig_pane = helpers.fake_pane("a.lua", "old", 5)
+      local mod_pane = helpers.fake_pane("a.lua", "new", 5)
+      local by_buf = {
+        [vim.api.nvim_win_get_buf(win_orig)] = orig_pane,
+        [vim.api.nvim_win_get_buf(win_mod)] = mod_pane,
+      }
       view.diff_wins = function() return { win_orig, win_mod } end
-      view._last_shown[tab] = { file_entry = { path = "a.lua" } }
+      view.pane_wins = function() return { original = win_orig, modified = win_mod } end
+      view.pane_for_buf = function(_, bufnr) return by_buf[bufnr] end
+      view.current_plan = function()
+        return { layout = "side-by-side", original = orig_pane, modified = mod_pane,
+          files = { { path = "a.lua" } } }
+      end
       restore_session = helpers.fake_session(tab, {
         comment_store = st,
         -- The sidebar the comment keys are also installed on.
@@ -485,12 +454,11 @@ describe("comments actions", function()
     end)
 
     after_each(function()
-      view.get_session = real_get_session
-      view.diff_wins = real_diff_wins
+      for name, fn in pairs(real_view) do
+        view[name] = fn
+      end
       popup.open = real_open
       restore_session()
-      view._last_shown[tab] = nil
-      view._preview_active[tab] = nil
       for _, w in ipairs({ win_orig, win_mod, win_sidebar }) do
         pcall(vim.api.nvim_win_close, w, true)
       end
@@ -584,18 +552,6 @@ describe("comments actions", function()
         assert.equals(5, vim.api.nvim_win_get_cursor(win_sidebar)[1])
       end)
 
-      -- A preview buffer holds a whole intent's files concatenated. Its rows
-      -- ARE resolvable — M.context and marks.refresh go through the render's
-      -- row map — but they are not the SHOWN file's lines, which is what
-      -- `finder` walks, so ]n/[n still refuse (as does M.list's jump).
-      it("refuses in a hover preview", function()
-        view._preview_active[tab] = { title = "An intent" }
-        focus(win_mod, 1)
-
-        comments.next(tab)
-
-        assert.equals(1, vim.api.nvim_win_get_cursor(win_mod)[1])
-      end)
     end)
   end)
 end)

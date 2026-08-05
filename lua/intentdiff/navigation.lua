@@ -43,16 +43,16 @@ local function move(tabpage, dir)
   if not group then
     return
   end
-  local session = require("intentdiff.view").get_session(tabpage)
-  if not session then
+  local wins = require("intentdiff.view").pane_wins(tabpage)
+  if not wins.modified and not wins.original then
     return
   end
   local cur_win = vim.api.nvim_get_current_win()
   local side, win
-  if cur_win == session.original_win then
-    side, win = "original", session.original_win
+  if wins.original and cur_win == wins.original then
+    side, win = "original", wins.original
   else
-    side, win = "modified", session.modified_win
+    side, win = "modified", wins.modified
   end
   if not (win and vim.api.nvim_win_is_valid(win)) then
     return

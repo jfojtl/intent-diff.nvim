@@ -91,7 +91,7 @@ describe("navigation integration (move/attach/detach/set_position)", function()
     saved_view = package.loaded["intentdiff.view"]
     view_stub = {
       diff_wins = function() return { win1, win2 } end,
-      get_session = function() return { original_win = win1, modified_win = win2 } end,
+      pane_wins = function() return { original = win1, modified = win2 } end,
     }
     package.loaded["intentdiff.view"] = view_stub
 
@@ -159,9 +159,9 @@ describe("navigation integration (move/attach/detach/set_position)", function()
     assert.equals(2, ctx.file_i)
   end)
 
-  it("move() with nil session is a no-op and does not error", function()
+  it("move() with no pane windows is a no-op and does not error", function()
     navigation.attach(tabpage, ctx)
-    view_stub.get_session = function() return nil end
+    view_stub.pane_wins = function() return {} end
     vim.api.nvim_set_current_win(win2)
     vim.api.nvim_win_set_cursor(win2, { 1, 0 })
     assert.has_no.errors(function() navigation.next_hunk(tabpage) end)

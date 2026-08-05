@@ -8,14 +8,14 @@ describe("highlight", function()
     end
   end)
 
-  it("covers the groups the sidebar and preview use", function()
+  it("covers the groups the sidebar and the renderer use", function()
     local hl = require("intentdiff.highlight")
     for _, name in ipairs({
       "IntentDiffGroupTitle", "IntentDiffGroupStats", "IntentDiffAdd",
       "IntentDiffDelete", "IntentDiffDirectory", "IntentDiffIndent",
       "IntentDiffStatusA", "IntentDiffStatusM", "IntentDiffStatusD",
       "IntentDiffStatusUntracked", "IntentDiffFileSeparator",
-      "IntentDiffPreviewHunk", "IntentDiffFiller",
+      "IntentDiffFiller",
     }) do
       assert.is_string(hl.links[name], name .. " must be defined")
     end

@@ -88,10 +88,11 @@ describe("sidebar show/hide", function()
   it("hides and shows without disturbing the diff panes", function()
     local tab, entry = open_ready()
     helpers.wait_for(function()
-      return require("intentdiff.view")._last_shown[tab] ~= nil or nil
+      return require("intentdiff.view").current_plan(tab) ~= nil or nil
     end, 10000)
-    local session = require("intentdiff.view").get_session(tab)
-    local orig_buf, mod_buf = session.original_bufnr, session.modified_bufnr
+    local wins = require("intentdiff.view").pane_wins(tab)
+    local orig_buf = vim.api.nvim_win_get_buf(wins.original)
+    local mod_buf = vim.api.nvim_win_get_buf(wins.modified)
     local bufnr = entry.sidebar.bufnr
 
     require("intentdiff").toggle_sidebar(tab)
@@ -103,9 +104,10 @@ describe("sidebar show/hide", function()
     assert.is_true(vim.api.nvim_win_is_valid(entry.sidebar.winid))
     assert.equals(bufnr, vim.api.nvim_win_get_buf(entry.sidebar.winid))
 
-    local after = require("intentdiff.view").get_session(tab)
-    assert.equals(orig_buf, after.original_bufnr, "diff panes must survive a hide/show cycle")
-    assert.equals(mod_buf, after.modified_bufnr)
+    local after = require("intentdiff.view").pane_wins(tab)
+    assert.equals(orig_buf, vim.api.nvim_win_get_buf(after.original),
+      "diff panes must survive a hide/show cycle")
+    assert.equals(mod_buf, vim.api.nvim_win_get_buf(after.modified))
   end)
 
   it("re-renders the current model after showing", function()
@@ -166,7 +168,7 @@ describe("sidebar show/hide", function()
   end)
 
   it("apply_hover no-ops instead of throwing when a model re-render lands while "
-      .. "a preview is active and the sidebar is hidden, then the preview re-derives "
+      .. "an intent view is on screen and the sidebar is hidden, then it re-derives "
       .. "once the sidebar is shown again", function()
     local tab, entry = open_ready({
       provider = fake_provider_sequence({
@@ -177,15 +179,15 @@ describe("sidebar show/hide", function()
     })
     hover(entry, line_of(entry, "group"))
     assert.truthy(helpers.wait_for(function()
-      return require("intentdiff.view")._preview_active[tab]
-    end, 5000), "preview never activated")
+      return entry.shown and entry.shown.group
+    end, 5000), "the intent view never rendered")
 
     require("intentdiff").toggle_sidebar(tab) -- hide
     assert.is_false(entry.sidebar.visible)
 
     -- `r` re-enters classify_and_render, which calls rerender_preview →
     -- apply_hover SYNCHRONOUSLY (before the async provider even runs)
-    -- because _preview_active[tab] is still truthy. With the sidebar hidden,
+    -- because an intent is still on screen. With the sidebar hidden,
     -- entry.sidebar.winid is nil, so this is the exact crash the guard
     -- exists for: nvim_win_is_valid(nil) throws rather than returning false.
     assert.has_no.errors(function() press(entry, require("intentdiff.config").options.keymaps.sidebar.reclassify) end)
@@ -208,9 +210,9 @@ describe("sidebar show/hide", function()
     -- the SAME row again is not a de-duped no-op — it must re-render.
     hover(entry, line_of(entry, "group"))
     assert.truthy(helpers.wait_for(function()
-      local active = require("intentdiff.view")._preview_active[tab]
-      return (active and active.title == "Reclassified") or nil
-    end, 5000), "the preview must re-derive from the reclassified model once shown again")
+      local shown = entry.shown
+      return (shown and shown.group and shown.group.title == "Reclassified") or nil
+    end, 5000), "the intent view must re-derive from the reclassified model once shown again")
   end)
 
   it("keeps the sidebar toggle key on the diff panes even when codediff's own "
@@ -221,12 +223,12 @@ describe("sidebar show/hide", function()
     cd_config.options.keymaps.view.toggle_layout = false
     local ok, err = pcall(function()
       -- Force a re-install with codediff's key disabled — mirrors what
-      -- happens on every real render (M.install_keymaps is re-run after
-      -- every show_file/toggle_layout/reassert).
+      -- happens on every real render (M.install_keymaps is re-run by every
+      -- view.show).
       require("intentdiff.view").install_keymaps(tab)
-      local session = require("intentdiff.view").get_session(tab)
       local found = false
-      for _, buf in ipairs({ session.original_bufnr, session.modified_bufnr }) do
+      for _, win in ipairs(require("intentdiff.view").diff_wins(tab)) do
+        local buf = vim.api.nvim_win_get_buf(win)
         if buf and vim.api.nvim_buf_is_valid(buf) then
           for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
             if m.desc == "intent-diff: show/hide the sidebar" then

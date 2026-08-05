@@ -17,7 +17,6 @@ M.links = {
   IntentDiffStatusD = "Removed",
   IntentDiffStatusUntracked = "Added",
   IntentDiffFileSeparator = "Title",
-  IntentDiffPreviewHunk = "Comment",
   IntentDiffFiller = "Comment",
   IntentDiffAddChar = "DiffText",
   IntentDiffDeleteChar = "DiffText",
