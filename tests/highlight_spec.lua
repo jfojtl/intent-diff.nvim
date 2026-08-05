@@ -168,6 +168,27 @@ describe("diff-tint groups (IntentDiffAdd/Delete/AddChar/DeleteChar)", function(
     end
   end
 
+  --- `bg` (a 0xRRGGBB int) actually reads as `hue` ("green" or "red"): the
+  --- named channel meaningfully clears BOTH other channels — not just one,
+  --- which is what let classic-Vim's DiffDelete #af5faf (R=175, G=95,
+  --- B=175) read as "red" before: R clears G easily, but R == B, so it's
+  --- magenta, not red. Same shape of check the implementation itself uses
+  --- (DOMINANCE_RATIO in highlight.lua), asserted here black-box against
+  --- what nvim_get_hl actually resolved — this is the maintainer's original
+  --- complaint category ("is it actually red/green"), which the group's
+  --- mere existence or its bg-vs-fg shape says nothing about.
+  local function assert_hue(bg, hue, label)
+    local r = math.floor(bg / 65536) % 256
+    local g = math.floor(bg / 256) % 256
+    local b = bg % 256
+    local detail = (" (resolved to r=%d g=%d b=%d)"):format(r, g, b)
+    if hue == "green" then
+      assert.is_true(g > r * 1.1 and g > b * 1.1, label .. " must read as green" .. detail)
+    else
+      assert.is_true(r > g * 1.1 and r > b * 1.1, label .. " must read as red" .. detail)
+    end
+  end
+
   it("derives a bg-only line tint and a distinct, stronger bg-only char tint (dark scheme)", function()
     vim.cmd("colorscheme habamax")
     hl.ensure()
@@ -176,6 +197,12 @@ describe("diff-tint groups (IntentDiffAdd/Delete/AddChar/DeleteChar)", function(
     assert.not_equals(c.IntentDiffAdd.bg, c.IntentDiffAddChar.bg, "AddChar must differ from its line group")
     assert.not_equals(c.IntentDiffDelete.bg, c.IntentDiffDeleteChar.bg, "DeleteChar must differ from its line group")
     assert.not_equals(c.IntentDiffAddChar.bg, c.IntentDiffDeleteChar.bg, "AddChar and DeleteChar must differ from each other")
+    -- habamax's own DiffAdd/DiffDelete are already genuinely green/red, so
+    -- this exercises the "use the scheme's own color" path.
+    assert_hue(c.IntentDiffAdd.bg, "green", "IntentDiffAdd on habamax")
+    assert_hue(c.IntentDiffDelete.bg, "red", "IntentDiffDelete on habamax")
+    assert_hue(c.IntentDiffAddChar.bg, "green", "IntentDiffAddChar on habamax")
+    assert_hue(c.IntentDiffDeleteChar.bg, "red", "IntentDiffDeleteChar on habamax")
   end)
 
   it("derives a bg-only line tint and a distinct, stronger bg-only char tint (light scheme)", function()
@@ -186,6 +213,18 @@ describe("diff-tint groups (IntentDiffAdd/Delete/AddChar/DeleteChar)", function(
     assert.not_equals(c.IntentDiffAdd.bg, c.IntentDiffAddChar.bg, "AddChar must differ from its line group")
     assert.not_equals(c.IntentDiffDelete.bg, c.IntentDiffDeleteChar.bg, "DeleteChar must differ from its line group")
     assert.not_equals(c.IntentDiffAddChar.bg, c.IntentDiffDeleteChar.bg, "AddChar and DeleteChar must differ from each other")
+    -- morning is classic-Vim family: its own DiffDelete is #af5faf, which is
+    -- magenta (R == B), not red. This is the exact case the hue check
+    -- exists for — IntentDiffDelete must NOT resolve to that magenta; it
+    -- must fall back to the blended canonical red instead, and still read
+    -- as red. DiffAdd (#5f875f) is genuinely green already, so that side
+    -- exercises the "keep the scheme's own color" path in the same test.
+    assert.not_equals(0xaf5faf, c.IntentDiffDelete.bg,
+      "IntentDiffDelete must not be morning's own magenta DiffDelete")
+    assert_hue(c.IntentDiffAdd.bg, "green", "IntentDiffAdd on morning")
+    assert_hue(c.IntentDiffDelete.bg, "red", "IntentDiffDelete on morning")
+    assert_hue(c.IntentDiffAddChar.bg, "green", "IntentDiffAddChar on morning")
+    assert_hue(c.IntentDiffDeleteChar.bg, "red", "IntentDiffDeleteChar on morning")
   end)
 
   it("handles a DiffAdd/DiffDelete defined via fg + reverse (e.g. the built-in sorbet)", function()
@@ -194,7 +233,7 @@ describe("diff-tint groups (IntentDiffAdd/Delete/AddChar/DeleteChar)", function(
     assert_bg_only({ "IntentDiffAdd", "IntentDiffDelete", "IntentDiffAddChar", "IntentDiffDeleteChar" })
   end)
 
-  it("falls back to a legible tint when the scheme defines none of DiffAdd/DiffDelete/DiffText", function()
+  it("falls back to a legible, correctly-hued tint when the scheme defines none of DiffAdd/DiffDelete/DiffText", function()
     vim.cmd("colorscheme habamax")
     vim.cmd("highlight clear DiffAdd")
     vim.cmd("highlight clear DiffDelete")
@@ -211,6 +250,10 @@ describe("diff-tint groups (IntentDiffAdd/Delete/AddChar/DeleteChar)", function(
     assert_bg_only({ "IntentDiffAdd", "IntentDiffDelete", "IntentDiffAddChar", "IntentDiffDeleteChar" })
     local c = hl.diff_colors()
     assert.not_equals(c.IntentDiffAdd.bg, c.IntentDiffDelete.bg, "add and delete fallbacks must differ")
+    assert_hue(c.IntentDiffAdd.bg, "green", "IntentDiffAdd fallback")
+    assert_hue(c.IntentDiffDelete.bg, "red", "IntentDiffDelete fallback")
+    assert_hue(c.IntentDiffAddChar.bg, "green", "IntentDiffAddChar fallback")
+    assert_hue(c.IntentDiffDeleteChar.bg, "red", "IntentDiffDeleteChar fallback")
   end)
 
   it("re-derives on ColorScheme instead of freezing to the scheme active at setup", function()
@@ -220,5 +263,35 @@ describe("diff-tint groups (IntentDiffAdd/Delete/AddChar/DeleteChar)", function(
     vim.cmd("colorscheme morning")
     local light = vim.api.nvim_get_hl(0, { name = "IntentDiffAdd", link = false }).bg
     assert.not_equals(dark, light, "IntentDiffAdd must track the active colorscheme")
+  end)
+
+  --- A termguicolors=false user gets *some* color, not none: before this
+  --- derivation existed, these four groups linked to Added/Removed/DiffText,
+  --- which carry a ctermbg/ctermfg via the active colorscheme; a plain
+  --- `{ bg = ... }` table with no ctermbg would have silently dropped that.
+  it("sets a ctermbg on all four groups, from the scheme when available", function()
+    vim.cmd("colorscheme habamax")
+    hl.ensure()
+    local c = hl.diff_colors()
+    for _, name in ipairs({ "IntentDiffAdd", "IntentDiffDelete", "IntentDiffAddChar", "IntentDiffDeleteChar" }) do
+      assert.is_number(c[name].ctermbg, name .. " must have a ctermbg")
+    end
+    -- habamax's own DiffAdd/DiffDelete carry ctermbg 22/52; the derived
+    -- groups must reuse those, not invent their own.
+    assert.equals(22, c.IntentDiffAdd.ctermbg)
+    assert.equals(22, c.IntentDiffAddChar.ctermbg)
+    assert.equals(52, c.IntentDiffDelete.ctermbg)
+    assert.equals(52, c.IntentDiffDeleteChar.ctermbg)
+  end)
+
+  it("still sets a ctermbg when DiffAdd/DiffDelete are cleared", function()
+    vim.cmd("colorscheme habamax")
+    vim.cmd("highlight clear DiffAdd")
+    vim.cmd("highlight clear DiffDelete")
+    hl.ensure()
+    local c = hl.diff_colors()
+    for _, name in ipairs({ "IntentDiffAdd", "IntentDiffDelete", "IntentDiffAddChar", "IntentDiffDeleteChar" }) do
+      assert.is_number(c[name].ctermbg, name .. " must have a ctermbg even on the fallback path")
+    end
   end)
 end)

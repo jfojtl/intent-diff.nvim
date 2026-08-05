@@ -769,15 +769,23 @@ tinted row, and it makes an added and a deleted *word* look identical, since
 both linked to the same `DiffText`. Instead they are computed, GitHub-PR
 style: `IntentDiffAdd`/`IntentDiffDelete` set only a `bg` (no `fg`, so
 treesitter's own syntax colours keep showing through), taken from the active
-colourscheme's own `DiffAdd`/`DiffDelete` background; `IntentDiffAddChar`/
-`IntentDiffDeleteChar` are the same colour pushed further from the editor
+colourscheme's own `DiffAdd`/`DiffDelete` background **when that background
+actually reads as green/red** — a channel-dominance check, not just "does
+the group exist": several built-in colourschemes (`desert`, `morning`,
+`torte`, and others in the classic-Vim family) define `DiffDelete` as
+`#af5faf`, which is magenta, not red, and would otherwise sail straight
+through. Whichever side (or both) fails that check falls back to a canonical
+GitHub-ish red/green blended into the editor's own `Normal` background — not
+a flat hardcoded tint, so it still adapts to light vs. dark — and the same
+fallback applies when `DiffAdd`/`DiffDelete` isn't defined at all. This is
+decided independently per side, so a scheme can use its own green and still
+fall back on red, or vice versa. `IntentDiffAddChar`/`IntentDiffDeleteChar`
+are that same resolved line colour pushed further from the editor
 background — brighter on a dark colourscheme, darker on a light one, since
 either direction reads as "more saturated than the row it sits in" — so the
-words that actually changed stand out inside the tinted row. A colourscheme
-that defines neither `DiffAdd` nor `DiffDelete` falls back to a fixed
-GitHub-style tint chosen by `'background'` rather than leaving the group
-undefined. Recomputed on every `:colorscheme`, same as every other group in
-this table, and set with `default = true` too — an explicit override you set
+words that actually changed stand out inside the tinted row. Recomputed on
+every `:colorscheme`, same as every other group in this table, and set with
+`default = true` too — an explicit override you set
 yourself always wins, exactly as described above.
 
 The eight comment groups are derived from each type's `key`, not hand-listed
