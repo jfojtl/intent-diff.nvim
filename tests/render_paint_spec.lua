@@ -133,3 +133,103 @@ describe("paint.render", function()
       "retiring a displayed buffer would close its window and could close the tab")
   end)
 end)
+
+describe("paint syntax highlighting", function()
+  local wins, tab
+  before_each(function() wins, tab = two_wins() end)
+  after_each(function()
+    if vim.api.nvim_tabpage_is_valid(tab) then vim.cmd("tabclose!") end
+  end)
+
+  local function syntax_marks(buf, row)
+    local out = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(
+        buf, paint.ns, { row - 1, 0 }, { row - 1, -1 }, { details = true })) do
+      if m[4].hl_group and m[4].hl_group:sub(1, 1) == "@" then
+        out[#out + 1] = m[4].hl_group
+      end
+    end
+    return out
+  end
+
+  it("highlights an unchanged row from the file's own parse", function()
+    local file = {
+      path = "a.lua", status = "M", filetype = "lua", binary = false,
+      original = { "local x = 1", "return x" },
+      modified = { "local x = 2", "return x" },
+      hunks = { {
+        id = "a.lua:1", file = "a.lua", header = "@@ -1,1 +1,1 @@",
+        text = "@@ -1,1 +1,1 @@\n-local x = 1\n+local x = 2\n",
+        original = { start_line = 1, end_line = 2 },
+        modified = { start_line = 1, end_line = 2 },
+        additions = 1, deletions = 1,
+      } },
+    }
+    local content = { ["a.lua"] = { old = file.original, new = file.modified } }
+    local p = plan.build({ file }, {}, "side-by-side")
+    local painted = paint.render(p, wins, content)
+    -- Row 3 is "return x" on the modified side.
+    assert.is_true(#syntax_marks(painted.bufs.modified, 3) > 0,
+      "an unchanged row got no treesitter highlights")
+  end)
+
+  it("highlights an inline deletion row from the ORIGINAL parse", function()
+    local file = {
+      path = "a.lua", status = "M", filetype = "lua", binary = false,
+      original = { "local removed = 1" },
+      modified = { "local added = 2" },
+      hunks = { {
+        id = "a.lua:1", file = "a.lua", header = "@@ -1,1 +1,1 @@",
+        text = "@@ -1,1 +1,1 @@\n-local removed = 1\n+local added = 2\n",
+        original = { start_line = 1, end_line = 2 },
+        modified = { start_line = 1, end_line = 2 },
+        additions = 1, deletions = 1,
+      } },
+    }
+    local content = { ["a.lua"] = { old = file.original, new = file.modified } }
+    local p = plan.build({ file }, {}, "inline")
+    local painted = paint.render(p, { modified = wins.modified }, content)
+    -- Row 2 is the deletion (original content), row 3 the addition.
+    assert.is_true(#syntax_marks(painted.bufs.modified, 2) > 0,
+      "the deletion row must be highlighted from the original file's parse")
+    assert.is_true(#syntax_marks(painted.bufs.modified, 3) > 0)
+  end)
+
+  it("leaves separators and fillers unhighlighted", function()
+    local file = {
+      path = "a.lua", status = "M", filetype = "lua", binary = false,
+      original = { "local x = 1" },
+      modified = { "local x = 1", "local y = 2" },
+      hunks = { {
+        id = "a.lua:1", file = "a.lua", header = "@@ -1,0 +2,1 @@",
+        text = "@@ -1,0 +2,1 @@\n+local y = 2\n",
+        original = { start_line = 2, end_line = 2 },
+        modified = { start_line = 2, end_line = 3 },
+        additions = 1, deletions = 0,
+      } },
+    }
+    local content = { ["a.lua"] = { old = file.original, new = file.modified } }
+    local p = plan.build({ file }, {}, "side-by-side")
+    local painted = paint.render(p, wins, content)
+    assert.same({}, syntax_marks(painted.bufs.modified, 1), "separator row")
+    assert.same({}, syntax_marks(painted.bufs.original, 3), "filler row")
+  end)
+
+  it("survives a filetype with no parser", function()
+    local file = {
+      path = "a.weird", status = "M", filetype = "definitely_not_a_language",
+      binary = false,
+      original = { "a" }, modified = { "b" },
+      hunks = { {
+        id = "a.weird:1", file = "a.weird", header = "@@ -1,1 +1,1 @@",
+        text = "@@ -1,1 +1,1 @@\n-a\n+b\n",
+        original = { start_line = 1, end_line = 2 },
+        modified = { start_line = 1, end_line = 2 },
+        additions = 1, deletions = 1,
+      } },
+    }
+    local content = { ["a.weird"] = { old = file.original, new = file.modified } }
+    local p = plan.build({ file }, {}, "side-by-side")
+    assert.has_no.errors(function() paint.render(p, wins, content) end)
+  end)
+end)
