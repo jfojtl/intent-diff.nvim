@@ -4,7 +4,7 @@
 
 **Goal:** Replace codediff's per-file diff path and our own whole-intent preview with a single renderer intent-diff owns, so a file view is a render plan over one file and an intent view is a plan over several.
 
-**Architecture:** Three new modules under `lua/intentdiff/render/`. `plan.lua` is pure — file entries carrying full content plus a visible-hunk set become paired rows, a sparse row→`(file, line, side)` map, highlight spans and fold ranges. `paint.lua` is impure — a plan becomes two scratch buffers with extmarks, folds and scrollbind. `content.lua` caches both sides of every file. `view.lua` shrinks to owning the tab and two windows and stops creating a codediff session entirely.
+**Architecture:** Three new modules under `lua/intentdiff/render/`. `plan.lua` is pure — file entries carrying full content plus a visible-hunk set become paired rows, a sparse row→`(file, line, side)` map, highlight spans and fold ranges. `paint.lua` is impure — a plan becomes two scratch buffers with extmarks and folds; the panes are held aligned by structural row-for-row alignment, not native `scrollbind` (see the finished plugin's "Scrolling and alignment" README section for why). `content.lua` caches both sides of every file. `view.lua` shrinks to owning the tab and two windows and stops creating a codediff session entirely.
 
 **Tech Stack:** Lua, Neovim 0.10+ API, plenary.nvim busted specs, codediff.nvim — consumed only through `lua/intentdiff/view.lua` and `lua/intentdiff/render/*`, and only its three leaf modules (`core.diff`, `core.git`, `ui.inline`/`ui.highlights` helpers).
 
@@ -29,7 +29,7 @@
 
 **Create:**
 - `lua/intentdiff/render/plan.lua` — pure. Files + visible set → panes, map, spans, runs, folds.
-- `lua/intentdiff/render/paint.lua` — impure. Plan + two windows → buffers, extmarks, folds, scrollbind.
+- `lua/intentdiff/render/paint.lua` — impure. Plan + two windows → buffers, extmarks, folds, structural alignment (not scrollbind).
 - `lua/intentdiff/render/content.lua` — session-scoped `(revision, path) → lines` cache.
 - `tests/render_plan_spec.lua`, `tests/render_paint_spec.lua`, `tests/render_content_spec.lua`
 - `ATTRIBUTION.md`

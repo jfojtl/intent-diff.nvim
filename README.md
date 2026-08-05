@@ -4,9 +4,9 @@ Review a git diff grouped by *reason of change* instead of by file. A sidebar
 lists LLM-generated groups ("Rename UserService → AccountService", "Add retry
 logic", "Drive-by lint fixes"); each group contains the files it touches, and
 opening a file shows only that group's hunks — the rest of the file's diff is
-folded away. Rendering is delegated to
-[codediff.nvim](https://github.com/esmuellert/codediff.nvim); intent-diff only
-adds grouping, a sidebar, and group-scoped navigation on top of it.
+folded away. intent-diff renders its own diff panes, but leans on
+[codediff.nvim](https://github.com/esmuellert/codediff.nvim) to do it well —
+see "Built on codediff.nvim" below for exactly how.
 
 The sidebar below is the *real* output of `sidebar.layout()` (generated
 headlessly against a representative model, not hand-drawn — no column
@@ -36,6 +36,27 @@ The LLM never decides *what* changed, only how to *label* it: every hunk in
 the diff ends up in exactly one group or in the visible "Ungrouped" bucket —
 never silently dropped. Worst case with a bad LLM response is one boring
 Ungrouped group, degrading toward plain codediff, never below it.
+
+## Built on codediff.nvim
+
+intent-diff owns its own renderer, but that renderer runs on top of
+**[codediff.nvim](https://github.com/esmuellert/codediff.nvim)** by Yanuo Ma
+(MIT). Specifically: codediff's `libvscode-diff` — a C port of VSCode's own
+`defaultLinesDiffComputer` — is what gives intent-diff character-level
+highlighting inside a changed line, and its treesitter helper is what lets
+intent-diff syntax-highlight the synthetic multi-file buffers it builds.
+codediff's git plumbing also resolves every revision intent-diff reviews. This
+is a named runtime dependency, not vendored code, on purpose: install
+codediff.nvim and you can see exactly what it's doing underneath.
+
+**If you want a general-purpose diff, merge and git-history tool for Neovim,
+install [codediff.nvim](https://github.com/esmuellert/codediff.nvim) directly.**
+It is excellent, and intent-diff does not replace it — intent-diff does one
+narrow thing: it groups a diff by *intent* and gives you a review surface over
+those groups.
+
+Full credits, including VSCode and utf8proc upstream of codediff.nvim itself,
+in [ATTRIBUTION.md](ATTRIBUTION.md).
 
 ## Requirements
 
@@ -130,9 +151,14 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
     agentic = true,
   },
 
-  -- Lines of context around each hunk when computing folds. nil = follow
-  -- codediff's own diff.compact_context_lines setting.
-  context_lines = nil,
+  -- Lines of context kept around each visible hunk when computing folds.
+  context_lines = 3,
+
+  -- Above this many lines on either side, a file renders hunks-only instead
+  -- of its whole content, and says so on its separator (see "Previewing an
+  -- intent" below). Guards against a huge generated/vendored file blowing up
+  -- a diff pane.
+  line_budget = 20000,
 
   -- Width (columns) of the sidebar split.
   sidebar_width = 40,
@@ -189,16 +215,11 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   -- Cursor-driven navigation: moving the sidebar cursor onto a group or
   -- directory row shows that intent's complete diff in the diff panes, with
   -- a separator per file; moving it onto a file row renders that file's own
-  -- diff (see "Previewing an intent" below).
+  -- diff too (see "Previewing an intent" below).
   preview = {
     enabled = true,
     debounce_ms = 120,  -- cursor settle time before rendering, so scrolling
                          -- past rows doesn't thrash the panes
-    max_lines = 20000,  -- cap on a group/directory preview's length; the
-                         -- omitted count is stated
-    hover_opens_files = true, -- moving the cursor onto a file row renders
-                               -- its diff too; false requires <CR> instead
-                               -- and just restores the last-opened file
   },
 
   -- Review comments attached to diff lines and to whole intents, exported as
@@ -238,7 +259,8 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   keymaps = {
     -- The diff panes, and the whole-intent preview buffers.
     view = {
-      quit = "q",             -- preview buffers; the panes use codediff's own
+      quit = "q",             -- every diff pane; they are our own scratch
+                              -- buffers now, not a codediff session
       -- Show/hide the sidebar. Named after (and sharing a default with)
       -- codediff's keymaps.view.toggle_explorer, because our sidebar is that
       -- explorer's counterpart. Installed on the sidebar AND on the diff
@@ -249,6 +271,12 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       next_hunk = "]c",       -- group-scoped: only this intent's hunks
       prev_hunk = "[c",
       show_help = "g?",
+      -- The panes are read-only scratch buffers now; this is the only way
+      -- from one into the real, editable file, at the cursor's exact line.
+      -- Opens in a new tab, identically for a single-file and a whole-intent
+      -- view. No collision with the sidebar's own `gf` (goto_file) — a
+      -- different surface, a different buffer.
+      open_file = "gf",
     },
     -- The intent sidebar.
     sidebar = {
@@ -471,37 +499,40 @@ panes. What lands in the panes depends on the kind of row the cursor is on:
   restricted to the files under that directory.
 - **A file row renders that file's own diff** — folded to whichever group it
   belongs to, exactly like `<CR>` would show — while leaving focus in the
-  sidebar so you can keep browsing with `j`/`k`. This is
-  `preview.hover_opens_files`, on by default; set it to `false` to go back to
-  the older behavior, where hovering a file row just restores the panes to
-  whatever file was last opened via `<CR>`, and only `<CR>` renders it.
+  sidebar so you can keep browsing with `j`/`k`. This always happens; there is
+  no config knob to require `<CR>` instead.
 
-The group/directory preview is capped at `preview.max_lines`; a truncated
-preview's last line states how many more lines were omitted rather than
-silently cutting off.
+A file whose content runs past `line_budget` lines (either side) renders
+hunks-only instead of its whole content — the same fallback a single-file
+`<CR>` open would take — and its separator states why (`over line budget`)
+rather than silently ballooning the buffer.
 
-This is the real output of `preview.render()` (inline layout) for the same
-"Rename UserService to AccountService" group shown above:
+This is the same renderer a single-file `<CR>` uses — a whole-intent preview
+is just a plan over every file the intent touches instead of one — for the
+"Rename UserService to AccountService" group shown above. Each changed line
+renders as *plain text*, not a unified-diff `+`/`-` line; a removed and its
+replacement are separate real buffer rows, told apart by background color
+(`IntentDiffDelete` / `IntentDiffAdd`, annotated below since a code fence
+can't show color):
 
 ```
 ── src/api/routes.ts   M   +1 -1
-@@ -4,2 +4,2 @@
--import { UserService } from './user-service'
-+import { AccountService } from './account-service'
+import { UserService } from './user-service'       (removed)
+import { AccountService } from './account-service'  (added)
 ── src/services/account.ts   M   +1 -1
-@@ -12,3 +12,3 @@
--export class UserService {
-+export class AccountService {
+export class UserService {      (removed)
+export class AccountService {   (added)
    constructor(private db: Db) {}
 ```
 
-Inside the preview, `]c`/`[c` jump the cursor to the next/previous hunk
-header (no wraparound: at the first or last hunk they simply do nothing), and
-codediff's own layout-toggle key (`t` by default) flips the preview between
-inline and side-by-side exactly like it does for a normal diff — it restores
-the last-selected file, performs the ordinary layout toggle on it, and then
-re-renders the preview in the new layout. `q` closes the review tab from
-inside the preview too, same as from the sidebar.
+Inside the preview, `]c`/`[c` jump the cursor to the first row of the
+next/previous hunk (no wraparound: at the first or last hunk they simply do
+nothing — see "Keymaps" below for what "next" means across a multi-file
+intent), and codediff's own layout-toggle key (`t` by default) flips the
+preview between inline and side-by-side exactly like it does for a normal
+diff — it restores the last-selected file, performs the ordinary layout
+toggle on it, and then re-renders the preview in the new layout. `q` closes
+the review tab from inside the preview too, same as from the sidebar.
 
 ### Commenting on a preview
 
@@ -515,9 +546,9 @@ comment in the file, then hover its intent — it is there too.
 
 What still refuses, and why:
 
-- **A `── path` separator, a `@@` hunk header, a side-by-side filler row and
-  the truncation summary line.** These display no line of any file, so there
-  is nothing to attach to. The refusal says so and names the fix.
+- **A `── path` separator and a side-by-side filler row.** These display no
+  line of any file, so there is nothing to attach to. The refusal says so and
+  names the fix.
 - **A visual range covering two files.** A comment records one file; select
   within one file's diff instead. A range *inside* one file works, and a range
   in the inline layout takes its side from its first `+`/`-`/context row.
@@ -527,8 +558,9 @@ What still refuses, and why:
 File-level and whole-intent comments are not drawn in a preview (they hang off
 a file's line 1 and off a sidebar row respectively, neither of which the
 preview has), and a comment whose line falls outside what the preview renders
-— another intent's file, or past `preview.max_lines` — simply isn't drawn
-there. In every case the comment still exists and still exports.
+— another intent's file, or a line a `line_budget` hunks-only fallback
+dropped — simply isn't drawn there. In every case the comment still exists and
+still exports.
 
 ## Review comments
 
@@ -781,8 +813,7 @@ point the plugin's default is reasserted and the override must be reapplied.
 | `IntentDiffStatusD` | `Removed` | Status-gutter letter for a deleted file |
 | `IntentDiffStatusUntracked` | `Added` | Status-gutter letter for an untracked file |
 | `IntentDiffFileSeparator` | `Title` | A per-file `── path   status   +A -B` separator |
-| `IntentDiffPreviewHunk` | `Comment` | A preview's `@@ ... @@` hunk headers |
-| `IntentDiffFiller` | `Comment` | Filler rows padding the shorter side of a side-by-side preview |
+| `IntentDiffFiller` | `Comment` | Filler rows padding the shorter side of a side-by-side pane |
 | `IntentDiffAddChar` | *derived, see below* | Stronger background for the actually-changed words inside an added line |
 | `IntentDiffDeleteChar` | *derived, see below* | Stronger background for the actually-changed words inside a deleted line |
 | `IntentDiffSignAdd` | `Added` | Sign-column marker for an added line |
@@ -891,15 +922,22 @@ expands; it is unbound by default now that `zA` carries codediff's meaning.
 Resting the cursor on a row (no key press) also drives the diff panes — see
 "Previewing an intent" above.
 
-**Diff panes:** `]c` / `[c` (and codediff's own hunk keys) are group-scoped —
-they move only through the current group's hunks; at a file's last hunk in
-the group they roll over to the group's next file. codediff's inline↔side-by-side
-toggle keeps working; the fold filter re-applies after every toggle.
-`<leader>b` (`keymaps.view.toggle_sidebar`) and `g?` are also installed here,
-not just on the sidebar — since a sidebar-only key would be unreachable once
-the sidebar is hidden, the toggle works even when codediff's own layout-toggle
-key is disabled. Both work inside a whole-intent preview too — see "Previewing
-an intent" above.
+**Diff panes:**
+
+| Key | Action |
+|---|---|
+| `]c` / `[c` | Next / previous hunk of whatever is currently painted — a single file's own hunks, or every hunk of a whole-intent preview, in file order. No wraparound, and no reaching into a different file or group: at the last (or first) hunk on screen they simply do nothing. |
+| `gf` | Open the real file at the cursor's exact line, in a new tab. The only way from a pane's read-only scratch buffer into the editable file. |
+| `<leader>b` | Show or hide the sidebar (`keymaps.view.toggle_sidebar`) |
+| `g?` | Toggle the keymap cheatsheet |
+| `q` | Close the review tab. The panes are our own scratch buffers now, not a codediff session, so this is installed on all of them, not just a whole-intent preview. |
+
+codediff's own inline↔side-by-side toggle key keeps working; the fold filter
+re-applies after every toggle. `<leader>b` and `g?` are installed here, not
+just on the sidebar — since a sidebar-only key would be unreachable once the
+sidebar is hidden, the toggle works even when codediff's own layout-toggle key
+is disabled. All of the above work inside a whole-intent preview too — see
+"Previewing an intent" above.
 
 **Comments:** cross-surface by nature, installed on the diff panes, the
 whole-intent preview buffers and the sidebar — an intent comment is added from
@@ -957,7 +995,10 @@ write, so it can't grow unbounded across a long Neovim session.
 4. The first file opens on its own (`auto_open`, default on) as soon as
    there's something to show — no need to select anything: unrelated hunks
    are folded; `zo` peeks at them.
-5. `]c` at the last hunk of a file jumps to the group's next file.
+5. `]c` at the last hunk of the open file does nothing (no wraparound, no
+   rolling to the next file). Rest the cursor on the group row instead to
+   preview the whole intent — now `]c` walks every hunk across all its files,
+   in order, because they're all in the one plan that's on screen.
 6. Toggle inline view (codediff's key) — folds still filter to the group.
 7. `r` re-classifies; a second `:IntentDiff` on the same diff is instant (cache).
 8. In a pane, `<localleader>cn` on a changed line: the popup opens **already in
@@ -970,8 +1011,8 @@ write, so it can't grow unbounded across a long Neovim session.
    pane: the cursor walks between the two boxes and reports "no more comments
    in this file" at the ends. Press `]n` with the cursor in the **sidebar**:
    it must refuse ("comment navigation only works in a diff pane") and the
-   sidebar cursor must not move — a sidebar row is not a diff line, and with
-   `preview.hover_opens_files` on a stray jump there re-renders the panes.
+   sidebar cursor must not move — a sidebar row is not a diff line, and a
+   stray jump there re-renders the panes via the hover preview.
 10. `<localleader>ce` on a commented line edits it, `<localleader>cd` deletes
     it. Then, in another Neovim (or `:!`), delete most of the file's lines so
     a comment's line number is past the end, and reopen the review: the box

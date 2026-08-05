@@ -1042,14 +1042,6 @@ local function apply_hover(token)
   entry.hover_key = key
 
   if m.kind == "file" then
-    if not require("intentdiff.config").options.preview.hover_opens_files then
-      -- Put the last real file back when an intent is on screen; with a file
-      -- already there, the panes are right and there is nothing to restore to.
-      if showing_intent(entry) and entry.last_file then
-        show_one(entry, entry.last_file)
-      end
-      return
-    end
     -- Opening on the cursor marks the selection: a classification completing
     -- while the user browses must re-render their current file in place
     -- (refold_shown_file), not yank them to the first group. Hovering a GROUP

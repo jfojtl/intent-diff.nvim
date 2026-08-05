@@ -537,9 +537,8 @@ end
 --- Is `win` one of this review's diff panes? `]n`/`[n` are installed on the
 --- SIDEBAR as well (every comment key is, so the export keys are reachable from
 --- either surface), and a sidebar row number is not a diff line — jumping on it
---- moved the sidebar cursor to an arbitrary row, which with
---- `preview.hover_opens_files` on then re-rendered the panes to whatever intent
---- that row belongs to.
+--- would move the sidebar cursor to an arbitrary row, which hovering then
+--- re-renders the panes to whatever intent that row belongs to.
 local function in_diff_pane(tabpage, win)
   for _, w in ipairs(require("intentdiff.view").diff_wins(tabpage)) do
     if w == win then

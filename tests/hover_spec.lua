@@ -502,17 +502,6 @@ describe("sidebar hover preview", function()
         return entry.shown and entry.shown.file_entry or nil
       end, 10000))
     end)
-
-    it("restores instead of opening when hover_opens_files is false", function()
-      local tab, entry = open_ready({
-        preview = { enabled = true, debounce_ms = 10, hover_opens_files = false },
-      })
-      local before = entry.shown
-      hover(entry, file_rows(entry)[1].lnum)
-      vim.wait(400, function() return false end, 50)
-      local after = entry.shown
-      assert.equals(before and before.file_entry.path, after and after.file_entry.path)
-    end)
   end)
 
   describe("<CR> jumps into the diff", function()
@@ -588,9 +577,7 @@ describe("sidebar hover preview", function()
     end)
 
     it("renders and focuses a file that was not shown yet", function()
-      local tab, entry = open_ready({
-        preview = { enabled = true, debounce_ms = 10, hover_opens_files = false },
-      })
+      local tab, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
       local lnum = first_file_row(entry)
       local m = entry.sidebar.meta_at(lnum)
       local path = entry.model.groups[m.group_i].files[m.file_i].path

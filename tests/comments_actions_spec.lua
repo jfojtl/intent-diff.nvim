@@ -522,8 +522,8 @@ describe("comments actions", function()
     -- `]n`/`[n` are installed on the SIDEBAR too (all the comment keys are, so
     -- the export keys are reachable from either surface). Read there, the
     -- sidebar's ROW is not a diff line: the cursor jumped to an arbitrary row,
-    -- and with `preview.hover_opens_files` on by default that fired the hover
-    -- preview and re-rendered the panes to whatever intent that row belongs to.
+    -- and hovering always fires the preview, re-rendering the panes to
+    -- whatever intent that row belongs to.
     describe("navigation outside a diff pane", function()
       before_each(function()
         st.add({ file = "a.lua", line = 3, side = "new", type = "note", text = "x" })

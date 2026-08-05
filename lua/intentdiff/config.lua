@@ -22,7 +22,12 @@ M.defaults = {
     -- false to keep the prompt fully self-contained.
     agentic = true,
   },
-  context_lines = nil, -- nil = follow codediff's diff.compact_context_lines
+  context_lines = 3, -- lines of context kept around each visible hunk when folding
+  -- Above this many lines on either side, a file falls back to hunks-only
+  -- rendering instead of the whole file, stating why on its separator.
+  -- Replaces the old preview.max_lines, which capped a preview's total
+  -- output length instead of any one file's size.
+  line_budget = 20000,
   sidebar_width = 40,
   -- Wrap long lines in the diff panes. OFF, because the whole side-by-side
   -- design rests on row N left being row N right: a changed line that is 40
@@ -48,16 +53,13 @@ M.defaults = {
   added_file_split = { enabled = true, min_lines = 60, target_lines = 40 },
   cache_dir = vim.fn.stdpath("cache") .. "/intentdiff",
   log_file = vim.fn.stdpath("cache") .. "/intentdiff/intentdiff.log", -- diagnostics log; see :IntentDiffLog
-  -- Whole-intent preview: putting the cursor on a group or directory row in the
-  -- sidebar shows that intent's complete diff in the diff panes, with a
-  -- separator per file. debounce_ms keeps scrolling the sidebar from thrashing
-  -- the panes; max_lines caps a very large intent, stating what it omitted.
-  -- hover_opens_files: moving the sidebar cursor onto a file row renders that
-  -- file's diff, matching how group and directory rows already preview on the
-  -- cursor. debounce_ms is what keeps this cheap — holding `j` through a large
-  -- tree never settles, so it renders once, at rest. Set false to go back to
-  -- restoring the last selection on a file row and requiring <CR> to open.
-  preview = { enabled = true, debounce_ms = 120, max_lines = 20000, hover_opens_files = true },
+  -- Cursor-driven preview: putting the cursor on a group, directory or file
+  -- row in the sidebar shows that row's diff in the diff panes without a key
+  -- press — a file row renders its own diff, a group/directory row renders
+  -- every file it touches, each preceded by a separator. debounce_ms is what
+  -- keeps this cheap: holding `j` through a large tree never settles, so it
+  -- renders once, at rest, instead of thrashing the panes on every row.
+  preview = { enabled = true, debounce_ms = 120 },
   -- Review comments attached to diff lines and to whole intents, exported as
   -- Markdown for an agent to act on. See :IntentDiffCommentsYank / …Write.
   comments = {
