@@ -153,8 +153,11 @@ function M.layout(model)
     span(lnum, 0, #counts, "IntentDiffGroupStats")
     local col = #stats_line + 2
     for _, part in ipairs(parts) do
+      -- "Added"/"Removed" directly, not IntentDiffAdd/IntentDiffDelete:
+      -- those two are now background-only diff-pane row tints (see
+      -- highlight.lua), which would leave this count text uncoloured.
       span(lnum, col, col + #part,
-        part:sub(1, 1) == "+" and "IntentDiffAdd" or "IntentDiffDelete")
+        part:sub(1, 1) == "+" and "Added" or "Removed")
       col = col + #part + 1
     end
 
@@ -193,8 +196,10 @@ function M.layout(model)
         end
         local scol = #body + 2
         for _, part in ipairs(row_parts) do
+          -- "Added"/"Removed", not IntentDiffAdd/IntentDiffDelete: see the
+          -- comment on the group-level stats span above.
           span(rnum, scol, scol + #part,
-            part:sub(1, 1) == "+" and "IntentDiffAdd" or "IntentDiffDelete")
+            part:sub(1, 1) == "+" and "Added" or "Removed")
           scol = scol + #part + 1
         end
       end

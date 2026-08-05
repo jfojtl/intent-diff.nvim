@@ -159,8 +159,11 @@ describe("sidebar.layout", function()
       assert.is_true(span.col_end <= #lines[span.line])
       assert.is_true(span.col_start < span.col_end)
     end
-    assert.is_true(groups.IntentDiffAdd, "expected an IntentDiffAdd span")
-    assert.is_true(groups.IntentDiffDelete, "expected an IntentDiffDelete span")
+    -- "Added"/"Removed" directly, not IntentDiffAdd/IntentDiffDelete: those
+    -- are now background-only diff-pane row tints (see highlight.lua) and
+    -- would leave this count text uncoloured.
+    assert.is_true(groups.Added, "expected an Added span")
+    assert.is_true(groups.Removed, "expected a Removed span")
     assert.is_true(groups.IntentDiffGroupTitle, "expected a title span")
   end)
 

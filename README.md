@@ -735,8 +735,8 @@ point the plugin's default is reasserted and the override must be reapplied.
 |---|---|---|
 | `IntentDiffGroupTitle` | `Title` | A group's (wrapped) title text |
 | `IntentDiffGroupStats` | `Comment` | A group's `N hunks · M files` stats line |
-| `IntentDiffAdd` | `Added` | `+N` addition counts, and `+`-prefixed preview lines |
-| `IntentDiffDelete` | `Removed` | `-N` deletion counts, and `-`-prefixed preview lines |
+| `IntentDiffAdd` | *derived, see below* | Whole-row background tint for an added line in a diff pane |
+| `IntentDiffDelete` | *derived, see below* | Whole-row background tint for a deleted line in a diff pane |
 | `IntentDiffDirectory` | `Directory` | A directory row's name in the file tree |
 | `IntentDiffIndent` | `Comment` | The indentation before a nested tree row |
 | `IntentDiffStatusA` | `Added` | Status-gutter letter for an added file |
@@ -746,8 +746,8 @@ point the plugin's default is reasserted and the override must be reapplied.
 | `IntentDiffFileSeparator` | `Title` | A per-file `── path   status   +A -B` separator |
 | `IntentDiffPreviewHunk` | `Comment` | A preview's `@@ ... @@` hunk headers |
 | `IntentDiffFiller` | `Comment` | Filler rows padding the shorter side of a side-by-side preview |
-| `IntentDiffAddChar` | `DiffText` | Character-level highlight for an added range within a changed line |
-| `IntentDiffDeleteChar` | `DiffText` | Character-level highlight for a deleted range within a changed line |
+| `IntentDiffAddChar` | *derived, see below* | Stronger background for the actually-changed words inside an added line |
+| `IntentDiffDeleteChar` | *derived, see below* | Stronger background for the actually-changed words inside a deleted line |
 | `IntentDiffSignAdd` | `Added` | Sign-column marker for an added line |
 | `IntentDiffSignDelete` | `Removed` | Sign-column marker for a deleted line |
 | `IntentDiffCommentNote` | `DiagnosticHint` | Note sign and comment-box border |
@@ -758,6 +758,27 @@ point the plugin's default is reasserted and the override must be reapplied.
 | `IntentDiffCommentSuggestionLine` | `CursorLine` | …suggestion |
 | `IntentDiffCommentIssueLine` | `CursorLine` | …issue |
 | `IntentDiffCommentPraiseLine` | `CursorLine` | …praise |
+
+**`IntentDiffAdd` / `IntentDiffDelete` / `IntentDiffAddChar` /
+`IntentDiffDeleteChar` are not links** — every other group in the table above
+is `nvim_set_hl(0, name, { link = target, default = true })`, but these four
+render as coloured text under a link (`Added`/`Removed`/`DiffText` are
+foreground groups in essentially every colourscheme), which is backwards for
+a diff pane: it makes a changed *line* read as coloured text instead of a
+tinted row, and it makes an added and a deleted *word* look identical, since
+both linked to the same `DiffText`. Instead they are computed, GitHub-PR
+style: `IntentDiffAdd`/`IntentDiffDelete` set only a `bg` (no `fg`, so
+treesitter's own syntax colours keep showing through), taken from the active
+colourscheme's own `DiffAdd`/`DiffDelete` background; `IntentDiffAddChar`/
+`IntentDiffDeleteChar` are the same colour pushed further from the editor
+background — brighter on a dark colourscheme, darker on a light one, since
+either direction reads as "more saturated than the row it sits in" — so the
+words that actually changed stand out inside the tinted row. A colourscheme
+that defines neither `DiffAdd` nor `DiffDelete` falls back to a fixed
+GitHub-style tint chosen by `'background'` rather than leaving the group
+undefined. Recomputed on every `:colorscheme`, same as every other group in
+this table, and set with `default = true` too — an explicit override you set
+yourself always wins, exactly as described above.
 
 The eight comment groups are derived from each type's `key`, not hand-listed
 per type: `IntentDiffComment` plus the key with its first letter capitalised,
