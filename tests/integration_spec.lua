@@ -1584,11 +1584,8 @@ describe("comments in a review tab", function()
     -- A plain working-tree review (branch-keyed) and a HEAD~1-pinned one
     -- (revision-pair-keyed): two tabs, two keys.
     local tab_a, entry_a = open("")
-    -- The second `:IntentDiff` is issued from an ordinary tab, as a user does.
-    -- Issuing it from inside the first review's pane cannot work at all:
-    -- M.open resolves the git root from the current buffer's name, and a
-    -- codediff pane's name is a `codediff://` URI — a pre-existing limitation,
-    -- unrelated to comment scoping.
+    -- The second `:IntentDiff` is issued from an ordinary tab, as a user
+    -- would, rather than from inside the first review's own pane.
     vim.cmd("tabnew")
     local scratch_tab = vim.api.nvim_get_current_tabpage()
     local tab_b, entry_b = open("HEAD~1")
