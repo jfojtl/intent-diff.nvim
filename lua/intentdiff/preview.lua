@@ -111,7 +111,7 @@ end
 local function render_inline(group)
   local pane, hunk_lines = new_pane(), {}
   for _, file in ipairs(ordered_files(group)) do
-    pane.add(separator(file), "IntentDiffPreviewFile")
+    pane.add(separator(file), "IntentDiffFileSeparator")
     for _, hunk in ipairs(file.hunks or {}) do
       hunk_lines[#hunk_lines + 1] = pane.add(hunk.header, "IntentDiffPreviewHunk")
       local old_line, new_line = start_lines(hunk)
@@ -204,8 +204,8 @@ local function render_side_by_side(group)
   local original, modified, hunk_lines = new_pane(), new_pane(), {}
   for _, file in ipairs(ordered_files(group)) do
     local text = separator(file)
-    original.add(text, "IntentDiffPreviewFile")
-    modified.add(text, "IntentDiffPreviewFile")
+    original.add(text, "IntentDiffFileSeparator")
+    modified.add(text, "IntentDiffFileSeparator")
     for _, hunk in ipairs(file.hunks or {}) do
       original.add(hunk.header, "IntentDiffPreviewHunk")
       hunk_lines[#hunk_lines + 1] = modified.add(hunk.header, "IntentDiffPreviewHunk")
@@ -264,7 +264,7 @@ local function truncate(panes, max_lines, hunk_lines)
       return s.line < limit
     end, pane.highlights)
     pane.highlights[#pane.highlights + 1] =
-      { line = limit, col_start = 0, col_end = WHOLE_LINE, hl = "IntentDiffPreviewFile" }
+      { line = limit, col_start = 0, col_end = WHOLE_LINE, hl = "IntentDiffFileSeparator" }
   end
   return vim.tbl_filter(function(lnum)
     return lnum < limit

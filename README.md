@@ -743,9 +743,13 @@ point the plugin's default is reasserted and the override must be reapplied.
 | `IntentDiffStatusM` | `Changed` | Status-gutter letter for a modified file |
 | `IntentDiffStatusD` | `Removed` | Status-gutter letter for a deleted file |
 | `IntentDiffStatusUntracked` | `Added` | Status-gutter letter for an untracked file |
-| `IntentDiffPreviewFile` | `Title` | A preview's per-file `── path   status   +A -B` separator |
+| `IntentDiffFileSeparator` | `Title` | A per-file `── path   status   +A -B` separator |
 | `IntentDiffPreviewHunk` | `Comment` | A preview's `@@ ... @@` hunk headers |
 | `IntentDiffFiller` | `Comment` | Filler rows padding the shorter side of a side-by-side preview |
+| `IntentDiffAddChar` | `DiffText` | Character-level highlight for an added range within a changed line |
+| `IntentDiffDeleteChar` | `DiffText` | Character-level highlight for a deleted range within a changed line |
+| `IntentDiffSignAdd` | `Added` | Sign-column marker for an added line |
+| `IntentDiffSignDelete` | `Removed` | Sign-column marker for a deleted line |
 | `IntentDiffCommentNote` | `DiagnosticHint` | Note sign and comment-box border |
 | `IntentDiffCommentSuggestion` | `DiagnosticInfo` | Suggestion sign and comment-box border |
 | `IntentDiffCommentIssue` | `DiagnosticWarn` | Issue sign and comment-box border |

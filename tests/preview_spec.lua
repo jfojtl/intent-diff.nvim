@@ -97,7 +97,7 @@ describe("preview.render inline", function()
     assert.is_true(seen.IntentDiffAdd)
     assert.is_true(seen.IntentDiffDelete)
     assert.is_true(seen.IntentDiffPreviewHunk)
-    assert.is_true(seen.IntentDiffPreviewFile)
+    assert.is_true(seen.IntentDiffFileSeparator)
   end)
 end)
 

@@ -14,7 +14,7 @@ describe("highlight", function()
       "IntentDiffGroupTitle", "IntentDiffGroupStats", "IntentDiffAdd",
       "IntentDiffDelete", "IntentDiffDirectory", "IntentDiffIndent",
       "IntentDiffStatusA", "IntentDiffStatusM", "IntentDiffStatusD",
-      "IntentDiffStatusUntracked", "IntentDiffPreviewFile",
+      "IntentDiffStatusUntracked", "IntentDiffFileSeparator",
       "IntentDiffPreviewHunk", "IntentDiffFiller",
     }) do
       assert.is_string(hl.links[name], name .. " must be defined")
@@ -98,5 +98,25 @@ describe("highlight comments", function()
     assert.has_no_errors(function()
       hl.ensure()
     end)
+  end)
+end)
+
+describe("highlight groups for the unified renderer", function()
+  it("defines the separator, character and sign groups", function()
+    require("intentdiff.highlight").ensure()
+    for _, name in ipairs({
+      "IntentDiffFileSeparator",
+      "IntentDiffAddChar", "IntentDiffDeleteChar",
+      "IntentDiffSignAdd", "IntentDiffSignDelete",
+    }) do
+      local hl = vim.api.nvim_get_hl(0, { name = name })
+      assert.truthy(hl and next(hl) ~= nil, name .. " is not defined")
+    end
+  end)
+
+  it("no longer defines the old preview-file group", function()
+    require("intentdiff.highlight").ensure()
+    local hl = vim.api.nvim_get_hl(0, { name = "IntentDiffPreviewFile" })
+    assert.is_true(hl == nil or next(hl) == nil, "IntentDiffPreviewFile should be gone")
   end)
 end)
