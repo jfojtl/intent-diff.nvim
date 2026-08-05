@@ -14,6 +14,94 @@ local function cd_inline()
   return nil
 end
 
+--- codediff.core.diff, if the plugin (and its platform's C library) is
+--- installed. Guarded with pcall so a missing binary degrades to no
+--- character highlighting instead of erroring.
+local function cd_diff()
+  local ok, mod = pcall(require, "codediff.core.diff")
+  if ok then
+    return mod
+  end
+  return nil
+end
+
+--- compute_diff returns 1-based UTF-16 columns (VSCode semantics); extmarks
+--- want 0-based byte columns.
+---
+--- Neovim >=0.11 deprecated the pre-0.11 vim.str_byteindex(s, col16, true)
+--- form in favour of vim.str_byteindex(s, encoding, index, strict_indexing).
+--- Verified empirically on this build (v0.12.4): the old 3-arg call still
+--- works and returns the right byte offset, but it routes through
+--- vim.deprecate (confirmed by wrapping vim.deprecate and observing it
+--- fire), so it is reimplemented here with the current signature instead.
+--- strict_indexing = false so an index at or past the end of the line (the
+--- exclusive end_col of a change that reaches the end of the line) clamps
+--- to #line rather than raising.
+local function utf16_to_byte(line, col16)
+  if not line or col16 <= 1 then
+    return 0
+  end
+  local ok, byte = pcall(vim.str_byteindex, line, "utf-16", col16 - 1, false)
+  if ok then
+    return math.min(byte, #line)
+  end
+  return math.min(col16 - 1, #line)
+end
+
+--- Character ranges inside each changed run, placed on the rows plan.lua
+--- recorded for that run. compute_diff only ever runs INSIDE a region git
+--- already decided is changed, so the two algorithms can never disagree about
+--- line pairing.
+local function paint_chars(bufs, plan)
+  local diff = cd_diff()
+  if not diff then
+    return
+  end
+  for _, run in ipairs(plan.runs) do
+    if #run.minus > 0 and #run.plus > 0 then
+      local ok, result = pcall(diff.compute_diff, run.minus, run.plus, {})
+      if ok and result and result.changes then
+        for _, change in ipairs(result.changes) do
+          for _, inner in ipairs(change.inner_changes or {}) do
+            -- Original side.
+            local o = inner.original
+            local orow = run.minus_rows[o.start_line]
+            if orow and o.start_line == o.end_line then
+              local target_buf, target_pane
+              if plan.layout == "inline" then
+                target_buf, target_pane = bufs.modified, plan.modified
+              else
+                target_buf, target_pane = bufs.original, plan.original
+              end
+              if target_buf and target_pane then
+                local text = target_pane.lines[orow]
+                local sc = utf16_to_byte(text, o.start_col)
+                local ec = utf16_to_byte(text, o.end_col)
+                if ec > sc then
+                  pcall(vim.api.nvim_buf_set_extmark, target_buf, M.ns, orow - 1, sc,
+                    { end_col = ec, hl_group = "IntentDiffDeleteChar", priority = 100 })
+                end
+              end
+            end
+            -- Modified side.
+            local m = inner.modified
+            local mrow = run.plus_rows[m.start_line]
+            if mrow and m.start_line == m.end_line and bufs.modified then
+              local text = plan.modified.lines[mrow]
+              local sc = utf16_to_byte(text, m.start_col)
+              local ec = utf16_to_byte(text, m.end_col)
+              if ec > sc then
+                pcall(vim.api.nvim_buf_set_extmark, bufs.modified, M.ns, mrow - 1, sc,
+                  { end_col = ec, hl_group = "IntentDiffAddChar", priority = 100 })
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
 --- Per-window visible-row sets, read by M.foldexpr.
 local folded_by_win = {}
 
@@ -186,6 +274,8 @@ function M.render(plan, wins, content)
   bufs.modified = pane_buf(plan.modified)
   paint_syntax(bufs.modified, plan.modified, syntax)
   vim.api.nvim_win_set_buf(wins.modified, bufs.modified)
+
+  paint_chars(bufs, plan)
 
   for side, win in pairs({ original = wins.original, modified = wins.modified }) do
     if (side ~= "original" or two_pane) and win and vim.api.nvim_win_is_valid(win) then

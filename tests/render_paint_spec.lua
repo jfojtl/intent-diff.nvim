@@ -286,3 +286,107 @@ describe("paint syntax highlighting", function()
       "the fallback row must be looked up by its real file line (5), not its pane row (2)")
   end)
 end)
+
+describe("paint character highlighting", function()
+  local wins, tab
+  before_each(function() wins, tab = two_wins() end)
+  after_each(function()
+    if vim.api.nvim_tabpage_is_valid(tab) then vim.cmd("tabclose!") end
+  end)
+
+  local function char_marks(buf, row, group)
+    local out = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(
+        buf, paint.ns, { row - 1, 0 }, { row - 1, -1 }, { details = true })) do
+      if m[4].hl_group == group then
+        out[#out + 1] = { m[3], m[4].end_col }
+      end
+    end
+    return out
+  end
+
+  local function one_word_changed()
+    return {
+      path = "a.lua", status = "M", filetype = "lua", binary = false,
+      original = { "local alpha = 1" },
+      modified = { "local omega = 1" },
+      hunks = { {
+        id = "a.lua:1", file = "a.lua", header = "@@ -1,1 +1,1 @@",
+        text = "@@ -1,1 +1,1 @@\n-local alpha = 1\n+local omega = 1\n",
+        original = { start_line = 1, end_line = 2 },
+        modified = { start_line = 1, end_line = 2 },
+        additions = 1, deletions = 1,
+      } },
+    }
+  end
+
+  it("highlights only the changed word, not the whole line", function()
+    local p = plan.build({ one_word_changed() }, {}, "side-by-side")
+    local painted = paint.render(p, wins, nil)
+    local adds = char_marks(painted.bufs.modified, 2, "IntentDiffAddChar")
+    assert.is_true(#adds > 0, "no character highlight on the changed line")
+    local start_col, end_col = adds[1][1], adds[1][2]
+    assert.is_true(start_col >= 6, "highlight should start at 'omega', not column 0")
+    assert.is_true(end_col <= #"local omega = 1")
+  end)
+
+  it("highlights the deleted word on the original side", function()
+    local p = plan.build({ one_word_changed() }, {}, "side-by-side")
+    local painted = paint.render(p, wins, nil)
+    assert.is_true(#char_marks(painted.bufs.original, 2, "IntentDiffDeleteChar") > 0)
+  end)
+
+  it("places character highlights in inline layout too", function()
+    local p = plan.build({ one_word_changed() }, {}, "inline")
+    local painted = paint.render(p, { modified = wins.modified }, nil)
+    assert.is_true(#char_marks(painted.bufs.modified, 2, "IntentDiffDeleteChar") > 0)
+    assert.is_true(#char_marks(painted.bufs.modified, 3, "IntentDiffAddChar") > 0)
+  end)
+
+  it("converts UTF-16 columns to byte columns", function()
+    local file = {
+      path = "a.lua", status = "M", filetype = "lua", binary = false,
+      original = { '-- 日本語 alpha' },
+      modified = { '-- 日本語 omega' },
+      hunks = { {
+        id = "a.lua:1", file = "a.lua", header = "@@ -1,1 +1,1 @@",
+        text = "@@ -1,1 +1,1 @@\n--- 日本語 alpha\n+-- 日本語 omega\n",
+        original = { start_line = 1, end_line = 2 },
+        modified = { start_line = 1, end_line = 2 },
+        additions = 1, deletions = 1,
+      } },
+    }
+    local p = plan.build({ file }, {}, "side-by-side")
+    local painted = paint.render(p, wins, nil)
+    local adds = char_marks(painted.bufs.modified, 2, "IntentDiffAddChar")
+    assert.is_true(#adds > 0)
+    -- "-- 日本語 " is 3 + 9 + 1 = 13 bytes, so a byte-correct highlight starts
+    -- at or after 13. A raw UTF-16 column would land near 6.
+    assert.is_true(adds[1][1] >= 10,
+      "UTF-16 column was not converted to a byte column")
+  end)
+
+  it("degrades to no character highlights when the C library is unavailable", function()
+    local real = package.loaded["codediff.core.diff"]
+    package.loaded["codediff.core.diff"] = nil
+    package.preload["codediff.core.diff"] = function() error("unavailable") end
+    package.loaded["intentdiff.render.paint"] = nil
+
+    -- Restoration MUST happen even if the body errors or an assertion fails,
+    -- or a corrupted package.loaded/package.preload leaks into every later
+    -- spec in this sequential run.
+    local ok, err = pcall(function()
+      local fresh = require("intentdiff.render.paint")
+      local p = plan.build({ one_word_changed() }, {}, "side-by-side")
+      assert.has_no.errors(function() fresh.render(p, wins, nil) end)
+    end)
+
+    package.preload["codediff.core.diff"] = nil
+    package.loaded["codediff.core.diff"] = real
+    package.loaded["intentdiff.render.paint"] = nil
+
+    if not ok then
+      error(err, 0)
+    end
+  end)
+end)
