@@ -1,8 +1,8 @@
 -- Installing buffer-local keys from the namespaced `config.keymaps` table.
 --
--- Every surface (sidebar, diff panes, preview buffers) binds keys the same
--- way: look an action up by name, skip it when it is false/nil, and accept
--- either a single lhs or a list of them. This module is that one way, so the
+-- Both surfaces (the sidebar and the diff panes) bind keys the same way: look
+-- an action up by name, skip it when it is false/nil, and accept either a
+-- single lhs or a list of them. This module is that one way, so the
 -- list/disabled handling can't drift between call sites.
 local M = {}
 

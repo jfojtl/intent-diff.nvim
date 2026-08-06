@@ -358,7 +358,7 @@ local function classify_and_render(token, opts)
   local provider, label = resolve_provider()
   entry.model = flat_model(inventory, "loading")
   entry.sidebar.update(entry.model)
-  -- Real content immediately instead of blank codediff placeholders: the
+  -- Real content immediately instead of empty scratch panes: the
   -- flat "All changes" group holds every hunk, so its first file's diff is
   -- complete on its own even before classification groups anything.
   auto_open_first(token)
@@ -521,8 +521,8 @@ end
 --- either gate; it only asks for the focus restore to the sidebar, so the
 --- user can keep navigating group/file rows immediately once the auto-opened
 --- content is ready (see task README / report). Manual selection (opts.auto
---- unset) leaves focus wherever codediff's own render left it, unless
---- opts.focus_diff or opts.restore_focus says otherwise.
+--- unset) leaves focus wherever the render left it, unless opts.focus_diff or
+--- opts.restore_focus says otherwise.
 ---
 --- entry.render_seq: bumped by every open_file() call AND by select_file's
 --- same_as_shown short-circuit (which decides focus without calling
@@ -687,8 +687,8 @@ select_file = function(token, group_i, file_i, opts)
     entry.hover_key = ("f%d:%d"):format(group_i, file_i)
   end
   -- <CR> on the file the cursor already rendered is a pure focus change: the
-  -- panes are already correct, so re-rendering would spend a codediff diff to
-  -- produce identical output.
+  -- panes are already correct, so re-rendering would rebuild the same plan and
+  -- repaint the same buffers to produce identical output.
   --
   -- Guarded on NOT showing_intent: with a whole intent on screen, entry.shown
   -- names the group rather than a file, so same_as_shown answers false and the
@@ -961,11 +961,11 @@ function M.toggle_sidebar(tabpage)
 end
 
 --- Sessions whose tab was closed behind our back (`:tabclose`, `:q` of the
---- last window in the tab, codediff's own `q` keymap) used to linger in
---- `sessions` forever: the entry kept the (dead) model, navigation kept its
---- per-tab ctx, and view kept the painted generation for the tab, so a
---- recycled tab id could inherit stale render state. TabClosed fires after the
---- tab is gone and only reports its NUMBER, so match by validity instead.
+--- last window in the tab, our own `q` keymap — view.VIEW_DESCS.quit) used to
+--- linger in `sessions` forever: the entry kept the (dead) model and view kept
+--- the painted generation for the tab, so a recycled tab id could inherit
+--- stale render state. TabClosed fires after the tab is gone and only reports
+--- its NUMBER, so match by validity instead.
 local tab_augroup
 local function ensure_tab_augroup()
   if tab_augroup then

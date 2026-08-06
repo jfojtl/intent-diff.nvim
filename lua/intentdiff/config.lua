@@ -36,9 +36,9 @@ M.defaults = {
   -- height in each pane. Set true to wrap anyway and give up that alignment.
   pane_wrap = false,
   icons = true, -- file icons from nvim-web-devicons when it is installed
-  -- Auto-open the first file worth looking at, instead of leaving codediff's
-  -- empty placeholder panes until the user presses <CR>: the first file of
-  -- the flat "All changes" group while classification is still running, then
+  -- Auto-open the first file worth looking at, instead of leaving the panes
+  -- empty until the user presses <CR>: the first file of the flat
+  -- "All changes" group while classification is still running, then
   -- the first file of the first real group once it completes — but only if
   -- the user hasn't already selected (or navigated to) a file of their own.
   -- Set to false to keep the sidebar-only-until-<CR> behavior.
@@ -83,7 +83,7 @@ M.defaults = {
   -- exactly as the plugin already handles codediff's toggle_layout key being
   -- disabled. An action may also be a LIST of keys, all bound to it.
   keymaps = {
-    -- Diff panes, and the whole-intent preview buffers.
+    -- The diff panes — one file or a whole intent, they are the same buffers.
     view = {
       quit = "q",
       -- Named after codediff's keymaps.view.toggle_explorer, and deliberately
@@ -133,10 +133,9 @@ M.defaults = {
       -- :IntentDiffToggleAll.
       fold_toggle_all = false,
     },
-    -- Review comments. Cross-surface by nature: installed on the diff panes,
-    -- the whole-intent preview buffers AND the sidebar, since an intent
-    -- comment is added from a group row and a line comment from a pane or a
-    -- preview row.
+    -- Review comments. Cross-surface by nature: installed on the diff panes
+    -- AND the sidebar, since an intent comment is added from a group row and a
+    -- line comment from a pane row.
     comments = {
       add_comment = "<localleader>cc", -- pick the type in the popup
       add_note = "<localleader>cn",

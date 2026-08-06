@@ -677,13 +677,6 @@ function M.toggle_layout(tabpage, opts)
   })
 end
 
---- Fold expression for the panes. Delegates to the renderer, which owns the
---- per-window visible-row sets; kept here because window options set by earlier
---- generations may still name `v:lua.require'intentdiff.view'.foldexpr()`.
-function M.foldexpr()
-  return require("intentdiff.render.paint").foldexpr()
-end
-
 -- --------------------------------------------------------------- keymaps ---
 
 --- Descriptions for the `keymaps.view` actions, shown in :map / which-key.

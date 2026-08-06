@@ -86,13 +86,14 @@ local function build_sections(keymaps)
     { vkm.toggle_sidebar, "Show/hide the sidebar (works in both)" },
     { vkm.quit, "Close the review" },
   }
-  -- codediff owns this key; we only re-bind it so the group fold filter
-  -- survives the toggle. Show it as the shared key it is.
+  -- The layout toggle is ours outright — view.toggle_layout re-renders our own
+  -- plan in the other layout. We borrow only the KEY from codediff, so a user
+  -- who rebound it there does not have to rebind it twice.
   local ok, cd_config = pcall(require, "codediff.config")
   local cd_toggle = ok and cd_config.options and cd_config.options.keymaps
     and cd_config.options.keymaps.view and cd_config.options.keymaps.view.toggle_layout
   if cd_toggle then
-    view_items[#view_items + 1] = { cd_toggle, "Toggle inline/side-by-side (codediff)" }
+    view_items[#view_items + 1] = { cd_toggle, "Toggle inline/side-by-side" }
   end
   view_items[#view_items + 1] = { vkm.show_help, "Toggle this help" }
   local view = section("DIFF PANES", view_items)

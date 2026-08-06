@@ -4,8 +4,11 @@
 -- puts the result into buffers.
 --
 -- Both panes always have the SAME line count, padded with real filler rows.
--- That is what makes a fold range identical on both sides and lets plain
--- scrollbind hold the panes together.
+-- That is what makes a fold range identical on both sides, and it is what
+-- lets paint.lua align the panes STRUCTURALLY — buffer row N on the left is
+-- buffer row N on the right, so it can mirror the absolute view instead of
+-- native `scrollbind`'s relative deltas (paint.lua sets `scrollbind = false`
+-- explicitly to keep the two from fighting).
 --
 -- `map` is row -> { file, line, side }, the real coordinate the row displays.
 -- It is what makes every surface commentable without a preview ever becoming a
@@ -242,8 +245,14 @@ local function file_rows(file, runs)
   -- A file whose modified side is longer than any hunk accounted for (which
   -- cannot happen for well-formed diffs, but a truncated `git show` would do
   -- it) still renders its tail rather than silently dropping lines.
+  --
+  -- `changed = true`, not false: these rows have no original-side counterpart,
+  -- so they are new-side-only. Inline already painted them IntentDiffAdd (its
+  -- 1-for-1-context branch requires both sides present); side-by-side is the
+  -- one that read `changed == false` and gave the empty original cell no
+  -- IntentDiffFiller at all — an unhighlighted blank sitting among fillers.
   while m <= #mod do
-    rows[#rows + 1] = { right = mod[m], new_line = m, changed = false }
+    rows[#rows + 1] = { right = mod[m], new_line = m, changed = true }
     m = m + 1
   end
 
@@ -442,9 +451,8 @@ function M.build(files, visible, layout, opts)
           -- no content on either side and simply is not emitted here: inline
           -- has no second pane to stay level with.
           if row.left ~= nil and row.right ~= nil and not row.changed then
-            local r = modified.add(row.right, nil,
+            modified.add(row.right, nil,
               { file = file.path, line = row.new_line, side = "new" })
-            _ = r
           else
             if row.left ~= nil then
               local r = modified.add(row.left, "IntentDiffDelete",
