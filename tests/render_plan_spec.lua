@@ -652,3 +652,141 @@ describe("plan.build fallback", function()
     assert.is_false(is_folded(p, 2), "a.lua's separator")
   end)
 end)
+
+describe("the equal-pane-line-count invariant", function()
+  -- Everything downstream rests on this: `folds` is ONE list of row ranges for
+  -- the whole plan, `marks.file_anchors` scans both panes and treats a row as
+  -- meaning the same thing on either, `marks.align_panes` keys its padding on
+  -- ROWS, and paint.lua's absolute scroll sync copies a topline straight
+  -- across. All of that is valid only while buffer row N on the left IS buffer
+  -- row N on the right.
+  --
+  -- It had exactly one test, on a single-file `M` plan — the one shape where
+  -- the row loop pairs every row 1-for-1 and nothing can go wrong. Each other
+  -- file kind takes a DIFFERENT branch: `A` is all-filler on the left, `D` is
+  -- all-filler on the right, a binary file skips the row loop entirely and
+  -- emits only its separator, and a fallback file emits hunk bodies with no
+  -- whole-file context around them.
+  local function mixed_files()
+    return {
+      -- M: 1-for-1 change.
+      {
+        path = "a.lua", status = "M", filetype = "lua", binary = false,
+        original = { "one", "two", "three" },
+        modified = { "one", "TWO", "three" },
+        hunks = { {
+          id = "a.lua:1", file = "a.lua", header = "@@ -2,1 +2,1 @@",
+          text = "@@ -2,1 +2,1 @@\n-two\n+TWO\n",
+          original = { start_line = 2, end_line = 3 },
+          modified = { start_line = 2, end_line = 3 },
+          additions = 1, deletions = 1,
+        } },
+      },
+      -- A: nothing on the original side at all.
+      {
+        path = "new.lua", status = "A", filetype = "lua", binary = false,
+        original = {}, modified = { "fresh", "code" },
+        hunks = { {
+          id = "new.lua:1", file = "new.lua", header = "@@ -0,0 +1,2 @@",
+          text = "@@ -0,0 +1,2 @@\n+fresh\n+code\n",
+          original = { start_line = 1, end_line = 1 },
+          modified = { start_line = 1, end_line = 3 },
+          additions = 2, deletions = 0,
+        } },
+      },
+      -- D: nothing on the modified side at all.
+      {
+        path = "gone.lua", status = "D", filetype = "lua", binary = false,
+        original = { "bye", "now", "then" }, modified = {},
+        hunks = { {
+          id = "gone.lua:1", file = "gone.lua", header = "@@ -1,3 +0,0 @@",
+          text = "@@ -1,3 +0,0 @@\n-bye\n-now\n-then\n",
+          original = { start_line = 1, end_line = 4 },
+          modified = { start_line = 1, end_line = 1 },
+          additions = 0, deletions = 3,
+        } },
+      },
+      -- Binary: separator only, no row loop.
+      { path = "logo.png", status = "M", filetype = "", binary = true,
+        original = {}, modified = {}, hunks = {} },
+      -- Fallback: content could not be fetched, so hunk bodies only.
+      {
+        path = "unfetched.lua", status = "M", filetype = "lua", binary = false,
+        original = nil, modified = nil,
+        hunks = { {
+          id = "unfetched.lua:1", file = "unfetched.lua", header = "@@ -4,2 +4,2 @@",
+          text = "@@ -4,2 +4,2 @@\n ctx\n-old line\n+new line\n",
+          original = { start_line = 4, end_line = 6 },
+          modified = { start_line = 4, end_line = 6 },
+          additions = 1, deletions = 1,
+        } },
+      },
+    }
+  end
+
+  --- Every file kind really did contribute rows, so an equal-height assertion
+  --- can never pass by both panes being empty or by a file being dropped.
+  local function assert_every_file_rendered(p)
+    assert.equals(5, #p.files)
+    local seen = {}
+    for _, line in ipairs(p.modified.lines) do
+      for _, path in ipairs({ "a.lua", "new.lua", "gone.lua", "logo.png", "unfetched.lua" }) do
+        if line:find(path, 1, true) then seen[path] = true end
+      end
+    end
+    for _, path in ipairs({ "a.lua", "new.lua", "gone.lua", "logo.png", "unfetched.lua" }) do
+      assert.is_true(seen[path] or false, path .. " contributed no separator row")
+    end
+    assert.is_true(#p.modified.lines > 10, "the mixed plan rendered almost nothing")
+  end
+
+  it("holds across M + A + D + binary + fallback in side-by-side", function()
+    local p = plan.build(mixed_files(), {}, "side-by-side")
+    assert_every_file_rendered(p)
+    assert.equals(#p.original.lines, #p.modified.lines,
+      "the two panes have different heights, so no row range means the same "
+        .. "thing on both of them")
+  end)
+
+  it("holds with only some hunks visible", function()
+    -- Folding narrows what is OPEN, never what is emitted — but the fold
+    -- ranges are the direct consumer of the invariant, so pin it on a narrowed
+    -- plan too. Every range must be addressable on both panes.
+    local p = plan.build(mixed_files(), { ["a.lua:1"] = true }, "side-by-side",
+      { context = 1 })
+    assert_every_file_rendered(p)
+    assert.equals(#p.original.lines, #p.modified.lines)
+    for _, range in ipairs(p.folds) do
+      assert.is_true(range[1] >= 1 and range[2] <= #p.original.lines,
+        "a fold range falls outside the original pane")
+      assert.is_true(range[2] <= #p.modified.lines,
+        "a fold range falls outside the modified pane")
+    end
+  end)
+
+  it("has exactly one pane to keep level in inline", function()
+    -- Inline satisfies the invariant by construction: there is no second pane.
+    -- Asserted rather than assumed, because every consumer above branches on
+    -- `plan.original` being absent.
+    local p = plan.build(mixed_files(), {}, "inline")
+    assert.is_nil(p.original, "inline must not build a second pane")
+    assert_every_file_rendered(p)
+  end)
+
+  it("renders each file's rows on the same rows in both panes", function()
+    -- The invariant's actual payload: a row that shows file X on one pane
+    -- shows file X (or a filler for it) on the other. Walked numerically —
+    -- `map` is SPARSE, so ipairs would stop at the first separator.
+    local p = plan.build(mixed_files(), {}, "side-by-side")
+    local checked = 0
+    for row = 1, #p.modified.lines do
+      local l, r = p.original.map[row], p.modified.map[row]
+      if l and r then
+        assert.equals(l.file, r.file,
+          ("row %d shows %s on the left and %s on the right"):format(row, l.file, r.file))
+        checked = checked + 1
+      end
+    end
+    assert.is_true(checked > 0, "no row addressed a line on both panes")
+  end)
+end)

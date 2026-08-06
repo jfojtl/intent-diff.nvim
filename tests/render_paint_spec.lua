@@ -387,7 +387,54 @@ describe("paint character highlighting", function()
     local ok, err = pcall(function()
       local fresh = require("intentdiff.render.paint")
       local p = plan.build({ one_word_changed() }, {}, "side-by-side")
-      assert.has_no.errors(function() fresh.render(p, wins, nil) end)
+      local painted
+      assert.has_no.errors(function() painted = fresh.render(p, wins, nil) end)
+
+      -- "No error" is not the requirement. Character refinement is on EVERY
+      -- surface now, so an FFI regression that quietly took the rest of the
+      -- render down with it would degrade the whole product. What must survive
+      -- is everything the C library was never responsible for:
+      assert.truthy(painted, "the render produced nothing")
+      assert.same(p.original.lines,
+        vim.api.nvim_buf_get_lines(painted.bufs.original, 0, -1, false))
+      assert.same(p.modified.lines,
+        vim.api.nvim_buf_get_lines(painted.bufs.modified, 0, -1, false))
+
+      -- Whole-LINE tints come from the plan (chunking is git's, not the C
+      -- library's), so they must still be placed...
+      local function line_groups(buf)
+        local out = {}
+        for _, m in ipairs(vim.api.nvim_buf_get_extmarks(
+            buf, fresh.ns, 0, -1, { details = true })) do
+          if m[4].line_hl_group then
+            out[#out + 1] = { m[2] + 1, m[4].line_hl_group }
+          end
+        end
+        return out
+      end
+      local function has(list, row, group)
+        for _, e in ipairs(list) do
+          if e[1] == row and e[2] == group then return true end
+        end
+        return false
+      end
+      assert.is_true(has(line_groups(painted.bufs.original), 2, "IntentDiffDelete"),
+        "the removed line lost its IntentDiffDelete tint")
+      assert.is_true(has(line_groups(painted.bufs.modified), 2, "IntentDiffAdd"),
+        "the added line lost its IntentDiffAdd tint")
+
+      -- ...and only the CHARACTER highlights are gone.
+      local function char_group_marks(buf, group)
+        local out = {}
+        for _, m in ipairs(vim.api.nvim_buf_get_extmarks(
+            buf, fresh.ns, 0, -1, { details = true })) do
+          if m[4].hl_group == group then out[#out + 1] = m end
+        end
+        return out
+      end
+      assert.equals(0, #char_group_marks(painted.bufs.modified, "IntentDiffAddChar"))
+      assert.equals(0, #char_group_marks(painted.bufs.original, "IntentDiffDeleteChar"))
+
       -- The fresh copy owns its OWN alignment record, so after_each's
       -- paint.unsync (on the module every other spec holds) would find nothing
       -- and leave this tab's augroup registered for the rest of the run — in a
