@@ -821,8 +821,6 @@ point the plugin's default is reasserted and the override must be reapplied.
 | `IntentDiffFiller` | `Comment` | Filler rows padding the shorter side of a side-by-side pane |
 | `IntentDiffAddChar` | *derived, see below* | Stronger background for the actually-changed words inside an added line |
 | `IntentDiffDeleteChar` | *derived, see below* | Stronger background for the actually-changed words inside a deleted line |
-| `IntentDiffSignAdd` | `Added` | Sign-column marker for an added line |
-| `IntentDiffSignDelete` | `Removed` | Sign-column marker for a deleted line |
 | `IntentDiffCommentNote` | `DiagnosticHint` | Note sign and comment-box border |
 | `IntentDiffCommentSuggestion` | `DiagnosticInfo` | Suggestion sign and comment-box border |
 | `IntentDiffCommentIssue` | `DiagnosticWarn` | Issue sign and comment-box border |

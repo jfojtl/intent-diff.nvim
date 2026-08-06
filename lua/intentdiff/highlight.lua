@@ -24,8 +24,6 @@ M.links = {
   -- only visible job is to stay inert — Normal's background shows through,
   -- which now reads as clearly distinct from a real changed row's tint.
   IntentDiffFiller = "Comment",
-  IntentDiffSignAdd = "Added",
-  IntentDiffSignDelete = "Removed",
   IntentDiffCommentNote = "DiagnosticHint",
   IntentDiffCommentSuggestion = "DiagnosticInfo",
   IntentDiffCommentIssue = "DiagnosticWarn",

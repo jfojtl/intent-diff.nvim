@@ -110,12 +110,11 @@ describe("highlight comments", function()
 end)
 
 describe("highlight groups for the unified renderer", function()
-  it("defines the separator, character and sign groups", function()
+  it("defines the separator and character groups", function()
     require("intentdiff.highlight").ensure()
     for _, name in ipairs({
       "IntentDiffFileSeparator",
       "IntentDiffAddChar", "IntentDiffDeleteChar",
-      "IntentDiffSignAdd", "IntentDiffSignDelete",
     }) do
       local hl = vim.api.nvim_get_hl(0, { name = name })
       assert.truthy(hl and next(hl) ~= nil, name .. " is not defined")
