@@ -58,6 +58,11 @@ those groups.
 Full credits, including VSCode and utf8proc upstream of codediff.nvim itself,
 in [ATTRIBUTION.md](ATTRIBUTION.md).
 
+## License
+
+MIT — see [LICENSE](LICENSE). Every dependency it builds on is MIT too; the
+per-component copyright notices are in [ATTRIBUTION.md](ATTRIBUTION.md).
+
 ## Requirements
 
 - Neovim ≥ 0.10

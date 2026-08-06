@@ -89,5 +89,5 @@ processing.
 
 ---
 
-*intent-diff.nvim's own licensing is not yet formalized in this repository —
-this file covers only its dependencies.*
+*intent-diff.nvim itself is MIT-licensed — see [LICENSE](LICENSE). This file
+covers only its dependencies.*
