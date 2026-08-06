@@ -456,12 +456,10 @@ describe(":IntentDiff end-to-end", function()
   end)
 
   --- Repo with two files, each owned entirely by a different group, at
-  --- clearly different line numbers — so ]c's jump target unambiguously
-  --- reveals WHICH file's hunks navigation.attach actually bound. Unlike
-  --- make_two_group_repo, whose two files both change at line 5: with that
-  --- fixture a ]c jump landing on line 5 could mean either "correct ctx,
-  --- y.lua's own hunk" or "stale ctx, x.lua's hunk" — no good for proving a
-  --- ctx did NOT get clobbered by the wrong file.
+  --- clearly different line numbers — so a jump target unambiguously reveals
+  --- WHICH file the panes are planning against. Unlike make_two_group_repo,
+  --- whose two files both change at line 5: with that fixture a ]c landing on
+  --- line 5 could mean either file.
   local function make_two_file_two_group_repo()
     local x, y = sixty("xxx"), sixty("yyy")
     local r = helpers.make_repo({ ["x.lua"] = table.concat(x, "\n"), ["y.lua"] = table.concat(y, "\n") })
@@ -498,17 +496,16 @@ describe(":IntentDiff end-to-end", function()
   -- group-scoped" test's setup above. Positive case: a <CR> that lands on the
   -- SAME file a still-in-flight auto-open is rendering must still end up with
   -- OUR navigation attached, not codediff's default.
-  it("attaches OUR ]c/[c navigation when a same-file <CR> races a still-pending auto-open", function()
+  it("installs OUR ]c/[c when a same-file <CR> races a still-pending auto-open", function()
     -- open_two_groups() only waits for model.state == "ready";
     -- classify_and_render's own auto_open_first (group1/file1 = a.lua) is
     -- kicked off synchronously in that SAME completion callback, but its
-    -- render's on_ready (where navigation.attach would normally run)
-    -- only fires later, once when_diff_ready's poll succeeds — so the <CR>
-    -- below reliably (though not necessarily) lands inside that gap. Either
-    -- way the assertions below must hold: settled-before-<CR> takes
-    -- select_file's plain open_file() path, in-flight takes the
-    -- same_as_shown short-circuit and leaves the auto-open's own on_ready to
-    -- pass the identity gate — both must end up with OUR ]c attached.
+    -- render only settles later — so the <CR> below reliably (though not
+    -- necessarily) lands inside that gap. Either way the assertions must
+    -- hold: settled-before-<CR> takes select_file's plain open_file() path,
+    -- in-flight takes the same_as_shown short-circuit — and both end with
+    -- OUR ]c installed, because view.install_keymaps re-installs it after
+    -- every render regardless of which path got there.
     make_two_group_repo()
     local session, tab = open_two_groups()
     local win = select_and_wait(session, 1, 1, "a.lua", 5, 55)
@@ -518,7 +515,7 @@ describe(":IntentDiff end-to-end", function()
       if m.lhs == "]c" then desc = m.desc end
     end
     assert.truthy((desc or ""):find("intent-diff", 1, true),
-      "]c must be group-scoped (intentdiff's own attach)")
+      "]c must be group-scoped (intentdiff's own binding)")
     -- Functional proof, not just the desc string: group 1's only hunk in this
     -- file has nowhere to go, so a group-scoped ]c leaves the cursor alone.
     local row = plan_row(tab, "a.lua", 5)
@@ -529,62 +526,46 @@ describe(":IntentDiff end-to-end", function()
     assert.equals(row, vim.api.nvim_win_get_cursor(win)[1])
   end)
 
-  -- Negative-case counterpart: a newer selection that lands on a DIFFERENT
-  -- file (not what the still-in-flight auto-open was rendering) must still
-  -- bail out of attaching that stale ctx.
+  -- End-to-end backstop for the same race, through the REAL renderer: a newer
+  -- selection on a DIFFERENT file wins the panes outright, and a still-pending
+  -- auto-open landing afterwards cannot claw them back.
   --
-  -- Two earlier versions of this test both turned out not to discriminate
-  -- anything:
-  --  1. A ]c-jump-based version inferred the outcome from where the cursor
-  --     landed — but x.lua's superseded on_ready (when it fires at all)
-  --     reliably arrives AFTER a ]c press has already been checked, so it
-  --     passed with or without the `still_current` bail, even with an extra
-  --     1.5s settle inserted first: a behavioral probe only sees whatever
-  --     ctx is attached AT THE MOMENT it fires, not a record of what
-  --     happened over time.
-  --  2. A navigation.attach-spy version that instead waited on REAL timing
-  --     for x.lua's on_ready to fire late *still* didn't discriminate:
-  --     once y.lua's own render ran, codediff's shared
-  --     session only tracks ONE "current" diff target
-  --     (session.modified.absolute) — x.lua's when_diff_ready poll can
-  --     never again match its own path once y.lua has taken over, so it
-  --     just gives up silently after ~3s. x.lua's on_ready never fires AT
-  --     ALL once a different file has been selected; real timing never
-  --     exercises the code path this test exists to guard, no matter how
-  --     long it waits.
+  -- This used to spy on navigation.attach and assert which group_i/file_i the
+  -- auto-open's on_ready computed. That ctx had no consumer — ]c/[c plan
+  -- against the painted plan — so the assertion described a value that could
+  -- not affect anything. It now asserts what a user can see: which file the
+  -- panes render, and where ]c takes the cursor. The deterministic proof of
+  -- open_file's IDENTITY gate itself lives in hover_spec, at the one call site
+  -- with an observable content effect (M.open_path's on_shown); this test is
+  -- the integration-level backstop, so it is deliberately about the outcome
+  -- rather than about which branch produced it.
   --
-  -- Stub view.show to CAPTURE on_ready instead of letting (as shown above,
-  -- sometimes structurally unreachable) async rendering decide when it fires,
-  -- and invoke the captured callbacks in a chosen order — deterministic and
-  -- independent of timing. entry.shown, the one side effect the identity gate
-  -- reads, is set by show_one BEFORE view.show is called, so it still moves
-  -- exactly as it would in a real render.
-  it("does not attach a stale ctx when a newer selection lands on a different file "
-      .. "while an auto-open is still in flight", function()
+  -- view.show is wrapped, not replaced: the real render still runs (so there
+  -- IS a painted plan to assert on), but its on_ready is held back so the
+  -- auto-open's can be fired late on demand. Real timing cannot produce "an
+  -- older render lands after a newer one took the panes" — once y.lua's render
+  -- has run, x.lua's own readiness signal never arrives at all.
+  it("keeps the panes on the newer selection when a stale auto-open lands afterwards", function()
     make_two_file_two_group_repo()
     local view = require("intentdiff.view")
-    local navigation = require("intentdiff.navigation")
+    local plan_mod = require("intentdiff.render.plan")
     local real_show = view.show
-    local real_attach = navigation.attach
     local pending = {} -- captured renders, in call order
-    local attach_calls = {}
-    view.show = function(_, files, _, opts)
-      pending[#pending + 1] = { files = files, on_ready = opts and opts.on_ready }
-      return true
-    end
-    navigation.attach = function(tabpage, ctx)
-      attach_calls[#attach_calls + 1] = { group_i = ctx.group_i, file_i = ctx.file_i }
-      return real_attach(tabpage, ctx)
+    view.show = function(sess, files, visible, opts)
+      opts = opts or {}
+      local record = { files = files, on_ready = opts.on_ready }
+      pending[#pending + 1] = record
+      return real_show(sess, files, visible,
+        vim.tbl_extend("force", opts, { on_ready = function() end }))
     end
     local ok, err = pcall(function()
-      local session = open_two_file_groups()
+      local session, tab = open_two_file_groups()
       assert.equals(1, #pending, "auto-open must have captured exactly one render")
       local x_call = pending[1]
       assert.equals("x.lua", x_call.files[1].path)
 
-      -- Newer selection on a DIFFERENT file: y.lua, group 2. Goes through
-      -- the full open_file() path (not same_as_shown, since the path
-      -- differs), capturing its own render rather than re-using x.lua's.
+      -- Newer selection on a DIFFERENT file: y.lua, group 2. Goes through the
+      -- full open_file() path (not same_as_shown, since the path differs).
       local y_line = sidebar_line(session.sidebar, "file", 2, 1)
       assert.truthy(y_line, "no sidebar row for y.lua")
       focus_row(session, y_line)
@@ -593,19 +574,38 @@ describe(":IntentDiff end-to-end", function()
       assert.equals("y.lua", pending[2].files[1].path)
 
       -- Fire x.lua's STALE on_ready now, simulating it arriving late — after
-      -- the newer selection has already moved entry.shown on to y.lua —
-      -- exactly what open_file's on_ready IDENTITY gate has to reject.
+      -- the newer selection has already moved entry.shown on to y.lua.
       assert.truthy(x_call.on_ready, "auto-open's render had no on_ready")
       x_call.on_ready()
 
-      for i, c in ipairs(attach_calls) do
-        assert.is_false(c.group_i == 1 and c.file_i == 1,
-          ("navigation.attach call #%d was made with x.lua's stale ctx (group 1/file 1) "
-            .. "after y.lua's own selection had already taken over the panes"):format(i))
+      -- The panes still render y.lua, and only y.lua — not one row of x.lua
+      -- anywhere in the map. (Numeric loop, not ipairs: `map` is sparse.)
+      local plan = view.current_plan(tab)
+      assert.truthy(plan, "nothing is painted")
+      assert.equals(1, #plan.files)
+      assert.equals("y.lua", plan.files[1].path)
+      for row = 1, #plan.modified.lines do
+        local t = plan.modified.map[row]
+        assert.is_true(t == nil or t.file == "y.lua",
+          ("pane row %d shows %s, not y.lua"):format(row, t and t.file or "?"))
       end
+
+      -- And ]c, driven from the pane, plans against what is painted: it moves,
+      -- and it lands on a row that addresses y.lua. (Its target is the first
+      -- PANE row of the hunk's span, which includes git's leading context
+      -- lines, so the file — not a line number — is what this pins.)
+      local win = view.pane_wins(tab).modified
+      assert.truthy(win and vim.api.nvim_win_is_valid(win))
+      vim.api.nvim_set_current_win(win)
+      vim.api.nvim_win_set_cursor(win, { 1, 0 })
+      assert.is_true(require("intentdiff.navigation").next_hunk(tab),
+        "]c did not move")
+      local at = plan_mod.target_at(plan.modified,
+        vim.api.nvim_win_get_cursor(win)[1])
+      assert.truthy(at, "]c landed on a row that addresses no line")
+      assert.equals("y.lua", at.file)
     end)
     view.show = real_show
-    navigation.attach = real_attach
     assert.is_true(ok, tostring(err))
   end)
 

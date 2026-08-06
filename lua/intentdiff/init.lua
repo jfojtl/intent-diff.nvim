@@ -339,7 +339,7 @@ end
 -- Forward-declared: classify_and_render (below) auto-opens/refolds after
 -- every model it renders (flat loading model, then grouped/flat-failure
 -- ready model), but both helpers live further down the file — they depend on
--- select_file, which itself has to exist before open_file does.
+-- open_file and show_one, which are themselves defined below it.
 local auto_open_first
 local refold_shown_file
 
@@ -405,10 +405,6 @@ local function classify_and_render(token, opts)
       persist_last_hash(current, info)
     end
     current.sidebar.update(current.model)
-    -- Resync any attached navigation ctx to the new model — otherwise ]c/[c
-    -- keeps reading the stale pre-classify model until the user's next
-    -- select_file, even though the sidebar is now showing the new one.
-    require("intentdiff.navigation").update_model(current.sess.tabpage, current.model)
     -- Auto-open the first real group's first file — unless the user already
     -- picked their own file (manually or via ]c/[c) while this was running,
     -- in which case their view is left alone and just re-folded to match
@@ -430,11 +426,6 @@ local function classify_and_render(token, opts)
     rerender_preview(token)
   end)
 end
-
--- Forward-declared: open_file's on_ready closure below wires ]c/[c-driven
--- navigation back through select_file (which marks entry.user_selected —
--- see below), so it has to exist before open_file is defined.
-local select_file
 
 --- group_i/file_i lookup shared by open_file (which needs a fresh one on
 --- every call — entry.model may have moved on by the time it runs) and
@@ -490,28 +481,27 @@ local function focus_diff_pane(tabpage)
   return true
 end
 
---- Show `file_entry` (group_i/file_i in the CURRENT model) in the diff panes
---- and wire up navigation ctx. Shared by manual/navigation-driven selection
---- (select_file, below — which also marks entry.user_selected) and auto-open
---- (auto_open_first, further below — which must NOT mark it).
+--- Show `file_entry` (group_i/file_i in the CURRENT model) in the diff panes.
+--- Shared by manual/navigation-driven selection (select_file, below — which
+--- also marks entry.user_selected) and auto-open (auto_open_first, further
+--- below — which must NOT mark it).
 ---
 --- on_ready runs against two independent questions, and conflating them has
---- produced a stale-ctx bug in each of the last three review rounds. They are
---- now answered by one mechanism each:
+--- produced a stale-render bug in each of the last three review rounds. They
+--- are now answered by one mechanism each:
 ---
 ---  * IDENTITY — "is this render still what the panes are showing?" Answered
 ---    by `entry.shown.file_entry == file_entry`, since show_one sets
 ---    entry.shown synchronously before handing the render to view.show and
 ---    nothing but a NEWER render can move it on. Everything that describes the
----    CONTENT of the panes (navigation.attach, opts.jump) is gated on it,
----    because installing either against content that is no longer on screen is
+---    CONTENT of the panes (opts.jump's cursor placement, opts.on_shown) is
+---    gated on it, because acting on content that is no longer on screen is
 ---    simply wrong.
 ---    It keeps the case the previous `superseded`/`still_current` pair existed
 ---    for: select_file's same_as_shown short-circuit skips its own render, so
----    an in-flight auto-open's on_ready is the only place that will ever attach
----    navigation for that file — and entry.shown still names exactly this
----    file_entry there, so the gate passes (integration_spec's "attaches OUR
----    ]c/[c navigation when a same-file <CR> races a still-pending auto-open").
+---    an in-flight auto-open's on_ready is the only place that will ever run
+---    for that file — and entry.shown still names exactly this file_entry
+---    there, so the gate passes.
 ---
 ---  * RECENCY — "has anyone made a newer decision about WHERE FOCUS BELONGS?"
 ---    Answered by entry.render_seq (below). Only the focus effects are gated
@@ -534,11 +524,11 @@ end
 --- on_ready firing afterward unconditionally restores focus to the sidebar,
 --- undoing the short-circuit's focus_diff_pane.
 ---
---- Deliberately NOT gated on is_latest: navigation.attach and the opts.jump
---- cursor placement, which answer the IDENTITY question instead (above). jump
---- is orthogonal to WHICH window has focus — ]c/[c's roll-to-next-file
---- (navigation.lua's `move`) opens the new file with jump="first" specifically
---- so the cursor lands on its first hunk; gating that on is_latest would
+--- Deliberately NOT gated on is_latest: the opts.jump cursor placement and
+--- opts.on_shown, which answer the IDENTITY question instead (above). jump
+--- is orthogonal to WHICH window has focus — a caller that opens a new file
+--- with jump="first" wants the cursor on its first hunk; gating that on
+--- is_latest would
 --- silently drop the cursor placement (leaving it at line 1) whenever a
 --- same-row <CR> short-circuit's focus_diff_pane races ahead of that render's
 --- own on_ready, even though the short-circuit itself has no opinion on cursor
@@ -554,8 +544,6 @@ local function open_file(token, group_i, file_i, opts)
   end
   entry.render_seq = (entry.render_seq or 0) + 1
   local my_seq = entry.render_seq
-  local navigation = require("intentdiff.navigation")
-  navigation.set_position(entry.sess.tabpage, group_i, file_i)
   show_one(entry, file_entry, {
     on_ready = function()
       local current = sessions[token]
@@ -567,33 +555,24 @@ local function open_file(token, group_i, file_i, opts)
       local view = require("intentdiff.view")
       -- IDENTITY gate (see the doc comment above): is this render still what
       -- the panes are showing? False exactly when a newer render has moved
-      -- entry.shown on, which is precisely when attaching this render's ctx, or
-      -- placing its cursor, would name content that is no longer on screen.
+      -- entry.shown on, which is precisely when placing this render's cursor,
+      -- or telling its caller "your file is up", would name content that is no
+      -- longer on screen.
       local shown = current.shown
       if not (shown and shown.file_entry == file_entry) then
         return
       end
-      -- Re-derive the indices against the CURRENT model rather than trusting
-      -- the ones this call was made with: a classification can complete
-      -- between the render and this on_ready, replacing entry.model wholesale.
-      -- The captured group_i/file_i index into the model that is gone —
-      -- attaching them against current.model is what produced ]c's "Invalid
-      -- cursor line: out of range". The file on screen has not changed (the
-      -- gate above just proved it), so its position in the new model is the
-      -- answer.
+      -- Re-derive the file's position against the CURRENT model rather than
+      -- trusting the indices this call was made with: a classification can
+      -- complete between the render and this on_ready, replacing entry.model
+      -- wholesale, and the captured group_i/file_i index into the model that
+      -- is gone. The file on screen has not changed (the gate above just
+      -- proved it), so its position in the new model is the answer.
       local gi, fi = locate_in_model(current.model, file_entry)
       if not gi then
         return -- the current model doesn't mention this file at all
       end
       local _, current_entry = group_file(current.model, gi, fi)
-      navigation.attach(tabpage, {
-        model = current.model,
-        group_i = gi,
-        file_i = fi,
-        select_file = function(g, f, o)
-          select_file(token, g, f, o)
-        end,
-      })
       local win = view.pane_wins(tabpage).modified
       -- Cursor placement, NOT gated on is_latest — see entry.render_seq's
       -- doc comment above. Uses the CURRENT model's entry, for the same
@@ -675,7 +654,10 @@ end
 --- Manual (sidebar <CR>) or ]c/[c-driven selection. Marks entry.user_selected
 --- so auto-open never overrides the user's own choice again for this
 --- session — see open_file's opts.auto handling and auto_open_first below.
-select_file = function(token, group_i, file_i, opts)
+-- A plain `local`, no longer forward-declared: the only thing above this line
+-- that used to name it was open_file's on_ready ctx closure, which is gone.
+-- Every remaining caller (M.open_path, the sidebar's on_select) is below.
+local select_file = function(token, group_i, file_i, opts)
   local entry = sessions[token]
   if entry then
     entry.user_selected = true
@@ -812,17 +794,13 @@ end
 --- alone rather than guessed at. So is an intent view: classify_and_render
 --- re-derives that from the sidebar row (rerender_preview) instead.
 ---
---- It ALSO re-points ]c/[c at the shown file's new position, which is not
---- optional bookkeeping: navigation.update_model has just run (see
---- classify_and_render) and clamped the stale flat-model file_i to 1, so
---- without this the navigation ctx names a file the panes are not showing and
---- the very first ]c throws "Invalid cursor line: out of range". Reachable on
---- default settings with the cursor alone — moving onto a file row during the
---- loading phase renders it AND sets user_selected (apply_hover), which is
---- what routes classification completion here instead of to auto_open_first.
---- That resync is deliberately NOT gated on auto_open: the re-render half is,
---- but a file put on screen by a hover or <CR> with auto_open = false goes just
---- as stale.
+--- This is also what keeps ]c/[c honest across a classification: they plan
+--- against the PAINTED plan, so re-rendering the shown file with its new
+--- group's visible set is the whole fix — there is no separate position to
+--- re-point. Reachable on default settings with the cursor alone: moving onto
+--- a file row during the loading phase renders it AND sets user_selected
+--- (apply_hover), which is what routes classification completion here instead
+--- of to auto_open_first.
 refold_shown_file = function(token)
   local entry = sessions[token]
   if not entry then
@@ -841,7 +819,6 @@ refold_shown_file = function(token)
     return
   end
   local f = entry.model.groups[group_i].files[file_i]
-  require("intentdiff.navigation").set_position(tabpage, group_i, file_i)
   if not require("intentdiff.config").options.auto_open then
     return
   end
@@ -862,7 +839,6 @@ local function forget_entry(token)
     pcall(vim.api.nvim_del_augroup_by_id, entry.hover_augroup)
   end
   require("intentdiff.classify").cancel(token) -- kill any in-flight provider
-  require("intentdiff.navigation").detach(entry.sess.tabpage)
   -- Stop persisting to THIS review's key, drop its store, and wipe the marks
   -- IT drew — passing the entry, because this session is already out of
   -- `sessions` above, so a tabpage lookup would find nothing. Anything the user

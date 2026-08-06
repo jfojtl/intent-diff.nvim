@@ -1,11 +1,12 @@
+-- `]c` / `[c`, and nothing else.
+--
+-- This module used to also keep a per-tabpage ctx (`{ model, group_i, file_i,
+-- select_file }`) that init.lua wrote on every selection. Nothing read it:
+-- `jump` below plans against the plan that is actually painted, which is the
+-- only description of the panes that cannot go stale. The store and its four
+-- accessors are gone rather than kept "for bookkeeping" — a value with no
+-- consumer is a value that can silently disagree with the screen.
 local M = {}
-
--- `state[tabpage] = ctx`, `{ model, group_i, file_i, select_file }`. ]c/[c no
--- longer read this — see `jump` below — but init.lua still keeps it current
--- (navigation.attach/set_position/update_model) as its own bookkeeping of
--- "which file/group position is on screen", and other call sites still name
--- it, so the storage and its accessors stay.
-local state = {} -- [tabpage] = ctx
 
 --- Move to the next/previous hunk of the plan CURRENTLY PAINTED in
 --- `tabpage`, by reading `plan.hunk_rows` — the pane row range of every
@@ -76,58 +77,15 @@ local function install_keymaps(tabpage)
   end
 end
 
---- Install per-tabpage position state (see the `state` doc above) and
---- buffer-local ]c/[c on the diff pane buffers.
-function M.attach(tabpage, ctx)
-  state[tabpage] = ctx
-  install_keymaps(tabpage)
-end
-
 --- (Re)install ]c/[c on `tabpage`'s CURRENT diff pane buffers.
 ---
 --- Called from `view.install_keymaps` after every render, because the panes
---- are fresh scratch buffers each time and inherit nothing. Unconditional now
---- — not gated on `state[tabpage]` (whether `M.attach` has ever been called
---- for this tab) — because `jump` above reads the painted plan directly, not
---- the ctx: a whole-intent group preview never calls `M.attach` at all, and
---- gating here used to leave ]c/[c entirely unbound on that surface.
+--- are fresh scratch buffers each time and inherit nothing. Unconditional:
+--- `jump` above reads the painted plan, so there is no per-tab state that
+--- could make installing the keys premature or wrong.
 function M.reattach_keymaps(tabpage)
   install_keymaps(tabpage)
   return true
-end
-
-function M.detach(tabpage)
-  state[tabpage] = nil
-end
-
---- Update current position without reinstalling keymaps.
-function M.set_position(tabpage, group_i, file_i)
-  local ctx = state[tabpage]
-  if ctx then
-    ctx.group_i, ctx.file_i = group_i, file_i
-  end
-end
-
---- Resync an attached ctx to a freshly-classified model. Without this, a
---- reclassify (or the initial classify finishing after the user has already
---- navigated) leaves ctx.model pointing at stale group/file data while
---- ctx.group_i/ctx.file_i still index into it — a position no longer valid in
---- the model actually on screen. No-op if `tabpage` has no attached state.
-function M.update_model(tabpage, model)
-  local ctx = state[tabpage]
-  if not ctx then
-    return
-  end
-  ctx.model = model
-  local groups = model.groups or {}
-  if #groups == 0 or ctx.group_i < 1 or ctx.group_i > #groups then
-    ctx.group_i, ctx.file_i = 1, 1
-    return
-  end
-  local files = groups[ctx.group_i].files or {}
-  if #files == 0 or ctx.file_i < 1 or ctx.file_i > #files then
-    ctx.file_i = 1
-  end
 end
 
 return M

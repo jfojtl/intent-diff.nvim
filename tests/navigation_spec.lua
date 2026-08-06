@@ -84,22 +84,14 @@ describe("navigation.next_hunk / navigation.prev_hunk read plan.hunk_rows", func
   end)
 end)
 
-describe("navigation position bookkeeping (attach/detach/set_position/update_model)", function()
-  -- These no longer drive ]c/[c (which reads the painted plan directly — see
-  -- above) but init.lua still keeps this ctx current as its own record of
-  -- "which file/group position is on screen", and other specs spy on
-  -- attach/set_position to pin THAT behaviour. Kept passing here for the same
-  -- reason: `M.attach` must still install ]c/[c on the buffers it is given.
+describe("navigation.reattach_keymaps", function()
+  -- All this module still owns. The per-tabpage ctx it used to keep
+  -- (attach/detach/set_position/update_model) is gone: nothing read it — `jump`
+  -- above plans against the painted plan — so it could only ever disagree with
+  -- the screen.
   local view_stub, saved_view
   local tabpage, win1, win2, buf1, buf2
-  local navigation, ctx
-
-  local function mk_files()
-    return {
-      { path = "a.lua", hunks = {} },
-      { path = "b.lua", hunks = {} },
-    }
-  end
+  local navigation
 
   before_each(function()
     vim.cmd("tabnew")
@@ -122,17 +114,9 @@ describe("navigation position bookkeeping (attach/detach/set_position/update_mod
 
     package.loaded["intentdiff.navigation"] = nil
     navigation = require("intentdiff.navigation")
-
-    ctx = {
-      model = { groups = { { files = mk_files() } } },
-      group_i = 1,
-      file_i = 1,
-      select_file = function() end,
-    }
   end)
 
   after_each(function()
-    navigation.detach(tabpage)
     package.loaded["intentdiff.view"] = saved_view
     package.loaded["intentdiff.navigation"] = nil
     navigation = require("intentdiff.navigation")
@@ -142,8 +126,8 @@ describe("navigation position bookkeeping (attach/detach/set_position/update_mod
     end
   end)
 
-  it("attach installs ]c/[c buffer-local maps on both buffers", function()
-    navigation.attach(tabpage, ctx)
+  it("installs ]c/[c buffer-local maps on both diff pane buffers", function()
+    navigation.reattach_keymaps(tabpage)
     for _, buf in ipairs({ buf1, buf2 }) do
       local found_next, found_prev = false, false
       for _, keymap in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
@@ -155,54 +139,25 @@ describe("navigation position bookkeeping (attach/detach/set_position/update_mod
     end
   end)
 
-  it("reattach_keymaps installs ]c/[c even when nothing has attached", function()
-    -- Fixes the bug where a whole-intent group preview (which never calls
-    -- M.attach at all) left ]c/[c completely unbound.
+  it("needs no prior call and no per-tab state", function()
+    -- Fixes the bug where a whole-intent view (which never called the old
+    -- M.attach at all) left ]c/[c completely unbound. There is no longer any
+    -- state that could gate this — view.install_keymaps calls it after every
+    -- render, on whatever buffers the panes now hold.
     navigation.reattach_keymaps(tabpage)
     local found_next = false
     for _, keymap in ipairs(vim.api.nvim_buf_get_keymap(buf2, "n")) do
       if keymap.lhs == "]c" then found_next = true end
     end
-    assert.is_true(found_next, "]c not mapped without an attached ctx")
+    assert.is_true(found_next, "]c not mapped")
   end)
 
-  it("detach clears the stored ctx", function()
-    navigation.attach(tabpage, ctx)
-    navigation.detach(tabpage)
-    assert.has_no.errors(function()
-      navigation.set_position(tabpage, 1, 1)
-    end)
-  end)
-
-  it("update_model replaces ctx.model in place for an attached tabpage", function()
-    navigation.attach(tabpage, ctx)
-    local new_model = { groups = { { files = mk_files() } } }
-    navigation.update_model(tabpage, new_model)
-    assert.equals(new_model, ctx.model)
-  end)
-
-  it("update_model resets group_i and file_i to 1 when group_i is out of range", function()
-    navigation.attach(tabpage, ctx)
-    ctx.group_i, ctx.file_i = 5, 2
-    local new_model = { groups = { { files = mk_files() } } } -- only 1 group
-    navigation.update_model(tabpage, new_model)
-    assert.equals(1, ctx.group_i)
-    assert.equals(1, ctx.file_i)
-  end)
-
-  it("update_model resets file_i to 1 when it is out of range within a still-valid group", function()
-    navigation.attach(tabpage, ctx)
-    ctx.group_i, ctx.file_i = 1, 99
-    local new_model = { groups = { { files = mk_files() } } } -- group 1 has 2 files
-    navigation.update_model(tabpage, new_model)
-    assert.equals(1, ctx.group_i)
-    assert.equals(1, ctx.file_i)
-  end)
-
-  it("update_model is a no-op and does not error when there is no attached state", function()
-    assert.has_no.errors(function()
-      navigation.update_model(tabpage, { groups = {} })
-    end)
+  it("no longer exposes the write-only ctx store", function()
+    -- Deleted, not deprecated: init.lua wrote this on every selection and
+    -- nothing ever read it back, so it could only ever drift from the screen.
+    for _, name in ipairs({ "attach", "detach", "set_position", "update_model" }) do
+      assert.is_nil(navigation[name], "navigation." .. name .. " should be gone")
+    end
   end)
 end)
 

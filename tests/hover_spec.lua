@@ -771,8 +771,7 @@ describe("sidebar hover preview", function()
   end
 
   --- The sidebar row for a file OTHER than the one auto-open has already put
-  --- in the panes — i.e. one whose flat-model file_i is not 1, which is what
-  --- makes navigation.update_model's clamp-to-1 observable.
+  --- in the panes.
   local function other_file_row(entry, shown_path)
     for _, r in ipairs(file_rows_with_paths(entry)) do
       if r.path ~= shown_path then
@@ -799,7 +798,7 @@ describe("sidebar hover preview", function()
     end
   end
 
-  describe("the navigation context follows the cursor", function()
+  describe("a render that lands late never describes panes it does not own", function()
     --- Two files whose hunks sit at unmistakably different lines AND whose
     --- lengths differ: the short file's buffer cannot even hold the long
     --- file's second hunk line, so a ]c driven from the wrong file's hunk list
@@ -822,29 +821,21 @@ describe("sidebar hover preview", function()
       return r
     end
 
-    it("re-points the navigation context at the file the cursor opened, after "
-        .. "classification re-groups it", function()
+    it("leaves ]c working on the file the cursor opened, after classification "
+        .. "re-groups it", function()
       -- The whole reported sequence, on default settings, cursor only, no
       -- <CR>: moving onto a file row during the loading phase renders it AND
       -- sets user_selected (apply_hover), which routes classification
       -- completion through refold_shown_file. That branch re-renders the shown
-      -- file; navigation.update_model, which ran just before it, has already
-      -- clamped the stale flat-model file_i to 1. Without refold_shown_file
-      -- also re-pointing the ctx, ]c then plans against a file the panes are
-      -- not showing.
+      -- file with its new group's visible set.
       --
-      -- Asserts the CTX rather than where the cursor lands: pane rows are not
-      -- file lines any more, and moving ]c onto the plan's own hunk rows is
-      -- Task 11's job. What this test is about — which file the ctx names — is
-      -- unchanged.
+      -- Asserts what ]c ACTUALLY does — where the cursor lands, resolved back
+      -- through the painted plan's own map — rather than a position record.
+      -- ]c reads `plan.hunk_rows` of the painted plan; a stale record could
+      -- never have moved it, so asserting one proved nothing. The bug this
+      -- pins is real and was reachable here: ]c planning against a file the
+      -- panes are not showing threw "Invalid cursor line: out of range".
       make_two_file_repo()
-      local navigation = require("intentdiff.navigation")
-      local real_set_position = navigation.set_position
-      local positions = {}
-      navigation.set_position = function(tabpage, group_i, file_i)
-        positions[#positions + 1] = { group_i = group_i, file_i = file_i }
-        return real_set_position(tabpage, group_i, file_i)
-      end
 
       local provider, release = gated_provider()
       local ok, err = pcall(function()
@@ -880,16 +871,29 @@ describe("sidebar hover preview", function()
         assert.equals(hovered, entry.model.groups[2].files[1].path,
           "the classified model must put the hovered file at group 2 / file 1")
 
-        -- The panes still show the hovered file, and the ctx has been
-        -- re-pointed at its position in the NEW model.
+        -- The panes still show the hovered file...
         local plan = view.current_plan(tab)
         assert.equals(1, #plan.files)
         assert.equals(hovered, plan.files[1].path)
-        local last = positions[#positions]
-        assert.same({ group_i = 2, file_i = 1 }, last,
-          "the navigation ctx must name the shown file's place in the new model")
+
+        -- ...and ]c, driven from the pane itself, moves the cursor onto a row
+        -- of THAT file. Resolved through plan.target_at rather than a row
+        -- number, so a jump that lands on some other row cannot pass.
+        local win = view.pane_wins(tab).modified
+        assert.truthy(win and vim.api.nvim_win_is_valid(win))
+        vim.api.nvim_set_current_win(win)
+        vim.api.nvim_win_set_cursor(win, { 1, 0 })
+        local moved
+        assert.has_no.errors(function()
+          moved = require("intentdiff.navigation").next_hunk(tab)
+        end)
+        assert.is_true(moved, "]c did not move after the reclassification")
+        local at = require("intentdiff.render.plan").target_at(
+          plan.modified, vim.api.nvim_win_get_cursor(win)[1])
+        assert.truthy(at, "]c landed on a row that addresses no line")
+        assert.equals(hovered, at.file,
+          "]c landed in a file the panes are not showing")
       end)
-      navigation.set_position = real_set_position
       assert.is_true(ok, tostring(err))
     end)
 
@@ -910,75 +914,78 @@ describe("sidebar hover preview", function()
       return pending, function() view.show = real end
     end
 
-    local function spy_attach()
-      local navigation = require("intentdiff.navigation")
-      local real = navigation.attach
-      local calls = {}
-      navigation.attach = function(tabpage, ctx)
-        calls[#calls + 1] = { group_i = ctx.group_i, file_i = ctx.file_i, model = ctx.model }
-        return real(tabpage, ctx)
-      end
-      return calls, function() navigation.attach = real end
+    --- Drive `path` into the panes through M.open_path — the same
+    --- select_file → open_file route the sidebar's <CR> takes, but the only
+    --- one that hands open_file an `on_shown` callback. That callback is what
+    --- survives of the "this render describes the panes" contract now that the
+    --- ctx is gone, and it has a real consumer: the comment-list picker places
+    --- a cursor in the diff when it fires, so firing it for a render the panes
+    --- have moved on from puts the cursor in somebody else's file.
+    --- @return function count — how many times on_shown has fired
+    local function open_path_counting(tab, path)
+      local n = 0
+      assert.is_true(require("intentdiff").open_path(tab, path, function() n = n + 1 end),
+        "the model has no file at " .. path)
+      return function() return n end
     end
 
-    it("ignores a hover render whose on_ready lands after a newer hover took the panes", function()
-      -- A hover render is not an auto-open, so the old opts.auto-only
-      -- superseded/still_current bail never applied to it and its attach ran
-      -- unconditionally — installing indices for a file that is no longer on
-      -- screen. Widest for "A"/"D" virtual files, whose on_ready fires from a
-      -- buffer-scoped User autocmd rather than from a path-matched poll.
+    it("does not report itself shown once a newer render took the panes", function()
+      -- open_file's IDENTITY gate. A render is not an auto-open, so the old
+      -- opts.auto-only superseded/still_current bail never applied to it and
+      -- its content effects ran unconditionally — speaking for a file that is
+      -- no longer on screen. Widest for "A"/"D" virtual files, whose on_ready
+      -- fires from a buffer-scoped User autocmd rather than a path-matched
+      -- poll.
       local pending, restore_show = stub_show()
-      local attach_calls, restore_attach = spy_attach()
       local ok, err = pcall(function()
-        local _, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
+        local tab, entry = open_ready({ preview = { enabled = true, debounce_ms = 10 } })
         local rows = file_rows_with_paths(entry)
         assert.is_true(#rows >= 2, "fixture must have two file rows")
         assert.not_equals(rows[1].path, rows[2].path)
 
-        hover(entry, rows[1].lnum)
-        assert.truthy(helpers.wait_for(function()
-          return pending[#pending] and pending[#pending].files[1].path == rows[1].path or nil
-        end, 5000), "the first hover's render was never captured")
+        -- Whichever file auto-open did NOT put on screen goes first, so
+        -- neither call can take select_file's same_as_shown short-circuit.
+        local shown_path = entry.shown.file_entry.path
+        local first = rows[1].path ~= shown_path and rows[1].path or rows[2].path
+        local second = first == rows[1].path and rows[2].path or rows[1].path
+
+        local older_shown = open_path_counting(tab, first)
+        assert.equals(first, pending[#pending].files[1].path,
+          "the first render was never captured")
         local older = pending[#pending]
 
-        hover(entry, rows[2].lnum)
-        assert.truthy(helpers.wait_for(function()
-          return pending[#pending] and pending[#pending].files[1].path == rows[2].path or nil
-        end, 5000), "the second hover's render was never captured")
+        local newer_shown = open_path_counting(tab, second)
+        assert.equals(second, pending[#pending].files[1].path,
+          "the second render was never captured")
         local newer = pending[#pending]
 
-        local before = #attach_calls
         older.opts.on_ready()
-        assert.equals(before, #attach_calls,
-          "a hover render the panes have moved on from must not attach its ctx")
+        assert.equals(0, older_shown(),
+          "a render the panes have moved on from must not report itself shown")
 
-        -- ...and the render that IS on screen still attaches, so the
-        -- assertion above cannot be satisfied by never attaching at all.
+        -- ...and the render that IS on screen still reports, so the assertion
+        -- above cannot be satisfied by never reporting at all.
         newer.opts.on_ready()
-        assert.equals(before + 1, #attach_calls,
-          "the render that is on screen must attach its ctx")
-        assert.equals(rows[2].group_i, attach_calls[#attach_calls].group_i)
-        assert.equals(rows[2].file_i, attach_calls[#attach_calls].file_i)
+        assert.equals(1, newer_shown(),
+          "the render that is on screen must report itself shown")
       end)
       restore_show()
-      restore_attach()
       assert.is_true(ok, tostring(err))
     end)
 
-    it("attaches the shown file's position in the model that exists when the render lands", function()
+    it("still reports itself shown when a classification replaced the model underneath it", function()
       -- The other half of the same hazard: nothing newer took the panes, but a
       -- classification replaced the model between the render and its on_ready.
       -- The group_i/file_i the call was made with index into a model that no
-      -- longer exists.
+      -- longer exists, so on_ready re-derives the shown file's position against
+      -- the CURRENT model. Get that wrong and it bails — the caller's file IS
+      -- on screen and it is never told so.
       --
-      -- auto_open = false so classification completion re-points the navigation
-      -- ctx (refold_shown_file's set_position) WITHOUT re-rendering: a
+      -- auto_open = false so classification completion does not re-render: a
       -- re-render would be a newer generation, and the identity gate would then
-      -- correctly refuse to attach this older one — a different behaviour,
-      -- covered by the test above.
+      -- correctly refuse this older one — the behaviour covered above.
       local provider, release = gated_provider()
       local pending, restore_show = stub_show()
-      local attach_calls, restore_attach = spy_attach()
       local ok, err = pcall(function()
         require("intentdiff").setup({
           cache_dir = vim.fn.tempname(),
@@ -1003,10 +1010,12 @@ describe("sidebar hover preview", function()
         end
         assert.truthy(row, "fixture must have a second file in the flat group")
 
-        hover(entry, row.lnum)
-        assert.truthy(helpers.wait_for(function()
-          return pending[#pending] and pending[#pending].files[1].path == row.path or nil
-        end, 5000), "the hover's render was never captured")
+        -- Flat model: (group 1, file 2). The classified one below moves it to
+        -- (group 2, file 1), so the indices this call is made with stop being
+        -- valid before its on_ready runs.
+        local shown = open_path_counting(tab, row.path)
+        assert.equals(row.path, pending[#pending].files[1].path,
+          "the render was never captured")
         local in_flight = pending[#pending]
 
         release(two_groups_isolating(row.path))
@@ -1014,19 +1023,15 @@ describe("sidebar hover preview", function()
           return entry.model.state == "ready" or nil
         end, 15000), "classification never completed")
         assert.equals(row.path, entry.model.groups[2].files[1].path)
+        assert.equals(row.path, entry.shown.file_entry.path,
+          "auto_open = false must have left the panes alone")
 
-        local before = #attach_calls
         in_flight.opts.on_ready()
-        assert.equals(before + 1, #attach_calls, "the render on screen must attach its ctx")
-        local last = attach_calls[#attach_calls]
-        assert.equals(entry.model, last.model, "the ctx must carry the current model")
-        assert.equals(2, last.group_i,
-          "the ctx must name the shown file's position in the CURRENT model, "
-            .. "not the flat model's (group 1, file 2)")
-        assert.equals(1, last.file_i)
+        assert.equals(1, shown(),
+          "the render on screen must report itself shown, even though the model "
+            .. "it was started against is gone")
       end)
       restore_show()
-      restore_attach()
       assert.is_true(ok, tostring(err))
     end)
   end)
