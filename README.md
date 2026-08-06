@@ -262,7 +262,7 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   -- exactly as the plugin already handles codediff's own toggle_layout key
   -- being disabled. An action may also be a LIST of keys, all bound to it.
   keymaps = {
-    -- The diff panes, and the whole-intent preview buffers.
+    -- The diff panes — one file or a whole intent, same buffers.
     view = {
       quit = "q",             -- every diff pane; they are our own scratch
                               -- buffers now, not a codediff session
@@ -312,9 +312,8 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       fold_toggle_all = false,
     },
     -- Review comments. Cross-surface by nature: an intent comment is added
-    -- from a sidebar group row, a line comment from a diff pane or a
-    -- whole-intent preview row, and every surface needs the export keys — so
-    -- this is installed on all three, not one.
+    -- from a sidebar group row, a line comment from a diff pane row, and both
+    -- surfaces need the export keys — so this is installed on both, not one.
     comments = {
       add_comment = "<localleader>cc", -- pick the type in the popup
       add_note = "<localleader>cn",
@@ -512,8 +511,8 @@ hunks-only instead of its whole content — the same fallback a single-file
 `<CR>` open would take — and its separator states why (`over line budget`)
 rather than silently ballooning the buffer.
 
-This is the same renderer a single-file `<CR>` uses — a whole-intent preview
-is just a plan over every file the intent touches instead of one — for the
+This is the same renderer a single-file `<CR>` uses — an intent view is just a
+plan over every file the intent touches instead of over one — for the
 "Rename UserService to AccountService" group shown above. Each changed line
 renders as *plain text*, not a unified-diff `+`/`-` line; a removed and its
 replacement are separate real buffer rows, told apart by background color
@@ -530,42 +529,56 @@ export class AccountService {   (added)
    constructor(private db: Db) {}
 ```
 
-Inside the preview, `]c`/`[c` jump the cursor to the first row of the
+In an intent view, `]c`/`[c` jump the cursor to the first row of the
 next/previous hunk (no wraparound: at the first or last hunk they simply do
 nothing — see "Keymaps" below for what "next" means across a multi-file
-intent), and codediff's own layout-toggle key (`t` by default) flips the
-preview between inline and side-by-side exactly like it does for a normal
-diff — it restores the last-selected file, performs the ordinary layout
-toggle on it, and then re-renders the preview in the new layout. `q` closes
-the review tab from inside the preview too, same as from the sidebar.
+intent), and the layout-toggle key (`t` by default) flips between inline and
+side-by-side. That toggle is intent-diff's own — it re-renders whatever the
+panes currently hold, one file or a whole intent, in the other layout, with
+the same folds and the same cursor coordinate. Only the *key* is borrowed,
+read from codediff's `keymaps.view.toggle_layout` so you configure it once and
+both plugins agree. `q` closes the review tab from here too, same as from the
+sidebar.
 
-### Commenting on a preview
+### Commenting on an intent view
 
-The preview takes comments, with the same keys and the same popup as a real
-file diff — looking at an intent and commenting on it is one thing, not two.
-Each body row of the preview knows which file, line and side it displays, so a
-comment made there is stored as an ordinary `(file, line, side)` record: there
-is nothing "preview" about it in the store, on disk, or in the export. Comment
-on an intent, then open the file — the box is already there, on the same line;
+An intent view takes comments with the same keys and the same popup as a
+single-file diff — because it *is* the same renderer, over more files. Every
+body row knows which file, line and side it displays, so a comment made there
+is stored as an ordinary `(file, line, side)` record: there is nothing
+"preview" about it in the store, on disk, or in the export. Comment on an
+intent, then open the file — the box is already there, on the same line;
 comment in the file, then hover its intent — it is there too.
 
-What still refuses, and why:
+Everything that works on a single-file diff works here:
+
+- **`]n` / `[n`** walk every comment the current render draws — which, in an
+  intent view, includes comments in the *other* files it is showing. They
+  refuse only outside a diff pane: they are installed on the sidebar too (so
+  the export keys are reachable from either surface) and a sidebar row is not
+  a pane row.
+- **The comment list picker** jumps inside the current render whenever that
+  render already draws the comment's file. Only when it does not does the
+  picker open the real file first.
+- **File-level comments** are drawn: the box hangs above the first row its
+  file occupies in this render, whether the render holds one file or six.
+
+Whole-intent comments are the one shape with nowhere to hang here — they
+address no line at all. They live on the sidebar's group row, and that is
+where their marker is drawn.
+
+What refuses, and why:
 
 - **A `── path` separator and a side-by-side filler row.** These display no
   line of any file, so there is nothing to attach to. The refusal says so and
   names the fix.
 - **A visual range covering two files.** A comment records one file; select
-  within one file's diff instead. A range *inside* one file works, and a range
-  in the inline layout takes its side from its first `+`/`-`/context row.
-- **`]n` / `[n`** stay refused in a preview, as does the comment list picker's
-  jump — the list opens the real file rather than jumping inside the preview.
+  within one file's rows instead. A range *inside* one file works, and takes
+  its side from its first `+`/`-`/context row.
 
-File-level and whole-intent comments are not drawn in a preview (they hang off
-a file's line 1 and off a sidebar row respectively, neither of which the
-preview has), and a comment whose line falls outside what the preview renders
-— another intent's file, or a line a `line_budget` hunks-only fallback
-dropped — simply isn't drawn there. In every case the comment still exists and
-still exports.
+A comment whose line falls outside what the current render draws — a file
+belonging to another intent, or a line a `line_budget` hunks-only fallback
+dropped — simply isn't drawn right now. It still exists and still exports.
 
 ## Review comments
 
@@ -593,13 +606,14 @@ cycled with `<Tab>` in the popup, and reachable directly without it:
 Which *shape* of comment one of these produces depends on where the cursor
 is, not on which key was pressed:
 
-- **Line** — cursor on a line in a diff pane, or on a body row of a
-  whole-intent preview (see "Commenting on a preview" above).
-- **Range** — a visual selection (`'<`/`'>`) in a diff pane, or within one
-  file's rows of a preview.
-- **File-level** — `<localleader>cf` (`add_file_comment`) in a diff pane, or
-  on a sidebar **file** row. In a preview it applies to the file the cursor's
-  row belongs to.
+- **Line** — cursor on a body row of a diff pane. One file or a whole intent,
+  it is the same pane and the same key (see "Commenting on an intent view"
+  above).
+- **Range** — a visual selection (`'<`/`'>`) within one file's rows of a diff
+  pane.
+- **File-level** — `<localleader>cf` (`add_file_comment`) in a diff pane,
+  where it applies to the file the cursor's row belongs to, or on a sidebar
+  **file** row.
 - **Whole-intent** — `<localleader>cf`, or in fact any of the five add keys
   above, on a sidebar **group** row: there is no line to attach to there, so
   every add action produces an intent comment. This is the only case where
@@ -612,26 +626,21 @@ silently landing on whatever group now occupies that slot.
 
 ### Old side vs. new side
 
-A comment's side is derived from which window the cursor is in when it's
-created — the original pane → `"old"`, the modified pane → `"new"`. Inline
-layout only ever has one window (the modified buffer; deletions render as
-virtual lines), so **an old-side comment can only be created in side-by-side
-layout** — except in a whole-intent preview, where the side comes from the row
-itself: a `-` row addresses the old side even in the inline preview, because
-that render carries the removed lines as real buffer lines.
+A comment's side comes from the **row** it is made on, never from which window
+the cursor is in. Every painted row carries the real `(file, line, side)` it
+displays, and that coordinate is what gets stored:
 
-Once created, it renders whenever the original pane is visible — but
-deliberately not in an inline *file diff*. This is not a bug to route around:
-inline shows only the modified file's buffer, and an old-side line number
-addresses a row of the *original* file that simply has no corresponding row in
-that buffer to hang a box off. Toggle back to side-by-side and the comment is
-exactly where it was left; toggle to inline and it is invisible and
-unreachable until you toggle back.
+- **Side-by-side** — a row of the original pane is `"old"`, a row of the
+  modified pane is `"new"`.
+- **Inline** — one window, but a removed line is a *real buffer row* carrying
+  an `"old"` coordinate; added and context lines carry `"new"` ones.
 
-The inline *preview* is the exception, and for the same reason it can create
-old-side comments there: its `-` rows are real buffer lines, so an old-side
-comment does render on them. The rule is one rule — a box is drawn wherever a
-row addresses its line — and only the inline file diff has no such row.
+So an old-side comment can be created, read, edited and jumped to in **either**
+layout, on one file exactly as on a whole intent. Toggle between inline and
+side-by-side and every box stays where you left it, because the coordinate it
+is stored under is the same coordinate the other layout draws.
+
+The rule is one rule: **a box is drawn wherever a row addresses its line.**
 
 ### The popup
 
@@ -929,23 +938,25 @@ Resting the cursor on a row (no key press) also drives the diff panes — see
 
 | Key | Action |
 |---|---|
-| `]c` / `[c` | Next / previous hunk of whatever is currently painted — a single file's own hunks, or every hunk of a whole-intent preview, in file order. No wraparound, and no reaching into a different file or group: at the last (or first) hunk on screen they simply do nothing. |
+| `]c` / `[c` | Next / previous hunk of whatever is currently painted — a single file's own hunks, or every hunk of a whole intent, in file order. No wraparound, and no reaching into a different file or group: at the last (or first) hunk on screen they simply do nothing. |
 | `gf` | Open the real file at the cursor's exact line, in a new tab. The only way from a pane's read-only scratch buffer into the editable file. |
 | `<leader>b` | Show or hide the sidebar (`keymaps.view.toggle_sidebar`) |
 | `g?` | Toggle the keymap cheatsheet |
-| `q` | Close the review tab. The panes are our own scratch buffers now, not a codediff session, so this is installed on all of them, not just a whole-intent preview. |
+| `q` | Close the review tab. The panes are our own scratch buffers, not a codediff session, so this is installed on all of them. |
 
-codediff's own inline↔side-by-side toggle key keeps working; the fold filter
-re-applies after every toggle. `<leader>b` and `g?` are installed here, not
-just on the sidebar — since a sidebar-only key would be unreachable once the
-sidebar is hidden, the toggle works even when codediff's own layout-toggle key
-is disabled. All of the above work inside a whole-intent preview too — see
-"Previewing an intent" above.
+The inline↔side-by-side toggle key (borrowed from codediff's
+`keymaps.view.toggle_layout`, so it stays in sync with whatever you configured
+there) re-renders the current plan in the other layout; the fold filter
+re-applies. `<leader>b` and `g?` are installed here, not just on the sidebar —
+a sidebar-only key would be unreachable once the sidebar is hidden, so the
+toggle works even when codediff's layout-toggle key is disabled. All of the
+above work over a whole intent exactly as over one file — same panes, same
+keys.
 
-**Comments:** cross-surface by nature, installed on the diff panes, the
-whole-intent preview buffers and the sidebar — an intent comment is added from
-a sidebar group row, a line comment from a pane or a preview row, and every
-surface needs the export keys (see "Review comments" above).
+**Comments:** cross-surface by nature, installed on the diff panes and the
+sidebar — an intent comment is added from a sidebar group row, a line comment
+from a pane row, and both surfaces need the export keys (see "Review comments"
+above).
 
 | Key | Action |
 |---|---|
@@ -1002,7 +1013,9 @@ write, so it can't grow unbounded across a long Neovim session.
    rolling to the next file). Rest the cursor on the group row instead to
    preview the whole intent — now `]c` walks every hunk across all its files,
    in order, because they're all in the one plan that's on screen.
-6. Toggle inline view (codediff's key) — folds still filter to the group.
+6. Toggle inline view (the key borrowed from codediff) — folds still filter to
+   the group, and any old-side comment box is still there, on the removed line
+   it was made on.
 7. `r` re-classifies; a second `:IntentDiff` on the same diff is instant (cache).
 8. In a pane, `<localleader>cn` on a changed line: the popup opens **already in
    insert mode** — type without pressing `i`. `<C-s>` submits, a box appears
@@ -1011,8 +1024,10 @@ write, so it can't grow unbounded across a long Neovim session.
    tests all drive the popup with `no_insert`, so this insert/stopinsert path
    is only ever exercised here.
 9. Add a second comment further down the same file, then `]n` / `[n` from a
-   pane: the cursor walks between the two boxes and reports "no more comments
-   in this file" at the ends. Press `]n` with the cursor in the **sidebar**:
+   pane: the cursor walks between the two boxes and reports "no more comments"
+   at the ends. With a whole intent on screen it walks every box the render
+   draws, including boxes in its other files. Press `]n` with the cursor in
+   the **sidebar**:
    it must refuse ("comment navigation only works in a diff pane") and the
    sidebar cursor must not move — a sidebar row is not a diff line, and a
    stray jump there re-renders the panes via the hover preview.
