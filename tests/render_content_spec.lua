@@ -128,3 +128,119 @@ describe("render.content", function()
     assert.same({ "three" }, content.get(sess, "a.lua", "new"))
   end)
 end)
+
+describe("render.content negative cache", function()
+  --- A status-M file that git AND the worktree both refuse: it is in neither
+  --- the base revision nor the working tree. Every realistic trigger — a
+  --- status-M file since deleted from the worktree, an unresolvable path, a
+  --- permissions failure — lands in the same place: `fetch` leaves the side
+  --- nil, which is byte-for-byte what "never fetched" looks like.
+  local function unfetchable()
+    local repo = helpers.make_repo({ ["a.lua"] = "one" })
+    local base = vim.trim(helpers.git(repo, "rev-parse", "HEAD"))
+    return sess_for(repo, base), { { path = "ghost.lua", status = "M", binary = false } }
+  end
+
+  it("stops reporting a permanently-unfetchable file as missing", function()
+    local sess, files = unfetchable()
+    local done = false
+    local ready, missing = content.ensure(sess, files, function() done = true end)
+    assert.is_false(ready)
+    assert.same({ "ghost.lua" }, missing)
+    assert.truthy(helpers.wait_for(function() return done end, 5000))
+    assert.is_nil(content.get(sess, "ghost.lua", "old"),
+      "the fetch must really have failed, or this test proves nothing")
+
+    -- The whole point: the second call resolves synchronously and reports
+    -- NOTHING missing, so no worker is scheduled and the caller comes to rest
+    -- on the hunk-body fallback instead of asking again forever.
+    local ready2, missing2 = content.ensure(sess, files, function()
+      error("on_ready must not fire for a file already known to have failed")
+    end)
+    assert.is_true(ready2)
+    assert.same({}, missing2)
+  end)
+
+  it("never re-runs git show for a file whose fetch already failed", function()
+    local sess, files = unfetchable()
+    local real = vim.fn.systemlist
+    local shows = 0
+    vim.fn.systemlist = function(cmd, ...)
+      if type(cmd) == "table" and vim.tbl_contains(cmd, "show") then
+        shows = shows + 1
+      end
+      return real(cmd, ...)
+    end
+    local ok, err = pcall(function()
+      local done = false
+      content.ensure(sess, files, function() done = true end)
+      assert.truthy(helpers.wait_for(function() return done end, 5000))
+      assert.equals(1, shows, "the first ensure must fetch exactly once")
+
+      -- Every debounced sidebar hover and every layout toggle calls ensure
+      -- again for the same file list. Before the negative cache each of these
+      -- scheduled another synchronous `git show`.
+      for _ = 1, 5 do
+        content.ensure(sess, files)
+      end
+      vim.wait(300, function() return false end, 20)
+      assert.equals(1, shows, "a failed fetch must never be retried")
+    end)
+    vim.fn.systemlist = real
+    assert.is_true(ok, tostring(err))
+  end)
+
+  it("notifies once per file, not once per repaint", function()
+    local sess, files = unfetchable()
+    local real = vim.notify
+    local notices = {}
+    vim.notify = function(msg, level, opts)
+      if type(msg) == "string" and msg:find("ghost.lua", 1, true) then
+        notices[#notices + 1] = msg
+      end
+      return real(msg, level, opts)
+    end
+    local ok, err = pcall(function()
+      local done = false
+      content.ensure(sess, files, function() done = true end)
+      assert.truthy(helpers.wait_for(function() return done end, 5000))
+      assert.equals(1, #notices, "a failed fetch must be reported to the user")
+      assert.truthy(notices[1]:find("ghost.lua", 1, true))
+
+      for _ = 1, 5 do
+        content.ensure(sess, files)
+      end
+      vim.wait(300, function() return false end, 20)
+      assert.equals(1, #notices, "the notice must not repeat on every repaint")
+    end)
+    vim.notify = real
+    assert.is_true(ok, tostring(err))
+  end)
+
+  it("retries after invalidate, because the file changed on disk", function()
+    -- invalidate() is the write-watcher's signal that this path's content
+    -- moved underneath us — the one event that can turn an unreadable path
+    -- into a readable one, so it clears the negative cache. The permanent
+    -- failures the cache exists for raise no write event.
+    local repo = helpers.make_repo({ ["a.lua"] = "one" })
+    local base = vim.trim(helpers.git(repo, "rev-parse", "HEAD"))
+    local sess = sess_for(repo, base)
+    local files = { { path = "later.lua", status = "A", binary = false } }
+
+    local done = false
+    content.ensure(sess, files, function() done = true end)
+    assert.truthy(helpers.wait_for(function() return done end, 5000))
+    assert.is_nil(content.get(sess, "later.lua", "new"))
+    assert.is_true(content.ensure(sess, files), "the failure must be remembered")
+
+    helpers.write_file(repo, "later.lua", "now it exists")
+    content.invalidate(sess, "later.lua")
+
+    done = false
+    local ready, missing = content.ensure(sess, files, function() done = true end)
+    assert.is_false(ready)
+    assert.same({ "later.lua" }, missing)
+    assert.truthy(helpers.wait_for(function() return done end, 5000))
+    assert.same({ "now it exists" }, content.get(sess, "later.lua", "new"))
+  end)
+end)

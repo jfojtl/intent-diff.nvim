@@ -11,7 +11,18 @@
 local M = {}
 
 --- caches[sess_key] = { old = { [path] = lines }, new = { [path] = lines },
----                      inflight = { [path] = true }, stale = { [path] = true } }
+---                      inflight = { [path] = true }, stale = { [path] = true },
+---                      failed = { [path] = true } }
+---
+--- `failed` is the NEGATIVE cache, and it is not an optimisation. A failed
+--- fetch leaves `old[path]`/`new[path]` nil — indistinguishable, to `ensure`,
+--- from "never fetched" — so without it a permanently-unfetchable file (a
+--- status-`M` file since deleted from the worktree, an unresolvable path, a
+--- permissions failure) was reported missing by every single `ensure` call,
+--- and every debounced sidebar hover and every layout toggle scheduled another
+--- synchronous `git show`/`readfile` for it, forever. Recording the failure is
+--- also what makes the user-facing notice fire once per file instead of once
+--- per repaint.
 local caches = {}
 
 local function key_of(sess)
@@ -22,7 +33,7 @@ end
 local function cache_of(sess)
   local k = key_of(sess)
   if not caches[k] then
-    caches[k] = { old = {}, new = {}, inflight = {}, stale = {} }
+    caches[k] = { old = {}, new = {}, inflight = {}, stale = {}, failed = {} }
   end
   return caches[k]
 end
@@ -47,14 +58,17 @@ local function read_worktree(git_root, path)
   return lines
 end
 
---- Fetch both sides of one file into `cache`. Returns nothing; failures leave
---- the side unset so `get` answers nil and the caller falls back.
+--- Fetch both sides of one file into `cache`. Failures leave the side unset so
+--- `get` answers nil and the caller falls back to the hunk bodies, and are
+--- recorded in `cache.failed` so this file is never fetched again for this
+--- review (see the `caches` doc above).
+--- @return boolean whether this call newly marked `file.path` as failed
 local function fetch(sess, cache, file)
   local path, status = file.path, file.status
 
   if file.binary then
     cache.old[path], cache.new[path] = {}, {}
-    return
+    return false
   end
 
   -- Old side.
@@ -77,6 +91,16 @@ local function fetch(sess, cache, file)
   else
     cache.new[path] = read_worktree(sess.git_root, path) or nil
   end
+
+  -- Either side missing means this file cannot be rendered from content, so
+  -- both sides count as a failure: `plan.build` needs the pair.
+  if cache.old[path] == nil or cache.new[path] == nil then
+    local was_failed = cache.failed[path] == true
+    cache.failed[path] = true
+    return not was_failed
+  end
+  cache.failed[path] = nil
+  return false
 end
 
 --- Cached lines for one side, or nil if not fetched (or the fetch failed).
@@ -103,6 +127,12 @@ function M.invalidate(sess, path)
   if cache then
     cache.new[path] = nil
     cache.stale[path] = true
+    -- Clear the negative cache too: this call means the file CHANGED on disk,
+    -- which is exactly the event that can turn an unreadable path into a
+    -- readable one. The permanent-failure case this cache exists for (a path
+    -- git and the worktree both refuse) raises no write event, so it stays
+    -- remembered.
+    cache.failed[path] = nil
   end
 end
 
@@ -121,12 +151,19 @@ end
 --- is NOT called — the caller can paint immediately. Otherwise returns `false`
 --- plus the list of paths still missing, schedules the fetch, and calls
 --- `on_ready` once when it completes. The caller paints what it can meanwhile.
+---
+--- A path whose fetch has already failed is "resident" for this purpose: it is
+--- NOT reported missing and NOT re-fetched, so a permanently-unfetchable file
+--- costs one `git show` per review rather than one per repaint. Its render
+--- comes to rest on the hunk-body fallback, which is what the caller draws when
+--- `M.get` answers nil.
 --- @return boolean ready, string[] missing
 function M.ensure(sess, files, on_ready)
   local cache = cache_of(sess)
   local missing = {}
   for _, file in ipairs(files) do
-    if cache.old[file.path] == nil or cache.new[file.path] == nil then
+    if (cache.old[file.path] == nil or cache.new[file.path] == nil)
+        and not cache.failed[file.path] then
       -- Binary files resolve without I/O, so settle them inline rather than
       -- reporting them missing and scheduling a worker for nothing.
       if file.binary then
@@ -147,13 +184,25 @@ function M.ensure(sess, files, on_ready)
   end
 
   vim.schedule(function()
+    local newly_failed = {}
     for _, path in ipairs(missing) do
       local file = by_path[path]
       if file and not cache.inflight[path] then
         cache.inflight[path] = true
-        fetch(sess, cache, file)
+        if fetch(sess, cache, file) then
+          newly_failed[#newly_failed + 1] = path
+        end
         cache.inflight[path] = nil
       end
+    end
+    -- Once per file, never per repaint: `fetch` only reports a path here on the
+    -- transition into `cache.failed`, and `ensure` never asks for it again.
+    if #newly_failed > 0 then
+      vim.notify(
+        "intent-diff: could not read file content, showing the diff hunks only:\n  "
+          .. table.concat(newly_failed, "\n  "),
+        vim.log.levels.WARN
+      )
     end
     if on_ready then
       on_ready()
