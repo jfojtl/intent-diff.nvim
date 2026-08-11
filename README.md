@@ -4,14 +4,8 @@ Review a git diff grouped by *reason of change* instead of by file. A sidebar
 lists LLM-generated groups ("Rename UserService → AccountService", "Add retry
 logic", "Drive-by lint fixes"); each group contains the files it touches, and
 opening a file shows only that group's hunks — the rest of the file's diff is
-folded away. intent-diff renders its own diff panes, but leans on
-[codediff.nvim](https://github.com/esmuellert/codediff.nvim) to do it well —
-see "Built on codediff.nvim" below for exactly how.
-
-The sidebar below is the *real* output of `sidebar.layout()` (generated
-headlessly against a representative model, not hand-drawn — no column
-alignment, no tree-drawing characters, and only the nonzero side of a
-`+A`/`-B` stat is ever shown):
+folded away. Add review comments on any line or whole intent and export them
+as Markdown for an agent to act on.
 
 ```
 ▾ Rename UserService to AccountService
@@ -35,7 +29,7 @@ alignment, no tree-drawing characters, and only the nonzero side of a
 The LLM never decides *what* changed, only how to *label* it: every hunk in
 the diff ends up in exactly one group or in the visible "Ungrouped" bucket —
 never silently dropped. Worst case with a bad LLM response is one boring
-Ungrouped group, degrading toward plain codediff, never below it.
+Ungrouped group, degrading toward a plain diff, never below it.
 
 ## Built on codediff.nvim
 
@@ -58,17 +52,12 @@ those groups.
 Full credits, including VSCode and utf8proc upstream of codediff.nvim itself,
 in [ATTRIBUTION.md](ATTRIBUTION.md).
 
-## License
-
-MIT — see [LICENSE](LICENSE). Every dependency it builds on is MIT too; the
-per-component copyright notices are in [ATTRIBUTION.md](ATTRIBUTION.md).
-
 ## Requirements
 
 - Neovim ≥ 0.10
 - [codediff.nvim](https://github.com/esmuellert/codediff.nvim)
 - `claude` CLI on `$PATH` (only needed for the default provider; swap in your
-  own provider to avoid the dependency — see below)
+  own provider to avoid the dependency — see "Custom providers")
 
 ## Installation (lazy.nvim)
 
@@ -89,8 +78,7 @@ end
 
 return {
   {
-    dir = "~/dev/github.com/jfojtl/intent-diff.nvim",
-    name = "intent-diff.nvim",
+    "jfojtl/intent-diff.nvim",
     dependencies = { "esmuellert/codediff.nvim" },
     cmd = "IntentDiff",
     opts = {},
@@ -109,15 +97,265 @@ return {
 }
 ```
 
-`:IntentDiff [revision-args]` accepts the same argument forms as codediff's
-`:CodeDiff` — no args (working tree), a single revision, `revision...` for
-merge-base-relative, or `base target`.
+## Commands
 
-`:IntentDiffSidebar` is the command-line equivalent of the `<leader>b` key
-described under "Keymaps" below, showing/hiding the sidebar.
-`:IntentDiffToggleAll` collapses every intent if any is expanded and expands
-every one otherwise; it has no default key (`zR` and `zM` do the two halves
-explicitly), but `keymaps.sidebar.fold_toggle_all` can bind it.
+| Command | Does |
+|---|---|
+| `:IntentDiff [revision-args]` | Open a review tab. Same argument forms as codediff's `:CodeDiff` — no args (working tree), a single revision, `revision...` for merge-base-relative, or `base target`. |
+| `:IntentDiffSidebar` | Show/hide the sidebar (same as `<leader>b`) |
+| `:IntentDiffToggleAll` | Collapse every intent if any is expanded, else expand every one |
+| `:IntentDiffCommentsYank` / `…Write` / `…List` / `…Clear` | Review comment actions — see below |
+| `:IntentDiffLog` | Open the diagnostics log |
+
+## Usage
+
+### The sidebar
+
+Each group renders as a wrapped title line followed by a stats line —
+`N hunks · M files`, then `+A`, `-B`, or both, whichever are nonzero. Below
+that, when expanded, is a file tree: directories are their own rows, and a
+chain of directories with only one child at each level is compressed onto a
+single row (`src/services/api` instead of three nested rows). File rows show a
+status gutter (`A`, `M`, `D`, or `?` for untracked) and, with
+[nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons)
+installed, a file-type icon.
+
+`za`, `h`, and `l` are interchangeable collapse/expand keys: on a directory
+row they toggle that directory; on any other row in the group — a title line,
+the stats line, or a file row — they toggle the *enclosing group*. `<CR>`
+behaves the same way on a group or directory row; on a file row it renders
+that file's diff (if the cursor hasn't already) and moves focus into the diff
+pane so you can scroll and search it.
+
+### Previewing an intent
+
+With `preview.enabled = true` (the default), the sidebar cursor drives the
+diff panes on its own — no key press needed — after `preview.debounce_ms` of
+the cursor sitting still:
+
+- **A group row** (title or stats line) previews that group's whole diff:
+  every file it touches, each preceded by a `── path   status   +A -B`
+  separator, in file-tree order.
+- **A directory row** previews just that subtree.
+- **A file row** renders that file's own diff, folded to whichever group it
+  belongs to, while leaving focus in the sidebar so you can keep browsing.
+
+A file whose content runs past `line_budget` lines renders hunks-only instead
+of its whole content, and its separator says why (`over line budget`).
+
+Each changed line renders as *plain text*, not a unified-diff `+`/`-` line; a
+removed line and its replacement are separate real buffer rows, told apart by
+background color (`IntentDiffDelete` / `IntentDiffAdd`, annotated here since a
+code fence can't show color):
+
+```
+── src/api/routes.ts   M   +1 -1
+import { UserService } from './user-service'       (removed)
+import { AccountService } from './account-service'  (added)
+── src/services/account.ts   M   +1 -1
+export class UserService {      (removed)
+export class AccountService {   (added)
+   constructor(private db: Db) {}
+```
+
+In an intent view, `]c`/`[c` jump to the next/previous hunk across every file
+the intent touches (no wraparound), and the layout-toggle key (`t` by default)
+flips between inline and side-by-side, keeping the same folds and cursor
+position. That key is read from codediff's `keymaps.view.toggle_layout` so you
+configure it once and both plugins agree.
+
+In side-by-side layout the two panes are kept aligned **absolutely**: buffer
+row N on the left is buffer row N on the right, so every scroll and cursor
+move re-establishes the relationship rather than accumulating drift the way
+`scrollbind` does. Only the row is copied, not the column. Long lines are not
+wrapped by default (`pane_wrap`) for the same reason.
+
+### Added and untracked files
+
+Added (git status `A`) and untracked (`??`) files render their real file
+contents in the diff panes — there is no "before" to diff against. When such a
+file is at least `added_file_split.min_lines` long, it's split into sub-hunks
+at blank-line boundaries, so different parts of one new file can land in
+different intents and the pane can fold down to the open intent. Set
+`added_file_split.enabled = false` for one whole-file hunk instead.
+
+Deleted files are never fold-filtered — a deleted file has exactly one hunk
+covering the whole file, so there is nothing to fold.
+
+## Keymaps
+
+Press `g?` in a review tab for a floating cheatsheet built from your own
+config — a rebound key shows up rebound, a disabled one not at all.
+
+The whole set deliberately mirrors codediff's, so the two tools share muscle
+memory: the fold verbs are its explorer's, `R`/`gf`/`<CR>` mean what they mean
+there, and the sidebar toggle sits on its `toggle_explorer` default.
+
+**Sidebar:**
+
+| Key | Action |
+|---|---|
+| `<CR>` | On a file row, render its diff and move focus into the diff pane. On a group or directory row, toggle it. |
+| `za` / `zA` | Toggle the fold under the cursor / toggle it recursively |
+| `zo` `l` / `zO` | Open the fold under the cursor / open it recursively |
+| `zc` `h` / `zC` | Close the fold under the cursor / close it recursively |
+| `zR` / `zM` | Expand / collapse every intent. Per-directory state inside each intent is preserved. |
+| `<leader>b` | Show or hide the sidebar — also works from the diff panes |
+| `R` | Re-classify (bypasses cache) |
+| `gf` | Open the real file at the group's first hunk, closing the review tab |
+| `<Tab>` / `<S-Tab>` | Jump to next / previous group header |
+| `g?` | Toggle the keymap cheatsheet |
+| `q` | Close the review tab |
+
+A fold key acts on the directory under the cursor; anywhere else in an intent
+it acts on the enclosing intent. "Recursive" additionally reaches every
+directory beneath the row — the only way to move directory state in bulk,
+since `zR`/`zM` are deliberately intent-level.
+
+**Diff panes:**
+
+| Key | Action |
+|---|---|
+| `]c` / `[c` | Next / previous hunk of whatever is currently painted — one file's hunks, or every hunk of a whole intent, in file order. No wraparound. |
+| `gf` | Open the real file at the cursor's exact line, in a new tab. The only way from a pane's read-only scratch buffer into the editable file. |
+| `<leader>b` | Show or hide the sidebar |
+| `g?` | Toggle the keymap cheatsheet |
+| `q` | Close the review tab |
+
+**Comments:** installed on both the diff panes and the sidebar — an intent
+comment is added from a sidebar group row, a line comment from a pane row, and
+both surfaces need the export keys.
+
+| Key | Action |
+|---|---|
+| `<localleader>cc` | Add a comment, picking the type in the popup (normal and visual) |
+| `<localleader>cn` `cs` `ci` `cp` | Add a note / suggestion / issue / praise directly |
+| `<localleader>cf` | File-level comment on a diff pane or sidebar file row; whole-intent comment on a sidebar group row |
+| `<localleader>ce` / `cd` | Edit / delete the comment at the cursor |
+| `<localleader>cl` | List every comment in the review and jump to one |
+| `]n` / `[n` | Next / previous comment in the current render |
+| `<localleader>cy` | Copy the review as Markdown |
+| `<localleader>cw` | Write the review to a file |
+| `<localleader>cx` | Delete every comment in this review, after confirmation |
+| `<localleader>q` | Copy the review as Markdown, then close the review tab |
+
+## Review comments
+
+Put comments directly on a diff, in the style of
+[review.nvim](https://github.com/georgeguimaraes/review.nvim), then export them
+as Markdown to hand to an agent. The difference from review.nvim: intent-diff
+knows *why* each change was made, so the export files every comment under the
+intent its line belongs to — an agent reads "here is the intent, and here is
+what's wrong with it" instead of an undifferentiated list of file:line notes.
+
+Four types — Note (`✍`), Suggestion (`💡`), Issue (`⚠`), Praise (`✨`) —
+cycled with `<Tab>` in the popup, or reachable directly by key.
+
+Which *shape* of comment you get depends on where the cursor is, not on which
+key was pressed:
+
+- **Line** — cursor on a body row of a diff pane, whether it's showing one
+  file or a whole intent.
+- **Range** — a visual selection within one file's rows.
+- **File-level** — `<localleader>cf` in a diff pane, or on a sidebar **file**
+  row.
+- **Whole-intent** — any add key on a sidebar **group** row. Anchors to the
+  group's *title*, so re-classifying under a differently-named group leaves
+  the comment in the export's "Unmatched comments" section rather than
+  silently landing on whatever group now occupies that slot.
+
+A separator row or a side-by-side filler row refuses: it displays no line of
+any file, so there is nothing to attach to. So does a visual range spanning
+two files.
+
+A comment's **side** comes from the row it is made on, never from which window
+the cursor is in. In side-by-side, a row of the original pane is `"old"` and a
+row of the modified pane is `"new"`; inline, a removed line is a real buffer
+row carrying an `"old"` coordinate. So an old-side comment can be created,
+read, edited and jumped to in either layout — toggle between them and every
+box stays where you left it. The rule is one rule: **a box is drawn wherever a
+row addresses its line.**
+
+Comments made on an intent view are stored as ordinary `(file, line, side)`
+records — comment on an intent, then open the file, and the box is already
+there on the same line.
+
+### The popup
+
+`<Tab>` cycles the type (in both insert and normal mode); `<C-s>` submits.
+Focus starts in the text area in insert mode, so the first `<Esc>` only leaves
+insert mode; a second `<Esc>`, or `q`, cancels. Submitting empty text is
+treated as cancelling. `<localleader>ce` reopens the same popup, pre-filled.
+
+### Persistence
+
+Comments are stored as JSON under `cache_dir .. "/comments/"`, one file per
+review, keyed by git root plus what is being reviewed — deliberately *not* the
+diff-text hash the classification cache uses, since that hash changes the
+moment a file is edited.
+
+- A **working-tree review** (plain `:IntentDiff`) keys by **branch**, so the
+  review survives new commits on that branch.
+- An **explicit revision or range** (`:IntentDiff HEAD~1`, `:IntentDiff
+  main...`) keys by the **revision pair**.
+
+Files older than `comments.expire_days` (7 by default) are swept once per
+Neovim session; set `expire_days = false` to disable the sweep.
+
+Reviewing the same working tree in **two review tabs at once** is not
+supported: both tabs derive the same branch key and share one underlying
+buffer, so their comment boxes clear each other on render and whichever tab
+saves last wins on disk.
+
+### Exporting
+
+| Key | Command | Does |
+|---|---|---|
+| `<localleader>cy` | `:IntentDiffCommentsYank` | Copy the Markdown to `+`/`*`, notify with the count |
+| `<localleader>cw` | `:IntentDiffCommentsWrite [path]` | Write the Markdown to `path` (prompted when omitted, default `.intentdiff-review.md` relative to the git root) |
+| `<localleader>q` | — | Copy the Markdown, **then close the review tab** |
+
+Plain `q` still means what it means everywhere else — close the tab, touch
+nothing else — so the clipboard is only ever written by a key that says it
+writes the clipboard.
+
+A sample export, for the two groups shown in the sidebar at the top of this
+file:
+
+```markdown
+I reviewed your code and have the following comments. Please address them.
+
+Comment types: ISSUE (problems to fix), SUGGESTION (improvements),
+NOTE (observations), PRAISE (positive feedback)
+Lines prefixed with ~ refer to the old (left) side of the diff.
+
+## Rename UserService to AccountService
+
+This rename missed the DI container entirely — see below.
+
+1. **[ISSUE]** `src/api/routes.ts:5`
+   This import still points at the old module.
+
+2. **[SUGGESTION]** `src/services/account.ts:~41`
+   The old implementation was cleaner.
+
+## Add retry logic to HTTP client
+
+3. **[PRAISE]** `src/http/client.ts`
+   Good call keeping the timeout separate.
+
+4. **[NOTE]** `src/http/client.ts:44-51`
+   No jitter here — fine for now.
+```
+
+Numbering runs continuously across groups. A group's whole-intent comment is
+emitted as a plain paragraph before its numbered entries; within a group, a
+file's file-level comment sorts before its line comments. The `~` legend line
+appears only when the export actually contains an old-side comment. While
+classification is still running (or if it failed) the export degrades to one
+flat numbered list with no headings, and a comment whose line lands in no hunk
+at all is emitted under a trailing `## Unmatched comments` heading rather than
+dropped.
 
 ## Configuration
 
@@ -152,7 +390,7 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
     -- intent-diff pre-stuffing commit messages or `git log` output into the
     -- prompt. The job's cwd is set to the repo root so its commands land in
     -- the right place. Set to `false` to keep the prompt fully
-    -- self-contained (today's behavior).
+    -- self-contained.
     agentic = true,
   },
 
@@ -160,34 +398,29 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   context_lines = 3,
 
   -- Above this many lines on either side, a file renders hunks-only instead
-  -- of its whole content, and says so on its separator (see "Previewing an
-  -- intent" below). Guards against a huge generated/vendored file blowing up
-  -- a diff pane.
+  -- of its whole content, and says so on its separator. Guards against a huge
+  -- generated/vendored file blowing up a diff pane.
   line_budget = 20000,
 
   -- Width (columns) of the sidebar split.
   sidebar_width = 40,
 
   -- Wrap long lines in the diff panes. Off, and deliberately so: the two panes
-  -- are kept aligned row for row (see "Scrolling and alignment" below), and a
-  -- changed line that is 40 characters on one side and 200 on the other takes
-  -- one screen row against three even at equal widths — so with wrapping on,
-  -- everything below such a line sits at a different height in each pane. Set
-  -- to true if you would rather read long lines whole and give that up.
+  -- are kept aligned row for row, and a changed line that is 40 characters on
+  -- one side and 200 on the other takes one screen row against three — so with
+  -- wrapping on, everything below such a line sits at a different height in
+  -- each pane. Set to true if you would rather read long lines whole.
   pane_wrap = false,
 
   -- File icons from nvim-web-devicons (if installed) in the sidebar's file
   -- tree. Silently omitted if the plugin isn't present, or set to false here.
   icons = true,
 
-  -- Auto-open the first file worth looking at instead of leaving codediff's
-  -- diff panes empty until you press <CR>: the first file of the flat "All
-  -- changes" list while classification is still running, then the first
-  -- file of the first real group once it completes. A manual selection (or
-  -- ]c/[c navigation) always wins — auto-open never overrides it, it just
-  -- keeps folds in sync with the group your open file ends up in. Focus
-  -- stays in (or returns to) the sidebar so you can keep navigating rows.
-  -- Set to false to keep the sidebar-only-until-<CR> behavior.
+  -- Auto-open the first file worth looking at instead of leaving the diff
+  -- panes empty until you press <CR>: the first file of the flat "All
+  -- changes" list while classification is still running, then the first file
+  -- of the first real group once it completes. A manual selection (or ]c/[c
+  -- navigation) always wins. Focus stays in (or returns to) the sidebar.
   auto_open = true,
 
   -- Above this diff size (bytes), the prompt sends per-hunk summaries only
@@ -202,9 +435,8 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   -- Added and untracked files arrive from git as a single whole-file hunk, so
   -- they could only ever belong to one intent. Splitting them at blank-line
   -- boundaries lets different parts of one new file land in different
-  -- intents, and makes the group fold filter meaningful for them (see "Added
-  -- and untracked files" below). Set enabled = false to restore one hunk per
-  -- added/untracked file.
+  -- intents, and makes the group fold filter meaningful for them. Set
+  -- enabled = false to restore one hunk per added/untracked file.
   added_file_split = {
     enabled = true,
     min_lines = 60,    -- files shorter than this stay a single hunk
@@ -214,33 +446,32 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   -- Where classification results are cached, keyed by diff-text hash.
   cache_dir = vim.fn.stdpath("cache") .. "/intentdiff",
 
-  -- Diagnostics log used by :IntentDiffLog (see "Diagnostics" below).
+  -- Diagnostics log used by :IntentDiffLog.
   log_file = vim.fn.stdpath("cache") .. "/intentdiff/intentdiff.log",
 
   -- Cursor-driven navigation: moving the sidebar cursor onto a group or
   -- directory row shows that intent's complete diff in the diff panes, with
   -- a separator per file; moving it onto a file row renders that file's own
-  -- diff too (see "Previewing an intent" below).
+  -- diff too.
   preview = {
     enabled = true,
     debounce_ms = 120,  -- cursor settle time before rendering, so scrolling
-                         -- past rows doesn't thrash the panes
+                        -- past rows doesn't thrash the panes
   },
 
   -- Review comments attached to diff lines and to whole intents, exported as
-  -- Markdown for an agent to act on. See "Review comments" above and
-  -- :IntentDiffCommentsYank / …Write / …List / …Clear.
+  -- Markdown for an agent to act on.
   comments = {
     enabled = true,
 
     -- Comment types, in the order the popup cycles them. Each needs a name
-    -- and an icon; its highlight groups are derived from `key`, not listed
-    -- here — see "Highlights" above. A type added beyond the built-in four
-    -- gets working (if unstyled) highlight defaults for free.
+    -- and an icon; its highlight groups are derived from `key` — see
+    -- "Highlights" below. A type added beyond the built-in four gets working
+    -- (if unstyled) highlight defaults for free.
     types = {
       { key = "note",       name = "Note",       icon = "✍" },
       { key = "suggestion", name = "Suggestion", icon = "💡" },
-      { key = "issue",      name = "Issue",       icon = "⚠" },
+      { key = "issue",      name = "Issue",      icon = "⚠" },
       { key = "praise",     name = "Praise",     icon = "✨" },
     },
 
@@ -258,36 +489,32 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
 
   -- Buffer-local keys the plugin installs inside a review tab, namespaced by
   -- surface the way codediff namespaces its own (keymaps.view / .explorer /
-  -- .history / .conflict). Set any action to `false` to install nothing,
-  -- exactly as the plugin already handles codediff's own toggle_layout key
-  -- being disabled. An action may also be a LIST of keys, all bound to it.
+  -- .history / .conflict). Set any action to `false` to install nothing. An
+  -- action may also be a LIST of keys, all bound to it.
   keymaps = {
     -- The diff panes — one file or a whole intent, same buffers.
     view = {
-      quit = "q",             -- every diff pane; they are our own scratch
-                              -- buffers now, not a codediff session
+      quit = "q",
       -- Show/hide the sidebar. Named after (and sharing a default with)
       -- codediff's keymaps.view.toggle_explorer, because our sidebar is that
       -- explorer's counterpart. Installed on the sidebar AND on the diff
       -- panes, since a sidebar-only key is unreachable once the sidebar is
-      -- hidden — and it works even when codediff's own layout-toggle key is
-      -- disabled.
+      -- hidden.
       toggle_sidebar = "<leader>b",
       next_hunk = "]c",       -- group-scoped: only this intent's hunks
       prev_hunk = "[c",
       show_help = "g?",
-      -- The panes are read-only scratch buffers now; this is the only way
-      -- from one into the real, editable file, at the cursor's exact line.
-      -- Opens in a new tab, identically for a single-file and a whole-intent
-      -- view. No collision with the sidebar's own `gf` (goto_file) — a
-      -- different surface, a different buffer.
+      -- The panes are read-only scratch buffers; this is the only way from
+      -- one into the real, editable file, at the cursor's exact line. Opens
+      -- in a new tab. No collision with the sidebar's own `gf` (goto_file) —
+      -- a different surface, a different buffer.
       open_file = "gf",
     },
     -- The intent sidebar.
     sidebar = {
       select = "<CR>",
       quit = "q",
-      reclassify = "R",       -- was `r`; `R` is what codediff's explorer uses
+      reclassify = "R",       -- what codediff's explorer uses
       goto_file = "gf",
       next_group = "<Tab>",
       prev_group = "<S-Tab>",
@@ -306,21 +533,21 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       -- re-expanding restores the tree you had arranged.
       fold_open_all = "zR",
       fold_close_all = "zM",
-      -- The pre-namespacing `zA` — collapse every intent if any is expanded,
-      -- else expand every one. `zA` now means fold_toggle_recursive, so this
-      -- is unbound by default and reachable as :IntentDiffToggleAll.
+      -- Collapse every intent if any is expanded, else expand every one.
+      -- Unbound by default (`zR`/`zM` do the two halves explicitly) and
+      -- reachable as :IntentDiffToggleAll.
       fold_toggle_all = false,
     },
     -- Review comments. Cross-surface by nature: an intent comment is added
     -- from a sidebar group row, a line comment from a diff pane row, and both
-    -- surfaces need the export keys — so this is installed on both, not one.
+    -- surfaces need the export keys — so this is installed on both.
     comments = {
       add_comment = "<localleader>cc", -- pick the type in the popup
       add_note = "<localleader>cn",
       add_suggestion = "<localleader>cs",
       add_issue = "<localleader>ci",
       add_praise = "<localleader>cp",
-      add_file_comment = "<localleader>cf", -- file-level; an intent comment on a sidebar group row
+      add_file_comment = "<localleader>cf", -- an intent comment on a group row
       edit_comment = "<localleader>ce",
       delete_comment = "<localleader>cd",
       list_comments = "<localleader>cl",
@@ -330,12 +557,10 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       export_file = "<localleader>cw",
       clear_comments = "<localleader>cx",
       -- The review.nvim end-of-review flow: copy, then close. Plain `q`
-      -- still closes without touching the clipboard — the two differ in
-      -- their first keystroke, so this costs `q` no timeoutlen delay.
+      -- still closes without touching the clipboard.
       export_and_close = "<localleader>q",
-      -- Popup-local keys for the comment entry float (comments/popup.lua),
-      -- buffer-local to its text area rather than tab-wide — not listed in
-      -- the g? cheatsheet, which only covers tab-wide surfaces.
+      -- Popup-local keys for the comment entry float, buffer-local to its
+      -- text area rather than tab-wide.
       popup_cycle_type = "<Tab>",
       popup_submit = "<C-s>",
       popup_cancel = "q",
@@ -343,19 +568,6 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   },
 }
 ```
-
-### Migrating from the flat `keymaps` table
-
-The old flat `keymaps.toggle_sidebar` / `keymaps.toggle_all` still work — they
-are rewritten to `keymaps.view.toggle_sidebar` and
-`keymaps.sidebar.fold_toggle_all` at `setup()` time, with a one-line notice.
-Three defaults changed, so if you had been relying on them:
-
-| Was | Now | To keep the old key |
-|---|---|---|
-| `<leader>gVt` show/hide sidebar | `<leader>b` | `view = { toggle_sidebar = "<leader>gVt" }` |
-| `r` re-classify | `R` | `sidebar = { reclassify = "r" }` |
-| `zA` expand/collapse every intent | `zR` / `zM`, explicitly | `sidebar = { fold_toggle_recursive = false, fold_toggle_all = "zA" }` |
 
 ## Custom providers
 
@@ -395,14 +607,10 @@ require("intentdiff").setup({
 the diff exceeds `max_full_diff_bytes`, so a custom provider must nil-check it
 and fall back to `request.hunks`. Each `hunks[i].summary_lines` holds the
 hunk's first 4 raw diff lines plus a `… (N more lines)` marker when it was
-longer, and is always present regardless of diff size.
-
-Each hunk also carries a compact integer `n` (1..N, inventory order), and
-`request.numbering` is the `n -> id` map — this is what makes the compact
-response format below possible. `request.repo`, when present, names the repo
-root and revision range being reviewed; a provider can use it to run its own
-read-only lookups (see "Read-only tool allowlist" and "Agentic lookup
-channel" below) instead of relying solely on `request.diff_text`/`hunks`.
+longer, and is always present regardless of diff size. Each hunk also carries
+a compact integer `n` (1..N, inventory order), and `request.numbering` is the
+`n -> id` map. `request.repo`, when present, names the repo root and revision
+range being reviewed, so a provider can run its own read-only lookups.
 
 ### Group response shape
 
@@ -411,408 +619,43 @@ and may even appear in the same response**:
 
 - **Compact (preferred; what claude_cli asks the model for):**
   `{ title = "...", ids = "1-4,7,12-15" }` — `ids` is a string of integers
-  with ranges, referring to `hunks[i].n` / `request.numbering`, not the
-  hunks' `id` strings. It's also tolerant of a JSON array of numbers
-  (`{1,2,3}`) or a bare number.
+  with ranges, referring to `hunks[i].n` / `request.numbering`, not the hunks'
+  `id` strings. It's also tolerant of a JSON array of numbers (`{1,2,3}`) or a
+  bare number.
 - **Legacy:** `{ title = "...", hunk_ids = { "src/a.lua:1", ... } }` — the
-  original array-of-inventory-id-strings shape. Still fully supported; a
-  provider that only ever emits this keeps working identically.
+  array-of-inventory-id-strings shape.
 
-Providers never need to worry about completeness: ids/hunk_ids you omit,
-mistype, or that fail to map back to a real hunk are reconciled by the plugin
-itself — missing hunks land in Ungrouped, hallucinated or unmappable ids are
-discarded, and duplicates keep only the first group. Run async and never
-block the UI.
+Providers never need to worry about completeness: ids you omit, mistype, or
+that fail to map back to a real hunk are reconciled by the plugin itself —
+missing hunks land in Ungrouped, hallucinated ids are discarded, duplicates
+keep only the first group. Run async and never block the UI.
 
-Return a cancel handle — `{ cancel = function() … end }` — if your provider can
-be aborted: intent-diff calls it when a newer classification supersedes yours
-(e.g. the user pressed `r`) or when the review tab is closed, so the abandoned
-request does not keep running.
+Return a cancel handle — `{ cancel = function() … end }` — if your provider
+can be aborted: intent-diff calls it when a newer classification supersedes
+yours (`R`) or when the review tab is closed.
 
-## Read-only tool allowlist
+## Safety: the read-only tool allowlist
 
 `claude_cli` runs pointed at the repo being reviewed — including any
 uncommitted changes in the working tree — so by default it's restricted to
-read-only tools: `provider_opts.disallowed_tools` (`--disallowedTools`)
-blocks `Edit`/`Write`/`NotebookEdit`, and `provider_opts.allowed_tools`
+read-only tools: `provider_opts.disallowed_tools` (`--disallowedTools`) blocks
+`Edit`/`Write`/`NotebookEdit`, and `provider_opts.allowed_tools`
 (`--allowedTools`) scopes it to read-only git subcommands plus
-`Read`/`Grep`/`Glob`. Both are plain string lists, comma-joined onto the
-flag; set either to `{}` (or `nil`) to omit that flag entirely and fall back
-to `claude`'s own defaults. This is a safety measure, not a correctness one —
-the grouping itself is validated independently (see "completeness" above);
-the allowlist exists so a misbehaving or adversarially-prompted model can't
-edit the diff it's supposed to be describing.
-
-## Agentic lookup channel
-
-By default (`provider_opts.agentic = true`) claude_cli tells the model it may
-run read-only git commands and read files in the repo — comparing the exact
-base/target revisions being reviewed — to understand *why* a change was made,
-rather than intent-diff guessing at that by stuffing commit messages or `git
-log` output into the prompt itself (it deliberately doesn't). The job's
-working directory is set to the repo root so those commands land in the right
-place. The model still must answer using the hunk numbers given in the
-prompt, not file paths or line numbers, and still must not modify anything
-(enforced by the tool allowlist above, not by the prompt instruction alone).
-
-Set `provider_opts.agentic = false` to turn this off and go back to a fully
-self-contained prompt (today's original behavior, and useful if you'd rather
-not have the model spend time/tokens shelling out).
-
-## Sidebar
-
-Each group renders as a wrapped title line (long LLM-generated titles wrap
-onto multiple lines rather than being truncated) followed by a stats line —
-`N hunks · M files`, then `+A`, `-B`, or both, whichever are nonzero (a zero
-side is never printed — see the real output below). Below that, when the
-group is expanded, is a file tree: directories are their own rows, and a
-chain of directories with only one child at each level is compressed onto a
-single row (`src/services/api` instead of three nested `src` → `services` →
-`api` rows) — exactly the compression codediff itself uses for the same
-reason. File rows show a one-character status gutter (`A`, `M`, `D`, or `?`
-for untracked) and, when `icons = true` and
-[nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons) is
-installed, a file-type icon; both degrade silently (gutter letter still
-shows, icon just omitted) when devicons isn't present. Rows are not
-column-aligned — a file's name butts directly up against its indent, and its
-stats immediately follow its name — exactly as in the real output above.
-
-`za`, `h`, and `l` are interchangeable collapse/expand keys: on a directory
-row they toggle that directory; on any other row in the group — a title
-line, the stats line, or even one of its file rows — they toggle the
-*enclosing group* instead, so standing on a file row and pressing `za`
-collapses the whole group it belongs to. `<CR>` behaves the same way on a
-group or directory row (toggles it); on a file row it renders that file's
-diff if the cursor hasn't already done so (see "Previewing an intent"
-below), then moves focus into the diff pane so you can scroll and search it.
-If the cursor already rendered that exact file, `<CR>` is a pure focus
-change — nothing is re-rendered.
-
-## Previewing an intent
-
-With `preview.enabled = true` (the default), the sidebar cursor drives the
-diff panes on its own — no key press needed — after `preview.debounce_ms` of
-the cursor sitting still, so scrolling past several rows doesn't thrash the
-panes. What lands in the panes depends on the kind of row the cursor is on:
-
-- **A group row** (any of its title lines or its stats line) previews that
-  group's whole diff: every file it touches, each preceded by a
-  `── path   status   +A -B` separator line (three spaces on either side of
-  `status`), in file-tree order.
-- **A directory row** previews just that subtree — the same rendering,
-  restricted to the files under that directory.
-- **A file row renders that file's own diff** — folded to whichever group it
-  belongs to, exactly like `<CR>` would show — while leaving focus in the
-  sidebar so you can keep browsing with `j`/`k`. This always happens; there is
-  no config knob to require `<CR>` instead.
-
-A file whose content runs past `line_budget` lines (either side) renders
-hunks-only instead of its whole content — the same fallback a single-file
-`<CR>` open would take — and its separator states why (`over line budget`)
-rather than silently ballooning the buffer.
-
-This is the same renderer a single-file `<CR>` uses — an intent view is just a
-plan over every file the intent touches instead of over one — for the
-"Rename UserService to AccountService" group shown above. Each changed line
-renders as *plain text*, not a unified-diff `+`/`-` line; a removed and its
-replacement are separate real buffer rows, told apart by background color
-(`IntentDiffDelete` / `IntentDiffAdd`, annotated below since a code fence
-can't show color):
-
-```
-── src/api/routes.ts   M   +1 -1
-import { UserService } from './user-service'       (removed)
-import { AccountService } from './account-service'  (added)
-── src/services/account.ts   M   +1 -1
-export class UserService {      (removed)
-export class AccountService {   (added)
-   constructor(private db: Db) {}
-```
-
-In an intent view, `]c`/`[c` jump the cursor to the first row of the
-next/previous hunk (no wraparound: at the first or last hunk they simply do
-nothing — see "Keymaps" below for what "next" means across a multi-file
-intent), and the layout-toggle key (`t` by default) flips between inline and
-side-by-side. That toggle is intent-diff's own — it re-renders whatever the
-panes currently hold, one file or a whole intent, in the other layout, with
-the same folds and the same cursor coordinate. Only the *key* is borrowed,
-read from codediff's `keymaps.view.toggle_layout` so you configure it once and
-both plugins agree. `q` closes the review tab from here too, same as from the
-sidebar.
-
-### Commenting on an intent view
-
-An intent view takes comments with the same keys and the same popup as a
-single-file diff — because it *is* the same renderer, over more files. Every
-body row knows which file, line and side it displays, so a comment made there
-is stored as an ordinary `(file, line, side)` record: there is nothing
-"preview" about it in the store, on disk, or in the export. Comment on an
-intent, then open the file — the box is already there, on the same line;
-comment in the file, then hover its intent — it is there too.
-
-Everything that works on a single-file diff works here:
-
-- **`]n` / `[n`** walk every comment the current render draws — which, in an
-  intent view, includes comments in the *other* files it is showing. They
-  refuse only outside a diff pane: they are installed on the sidebar too (so
-  the export keys are reachable from either surface) and a sidebar row is not
-  a pane row.
-- **The comment list picker** jumps inside the current render whenever that
-  render already draws the comment's file. Only when it does not does the
-  picker open the real file first.
-- **File-level comments** are drawn: the box hangs above the first row its
-  file occupies in this render, whether the render holds one file or six.
-
-Whole-intent comments are the one shape with nowhere to hang here — they
-address no line at all. They live on the sidebar's group row, and that is
-where their marker is drawn.
-
-What refuses, and why:
-
-- **A `── path` separator and a side-by-side filler row.** These display no
-  line of any file, so there is nothing to attach to. The refusal says so and
-  names the fix.
-- **A visual range covering two files.** A comment records one file; select
-  within one file's rows instead. A range *inside* one file works, and takes
-  its side from its first `+`/`-`/context row.
-
-A comment whose line falls outside what the current render draws — a file
-belonging to another intent, or a line a `line_budget` hunks-only fallback
-dropped — simply isn't drawn right now. It still exists and still exports.
-
-## Review comments
-
-Put comments directly on a diff, in the style of
-[review.nvim](https://github.com/georgeguimaraes/review.nvim), then export
-them as Markdown to hand to an agent. The difference from review.nvim: intent-
-diff knows *why* each change was made, so the export files every comment under
-the intent its line belongs to — an agent reads "here is the intent, and here
-is what's wrong with it" instead of an undifferentiated list of file:line
-notes.
-
-### Adding a comment
-
-Four types — Note (`✍`), Suggestion (`💡`), Issue (`⚠`), Praise (`✨`) —
-cycled with `<Tab>` in the popup, and reachable directly without it:
-
-| Key | Adds |
-|---|---|
-| `<localleader>cc` | Pick the type in the popup |
-| `<localleader>cn` | Note |
-| `<localleader>cs` | Suggestion |
-| `<localleader>ci` | Issue |
-| `<localleader>cp` | Praise |
-
-Which *shape* of comment one of these produces depends on where the cursor
-is, not on which key was pressed:
-
-- **Line** — cursor on a body row of a diff pane. One file or a whole intent,
-  it is the same pane and the same key (see "Commenting on an intent view"
-  above).
-- **Range** — a visual selection (`'<`/`'>`) within one file's rows of a diff
-  pane.
-- **File-level** — `<localleader>cf` (`add_file_comment`) in a diff pane,
-  where it applies to the file the cursor's row belongs to, or on a sidebar
-  **file** row.
-- **Whole-intent** — `<localleader>cf`, or in fact any of the five add keys
-  above, on a sidebar **group** row: there is no line to attach to there, so
-  every add action produces an intent comment. This is the only case where
-  the row, not the key, decides the shape.
-
-An intent comment anchors to the group's *title*, not an index, so
-re-classifying under a differently-named group leaves the comment surfacing
-as unattached — in the export's "Unmatched comments" section — rather than
-silently landing on whatever group now occupies that slot.
-
-### Old side vs. new side
-
-A comment's side comes from the **row** it is made on, never from which window
-the cursor is in. Every painted row carries the real `(file, line, side)` it
-displays, and that coordinate is what gets stored:
-
-- **Side-by-side** — a row of the original pane is `"old"`, a row of the
-  modified pane is `"new"`.
-- **Inline** — one window, but a removed line is a *real buffer row* carrying
-  an `"old"` coordinate; added and context lines carry `"new"` ones.
-
-So an old-side comment can be created, read, edited and jumped to in **either**
-layout, on one file exactly as on a whole intent. Toggle between inline and
-side-by-side and every box stays where you left it, because the coordinate it
-is stored under is the same coordinate the other layout draws.
-
-The rule is one rule: **a box is drawn wherever a row addresses its line.**
-
-### The popup
-
-`<Tab>` cycles the type (in both insert and normal mode); `<C-s>` submits.
-Focus starts in the text area, in insert mode — so the first `<Esc>` only
-leaves insert mode, same as it always does; a second `<Esc>`, or `q`,
-cancels. Submitting empty text is treated exactly like cancelling: nothing is
-saved. Editing an existing comment (`<localleader>ce`) opens the same popup,
-pre-filled with its current type and text.
-
-### Persistence
-
-Comments are stored as JSON under `cache_dir .. "/comments/"`, one file per
-review, keyed by git root plus **what is being reviewed** — deliberately
-*not* the diff-text hash the classification cache uses, because that hash
-changes the moment a file is edited, which would discard comments exactly
-when they are still relevant.
-
-- A **working-tree review** (plain `:IntentDiff`) keys by **branch**, so the
-  review survives new commits made on that branch.
-- An **explicit revision or revision range** (`:IntentDiff HEAD~1`,
-  `:IntentDiff main...`) keys by the **revision pair** instead.
-
-Files older than `comments.expire_days` (7 by default) are swept once per
-Neovim session, deferred so it never blocks the first render; set
-`expire_days = false` to disable the sweep.
-
-### Exporting
-
-| Key | Command | Does |
-|---|---|---|
-| `<localleader>cy` | `:IntentDiffCommentsYank` | Copy the Markdown to `+`/`*`, notify with the count |
-| `<localleader>cw` | `:IntentDiffCommentsWrite [path]` | Write the Markdown to `path` (prompted when omitted, pre-filled with the last path used this session, default `.intentdiff-review.md` relative to the git root) |
-| `<localleader>q` | — | Copy the Markdown, **then close the review tab** |
-
-`<localleader>q` is the review.nvim end-of-review flow: finish, copy, paste
-into the agent. Plain `q` still means exactly what it means everywhere else
-in this plugin — close the tab, touch nothing else — so the clipboard is
-only ever written by a key that says it writes the clipboard. With no
-comments, `<localleader>q` notifies and still closes rather than refusing to.
-
-This is the real output of `export.generate()` — generated headlessly against
-a small model and five comments (an intent comment, a new-side issue, an
-old-side suggestion, a range, and a file-level comment), not hand-typed — for
-the same two groups shown in the sidebar at the top of this file:
-
-```markdown
-I reviewed your code and have the following comments. Please address them.
-
-Comment types: ISSUE (problems to fix), SUGGESTION (improvements),
-NOTE (observations), PRAISE (positive feedback)
-Lines prefixed with ~ refer to the old (left) side of the diff.
-
-## Rename UserService to AccountService
-
-This rename missed the DI container entirely — see below.
-
-1. **[ISSUE]** `src/api/routes.ts:5`
-   This import still points at the old module.
-
-2. **[SUGGESTION]** `src/services/account.ts:~41`
-   The old implementation was cleaner.
-
-## Add retry logic to HTTP client
-
-3. **[PRAISE]** `src/http/client.ts`
-   Good call keeping the timeout separate.
-
-4. **[NOTE]** `src/http/client.ts:44-51`
-   No jitter here — fine for now.
-```
-
-Numbering runs continuously across groups, not restarting per group. A
-group's own comment (the whole-intent one) is emitted as a plain paragraph
-before its numbered entries, not as a numbered entry itself. Within a group,
-a file's file-level comment sorts before its line comments — that's why
-`## Add retry logic to HTTP client`'s `[PRAISE]` (a file-level comment on
-`client.ts`) is entry 3 and its `[NOTE]` range comment on the same file is
-entry 4, even though the range comment was added first. The `~` legend line
-is only emitted when the export actually contains an old-side comment — there
-is never a legend for notation the document doesn't use. While classification
-is still running (or failed), there is no grouping to hang headings off, and
-the export degrades to one flat numbered list with no `##` headings; a
-comment whose line lands in no hunk at all — typically one that outlived the
-working-tree edit it pointed at — is emitted under a trailing
-`## Unmatched comments` heading, flagged rather than dropped.
-
-### Two review tabs on the same file
-
-Two review tabs of the same repo, both showing the modified side of the same
-working-tree file, share **one** underlying buffer: codediff resolves a real
-working-tree file with `vim.fn.bufadd`, which always hands back the same
-buffer number for the same path regardless of which tab asked. Comments
-render into a single shared extmark namespace in that buffer, so each tab's
-render clears the *other* tab's comment boxes there, and closing either tab
-clears both. This self-heals the next time either tab is switched into —
-`TabEnter` re-asserts that tab's state and re-renders its own comments — but
-between those two events the other tab's boxes are genuinely gone from the
-screen, not merely stale.
-
-The same collision shows up in persistence: two tabs reviewing the same
-working tree derive the **same branch key** (see "Persistence" above), so
-they read and write the same JSON file. Whichever tab saves last wins — a
-comment added in one tab can be silently dropped from disk by the other tab's
-next save. This is arguably degenerate usage — why review the same working
-tree in two tabs at once? — but it is real, and there is no cross-tab locking
-to prevent it.
-
-## Added and untracked files
-
-Added (git status `A`) and untracked (`??`) files render their real file
-contents in the diff panes — not a hunk-only fragment — since there is no
-"before" to diff against. When such a file is at least
-`added_file_split.min_lines` lines long, it's split into sub-hunks at
-blank-line boundaries (each roughly `added_file_split.target_lines` lines),
-so different parts of one new file can land in different intents; the pane
-then folds down to just the lines belonging to the currently open intent,
-the same as for an ordinary modified file. Set
-`added_file_split.enabled = false` to go back to one whole-file hunk per
-added/untracked file (no splitting, and therefore no folding within it).
-
-Deleted files are deliberately never fold-filtered — a deleted file always
-has exactly one hunk covering the entire file, so there is nothing to fold.
-
-## Scrolling and alignment
-
-In side-by-side layout the two panes are kept aligned **absolutely**: buffer
-row N on the left is buffer row N on the right (both panes are padded to the
-same height with filler rows), so whenever you scroll or move the cursor in
-one pane, the other is put on the same top line and the same cursor row. This
-is not Vim's `scrollbind`, which mirrors *relative* scroll deltas and
-therefore stays permanently offset once anything knocks the two windows apart
-— a jump, a mouse scroll over the unfocused pane, `zz`, a fold toggle. Here
-there is no offset to accumulate: every scroll and every cursor move
-re-establishes the absolute relationship, so the row you are looking at on
-one side is always the row opposite it on the other.
-
-The cursor's **column** is not copied, only its row: the two panes hold
-different text on a changed line, so the column would point at nothing in
-particular. Long lines are not wrapped either (`pane_wrap`, above) — a
-40-character line opposite a 200-character one would occupy a different
-number of screen rows in each pane and undo the alignment below it.
-
-Folds are per window, so `zo` in one pane leaves the other pane's copy of that
-fold closed. Row alignment is unaffected (the buffers are unchanged, and the
-cursor still lands on the same row in both), but the screen rows *below* the
-cursor sit at different heights until both sides agree about folds again.
-
-Because the events this relies on (`WinScrolled`, `CursorMoved`) are only
-raised by Neovim when a UI is attached, the automated tests cannot observe
-them being delivered. `tests/manual/pane_alignment.lua` drives the real thing
-under a pty; its header says how to run it.
+`Read`/`Grep`/`Glob`. Set either to `{}` (or `nil`) to omit that flag and fall
+back to `claude`'s own defaults.
+
+This is a safety measure, not a correctness one — the grouping itself is
+validated independently — so a misbehaving or adversarially-prompted model
+can't edit the diff it's supposed to be describing.
+
+By default (`provider_opts.agentic = true`) the model is also told it *may*
+run those read-only commands, comparing the exact base/target revisions being
+reviewed, to work out *why* a change was made, rather than intent-diff
+guessing at that by stuffing commit messages into the prompt itself. Set
+`agentic = false` for a fully self-contained prompt, if you'd rather not have
+the model spend time/tokens shelling out.
 
 ## Highlights
-
-Every highlight group below is defined with `default = true`
-(`nvim_set_hl(0, name, { link = target, default = true })`), which only sets
-the link when the group has no definition yet — a definition you set
-*before* the group is first defined (i.e. before the first `:IntentDiff` of
-the session) is never overwritten by that first call, and one you set at any
-later point also takes effect immediately, since a plain `nvim_set_hl` call
-(no `default`) always overwrites unconditionally.
-
-**That protection does not survive `:colorscheme`.** `:colorscheme` clears
-every highlight definition and then reloads them; this plugin's own
-`ColorScheme` autocmd re-establishes its `default = true` link at that point,
-but a plain override you set earlier is gone by then — verified directly:
-set `IntentDiffGroupTitle` with a bare `nvim_set_hl` call, run `:colorscheme
-habamax`, and `nvim_get_hl(0, { name = "IntentDiffGroupTitle" })` reports
-`{ default = true, link = "Title" }` again, not the override. So an override
-wins from the moment you set it until the *next* `:colorscheme`, at which
-point the plugin's default is reasserted and the override must be reapplied.
 
 | Group | Default link | Used for |
 |---|---|---|
@@ -839,52 +682,24 @@ point the plugin's default is reasserted and the override must be reapplied.
 | `IntentDiffCommentIssueLine` | `CursorLine` | …issue |
 | `IntentDiffCommentPraiseLine` | `CursorLine` | …praise |
 
-**`IntentDiffAdd` / `IntentDiffDelete` / `IntentDiffAddChar` /
-`IntentDiffDeleteChar` are not links** — every other group in the table above
-is `nvim_set_hl(0, name, { link = target, default = true })`, but these four
-render as coloured text under a link (`Added`/`Removed`/`DiffText` are
-foreground groups in essentially every colourscheme), which is backwards for
-a diff pane: it makes a changed *line* read as coloured text instead of a
-tinted row, and it makes an added and a deleted *word* look identical, since
-both linked to the same `DiffText`. Instead they are computed, GitHub-PR
-style: `IntentDiffAdd`/`IntentDiffDelete` set only a `bg` (no `fg`, so
-treesitter's own syntax colours keep showing through), taken from the active
-colourscheme's own `DiffAdd`/`DiffDelete` background **when that background
-actually reads as green/red** — a channel-dominance check, not just "does
-the group exist": several built-in colourschemes (`desert`, `morning`,
-`torte`, and others in the classic-Vim family) define `DiffDelete` as
-`#af5faf`, which is magenta, not red, and would otherwise sail straight
-through. Whichever side (or both) fails that check falls back to a canonical
-GitHub-ish red/green blended into the editor's own `Normal` background — not
-a flat hardcoded tint, so it still adapts to light vs. dark — and the same
-fallback applies when `DiffAdd`/`DiffDelete` isn't defined at all. This is
-decided independently per side, so a scheme can use its own green and still
-fall back on red, or vice versa. `IntentDiffAddChar`/`IntentDiffDeleteChar`
-are that same resolved line colour pushed further from the editor
-background — brighter on a dark colourscheme, darker on a light one, since
-either direction reads as "more saturated than the row it sits in" — so the
-words that actually changed stand out inside the tinted row. Recomputed on
-every `:colorscheme`, same as every other group in this table, and set with
-`default = true` too — an explicit override you set
-yourself always wins, exactly as described above.
+The four *derived* groups are not links. `IntentDiffAdd`/`IntentDiffDelete`
+set only a `bg` (no `fg`, so treesitter's syntax colours keep showing
+through), taken from the colourscheme's own `DiffAdd`/`DiffDelete` background
+when that background actually reads as green/red — several built-in schemes
+define `DiffDelete` as a magenta. Whichever side fails that check falls back
+to a GitHub-ish red/green blended into the editor's `Normal` background, so it
+still adapts to light vs. dark. `IntentDiffAddChar`/`IntentDiffDeleteChar` are
+that resolved colour pushed further from the editor background, so the words
+that actually changed stand out inside the tinted row.
 
-The eight comment groups are derived from each type's `key`, not hand-listed
-per type: `IntentDiffComment` plus the key with its first letter capitalised,
-and the same again with a `Line` suffix — `comments.types[].key = "note"`
-therefore always produces `IntentDiffCommentNote` /
-`IntentDiffCommentNoteLine`, whatever the type's configured `name` or `icon`
-is. A type configured beyond the built-in four (say, `key = "question"`) gets
-`IntentDiffCommentQuestion` / `IntentDiffCommentQuestionLine` — not listed
-above, since it doesn't exist until configured — but the plugin defines both
-anyway, linked to the note defaults (`DiagnosticHint` / `CursorLine`), so an
-unstyled custom type still renders instead of erroring.
+The eight comment groups are derived from each type's `key`, so
+`comments.types[].key = "question"` gets `IntentDiffCommentQuestion` /
+`IntentDiffCommentQuestionLine` defined for free, linked to the note defaults.
 
-The reliable way to keep an override across colorscheme changes is to set it
-from your own `ColorScheme` autocmd rather than a one-off call. It doesn't
-matter whether you register it before or after intent-diff's own (which is
-only registered lazily, on the first `:IntentDiff` of the session) — a plain
-`nvim_set_hl` call always beats a `default = true` one, whichever order the
-two end up running in on a given `:colorscheme`:
+Every group is set with `default = true`, so your own definition always wins —
+but `:colorscheme` clears all definitions and this plugin re-establishes its
+defaults, so set overrides from your own `ColorScheme` autocmd rather than a
+one-off call:
 
 ```lua
 vim.api.nvim_create_autocmd("ColorScheme", {
@@ -894,181 +709,46 @@ vim.api.nvim_create_autocmd("ColorScheme", {
 })
 ```
 
-A bare `vim.api.nvim_set_hl(0, "IntentDiffGroupTitle", { fg = "#c4a7e7", bold
-= true })` with no autocmd works too, right up until the next
-`:colorscheme` — which is exactly what makes it a trap: it looks like it
-worked (and does, until the theme changes) rather than failing loudly.
+## Performance
 
-## Keymaps
+Classification takes seconds on a small diff and up to a minute or two on a
+genuinely large one — the sidebar's `⟳ classifying… Ns` counter shows how long
+it's been running, and a second `:IntentDiff` on the same diff is instant
+(cached by diff-text hash).
 
-Press `g?` in a review tab for a floating cheatsheet built from your own
-config — a rebound key shows up rebound, a disabled one not at all.
+**Prompt size is not the bottleneck — output size is.** Measured with `claude
+-p --model haiku` on a 99-hunk / 28-file diff, sending the full diff text
+(95KB of prompt) versus just the hunk manifest (24KB) both cost ~1:45–1:50;
+switching the model's *response* from verbose `"src/a/b.lua:1"` ids (4.0KB) to
+the compact range format `"1-4,7,12-15"` (641B) roughly halved it to ~1:00. So
+if classification feels slow, lowering `max_full_diff_bytes` will barely
+help — what you want is fewer, more compressible groups or a smaller/faster
+model.
 
-The whole set deliberately mirrors codediff's, so the two tools share muscle
-memory: the fold verbs are its explorer's, `R`/`gf`/`<CR>` mean what they mean
-there, and the sidebar toggle sits on its `toggle_explorer` default.
-
-**Sidebar:**
-
-| Key | Action |
-|---|---|
-| `<CR>` | On a file row, render its diff if needed (a pure focus change if the cursor already rendered it) and move focus into the diff pane. On a group or directory row, toggle it. |
-| `za` / `zA` | Toggle the fold under the cursor / toggle it recursively |
-| `zo` `l` / `zO` | Open the fold under the cursor / open it recursively |
-| `zc` `h` / `zC` | Close the fold under the cursor / close it recursively |
-| `zR` / `zM` | Expand / collapse every intent. Per-directory collapse state inside each intent is preserved. |
-| `<leader>b` | Show or hide the sidebar — also works from the diff panes, see below. (`:IntentDiffSidebar`) |
-| `R` | Re-classify (bypasses cache) |
-| `gf` | Open the real file at the group's first hunk, closing the review tab |
-| `<Tab>` / `<S-Tab>` | Jump to next / previous group header |
-| `g?` | Toggle the keymap cheatsheet |
-| `q` | Close the review tab |
-
-A fold key acts on the directory under the cursor; anywhere else in an intent
-(title, stats line, or a file row) it acts on the enclosing intent.
-"Recursive" additionally reaches every directory beneath the row — that is the
-only way to move directory state in bulk, since `zR`/`zM` are deliberately
-intent-level. `:IntentDiffToggleAll` still collapses-if-any-expanded-else-
-expands; it is unbound by default now that `zA` carries codediff's meaning.
-
-Resting the cursor on a row (no key press) also drives the diff panes — see
-"Previewing an intent" above.
-
-**Diff panes:**
-
-| Key | Action |
-|---|---|
-| `]c` / `[c` | Next / previous hunk of whatever is currently painted — a single file's own hunks, or every hunk of a whole intent, in file order. No wraparound, and no reaching into a different file or group: at the last (or first) hunk on screen they simply do nothing. |
-| `gf` | Open the real file at the cursor's exact line, in a new tab. The only way from a pane's read-only scratch buffer into the editable file. |
-| `<leader>b` | Show or hide the sidebar (`keymaps.view.toggle_sidebar`) |
-| `g?` | Toggle the keymap cheatsheet |
-| `q` | Close the review tab. The panes are our own scratch buffers, not a codediff session, so this is installed on all of them. |
-
-The inline↔side-by-side toggle key (borrowed from codediff's
-`keymaps.view.toggle_layout`, so it stays in sync with whatever you configured
-there) re-renders the current plan in the other layout; the fold filter
-re-applies. `<leader>b` and `g?` are installed here, not just on the sidebar —
-a sidebar-only key would be unreachable once the sidebar is hidden, so the
-toggle works even when codediff's layout-toggle key is disabled. All of the
-above work over a whole intent exactly as over one file — same panes, same
-keys.
-
-**Comments:** cross-surface by nature, installed on the diff panes and the
-sidebar — an intent comment is added from a sidebar group row, a line comment
-from a pane row, and both surfaces need the export keys (see "Review comments"
-above).
-
-| Key | Action |
-|---|---|
-| `<localleader>cc` | Add a comment, picking the type in the popup (normal and visual) |
-| `<localleader>cn` `cs` `ci` `cp` | Add a note / suggestion / issue / praise directly (normal and visual) |
-| `<localleader>cf` | File-level comment on a diff pane or sidebar file row; a whole-intent comment on a sidebar group row |
-| `<localleader>ce` | Edit the comment at the cursor |
-| `<localleader>cd` | Delete the comment at the cursor |
-| `<localleader>cl` | List every comment in the review and jump to one (`:IntentDiffCommentsList`) |
-| `]n` / `[n` | Next / previous comment in this file |
-| `<localleader>cy` | Copy the review as Markdown (`:IntentDiffCommentsYank`) |
-| `<localleader>cw` | Write the review to a file (`:IntentDiffCommentsWrite`) |
-| `<localleader>cx` | Delete every comment in this review, after confirmation (`:IntentDiffCommentsClear`) |
-| `<localleader>q` | Copy the review as Markdown, then close the review tab |
+If you hit "provider timed out", check `:IntentDiffLog` first — look at
+`id_mapping_failures` and `parse_outcome` before assuming it's purely a speed
+problem — then raise `provider_opts.timeout_ms` if it's genuine.
 
 ## Diagnostics
 
-`:IntentDiffLog` opens the diagnostics log (`config.log_file`, default
-`vim.fn.stdpath("cache") .. "/intentdiff/intentdiff.log"`) in a scratch
-buffer, cursor at the end so the newest entry is visible. If nothing has
-been logged yet, it shows a one-line "no entries yet" buffer instead of
-erroring.
+`:IntentDiffLog` opens the diagnostics log (`config.log_file`) in a scratch
+buffer, cursor at the end so the newest entry is visible. Every classification
+appends timestamped entries covering:
 
-Every classification appends timestamped entries covering:
-
-- **Provider invocations** — the command+args spawned, prompt size in
-  bytes, hunk count in the request, elapsed time, exit code, the first
-  ~400 bytes of stdout and stderr each, and how the response parsed.
+- **Provider invocations** — the command+args spawned, prompt size, hunk
+  count, elapsed time, exit code, the first ~400 bytes of stdout and stderr,
+  and how the response parsed.
 - **Classification outcomes** — cache hit, re-match against the previous
-  classification (with the stale count), skipped for exceeding
-  `max_hunks`, or provider success/error.
+  classification, skipped for exceeding `max_hunks`, or provider
+  success/error.
 - **Reconciliation stats** — total inventory hunks, how many the provider
-  assigned, how many ids were unrecognized (not in the inventory — i.e.
-  dropped as hallucinated), how many were duplicates, how many landed in
-  Ungrouped, and (for compact `ids` responses) `id_mapping_failures` — how
-  many numbers in the response's `ids` string/array/number couldn't be
-  mapped back to a hunk (out of range, non-numeric, or a nonsensical
-  range) and were dropped before reconciliation even ran.
+  assigned, how many ids were unrecognized or duplicated, how many landed in
+  Ungrouped, and `id_mapping_failures` for compact responses.
 
 The log file is capped at roughly 200KB, truncating the oldest entries on
-write, so it can't grow unbounded across a long Neovim session.
+write.
 
-## Manual smoke test (real LLM)
+## License
 
-1. In a repo with a multi-purpose dirty working tree, run `:IntentDiff`.
-2. Sidebar shows flat "All changes" + `⟳ classifying…`, then regroups once the
-   provider responds — seconds on a small diff, but expect well over a minute
-   on a large one (see the measured latency table below; not ~5s).
-3. Footer shows `N/N hunks` — total must equal the hunk count of `git diff HEAD` + untracked files.
-4. The first file opens on its own (`auto_open`, default on) as soon as
-   there's something to show — no need to select anything: unrelated hunks
-   are folded; `zo` peeks at them.
-5. `]c` at the last hunk of the open file does nothing (no wraparound, no
-   rolling to the next file). Rest the cursor on the group row instead to
-   preview the whole intent — now `]c` walks every hunk across all its files,
-   in order, because they're all in the one plan that's on screen.
-6. Toggle inline view (the key borrowed from codediff) — folds still filter to
-   the group, and any old-side comment box is still there, on the removed line
-   it was made on.
-7. `r` re-classifies; a second `:IntentDiff` on the same diff is instant (cache).
-8. In a pane, `<localleader>cn` on a changed line: the popup opens **already in
-   insert mode** — type without pressing `i`. `<C-s>` submits, a box appears
-   under the line, and you are back in normal mode in the pane you came from
-   (`<Esc>` cancels and must leave you in normal mode too). The automated
-   tests all drive the popup with `no_insert`, so this insert/stopinsert path
-   is only ever exercised here.
-9. Add a second comment further down the same file, then `]n` / `[n` from a
-   pane: the cursor walks between the two boxes and reports "no more comments"
-   at the ends. With a whole intent on screen it walks every box the render
-   draws, including boxes in its other files. Press `]n` with the cursor in
-   the **sidebar**:
-   it must refuse ("comment navigation only works in a diff pane") and the
-   sidebar cursor must not move — a sidebar row is not a diff line, and a
-   stray jump there re-renders the panes via the hover preview.
-10. `<localleader>ce` on a commented line edits it, `<localleader>cd` deletes
-    it. Then, in another Neovim (or `:!`), delete most of the file's lines so
-    a comment's line number is past the end, and reopen the review: the box
-    is clamped onto the last line, and `]n`, `<localleader>ce` and
-    `<localleader>cd` must all still reach it there.
-11. Open a **second** `:IntentDiff` tab on the same working tree and comment in
-    it, then switch back to the first tab: the first tab's boxes reappear on
-    `TabEnter` (the two tabs share one underlying buffer and one extmark
-    namespace — see "Two review tabs on the same file"). They should be back
-    the moment you land, not after another keypress.
-12. `<localleader>cy` copies the Markdown; paste it somewhere and check the
-    headings match the sidebar's intents. `<localleader>q` copies and closes
-    the tab in one go.
-
-Large diffs take longer than the ~5s above. Measured with `claude -p --model
-haiku` on a 99-hunk / 28-file diff:
-
-| Prompt                              | Output size | Wall time |
-|--------------------------------------|-------------|-----------|
-| Full diff + verbose (path:n) ids     | 4.0KB       | 1:46      |
-| Manifest only + verbose ids          | 4.0KB       | 1:49      |
-| Manifest + compact ids, range output | 641B        | 1:01      |
-
-**Prompt size is not the bottleneck — output size is.** Sending the full diff
-text instead of just the manifest (file + hunk header + a few summary lines
-per hunk, `max_full_diff_bytes`) barely moved the needle: 95KB of prompt vs.
-24KB cost about the same ~1:45-1:50. What actually dominates decode time is
-how much the model has to *write back* — echoing a verbose `"src/a/b.lua:1"`
-style id per hunk produces several KB of output; the compact integer `ids`
-format with range compression (`"1-4,7,12-15"`) cut that to well under 1KB and
-very roughly halved wall-clock time in this measurement. In other words: if
-classification feels slow, lowering `max_full_diff_bytes` will barely help —
-what you actually want is fewer, more compressible groups (which the
-"prefer 3-8 groups" instruction in the prompt already pushes for) or a
-smaller/faster model.
-
-Expect classification to still take up to a minute or two on genuinely large
-diffs (the sidebar's `⟳ classifying… Ns` counter shows how long it's been
-running). If you hit "provider timed out", check `:IntentDiffLog` first —
-look at `id_mapping_failures` and `parse_outcome` before assuming it's purely
-a speed problem — then raise `provider_opts.timeout_ms` if it's genuine.
+MIT — see [LICENSE](LICENSE). Every dependency it builds on is MIT too; the
+per-component copyright notices are in [ATTRIBUTION.md](ATTRIBUTION.md).
