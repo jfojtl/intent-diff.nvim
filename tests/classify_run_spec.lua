@@ -89,6 +89,89 @@ describe("classify.run", function()
     assert.equals(0, info.stale_count)
   end)
 
+  it("falls through to the provider when a rematch recovers nothing", function()
+    -- The previous classification is for a diff that has since been replaced
+    -- wholesale (branch merged, work committed, different feature started):
+    -- not one content hash survives, so rematch recovers zero hunks. Serving
+    -- that empty rematch would show every hunk as "Ungrouped" — and because
+    -- init.lua deliberately does NOT advance last_hash on the rematch path,
+    -- the scope would stay pinned to this dead entry forever, never
+    -- classifying again. A rematch that recovered nothing is a cache MISS.
+    cache.save("old-hash", {
+      groups = { { title = "Stale", hunk_ids = { "gone.lua:1" } } },
+      hunk_hashes = { ["gone.lua:1"] = "hash-of-a-hunk-that-no-longer-exists" },
+    })
+    local called = false
+    local groups, info
+    classify.run(mk_inventory("new-hash"), {
+      provider = function(request, cb)
+        called = true
+        vim.schedule(function() cb({ groups = { { title = "Fresh", hunk_ids = { "a.lua:1" } } } }) end)
+        return { cancel = function() end }
+      end,
+      previous_hash = "old-hash",
+    }, function(g, _, i) groups, info = g, i end)
+    helpers.wait_for(function() return groups end)
+    assert.is_true(called, "provider was never called: a useless rematch was served instead")
+    assert.equals("Fresh", groups[1].title)
+    assert.is_nil(info.stale_count)
+    assert.is_nil(info.cached)
+  end)
+
+  it("still serves a PARTIAL rematch without calling the provider", function()
+    -- The rematch path earns its keep when the diff changed slightly: one of
+    -- the two cached hunks survives, so the grouping is worth keeping and the
+    -- provider stays unpaid. Only a total miss falls through.
+    local inventory = mk_inventory("partial-new")
+    table.insert(inventory.hunks, {
+      id = "a.lua:2", file = "a.lua", status = "M", content_hash = "brand-new", text = "@@ y\n",
+      header = "@@", original = { start_line = 9, end_line = 10 }, modified = { start_line = 9, end_line = 10 },
+    })
+    cache.save("partial-old", {
+      groups = { { title = "Kept", hunk_ids = { "a.lua:9" } } },
+      hunk_hashes = { ["a.lua:9"] = "c1" },
+    })
+    local groups, info
+    classify.run(inventory, {
+      provider = function() error("provider must not be called for a partial rematch") end,
+      previous_hash = "partial-old",
+    }, function(g, _, i) groups, info = g, i end)
+    helpers.wait_for(function() return groups end)
+    assert.equals("Kept", groups[1].title)
+    assert.equals("Ungrouped", groups[2].title)
+    assert.equals(1, info.stale_count)
+  end)
+
+  it("logs why a dead rematch was abandoned", function()
+    -- The whole point of the diagnostics log is that a user staring at 69
+    -- ungrouped hunks can tell WHY. "outcome=rematch stale_count=69" alone
+    -- does not say that nothing matched, which entry it matched against, or
+    -- what happened next.
+    local log_file = vim.fn.tempname()
+    config.setup({ cache_dir = vim.fn.tempname(), log_file = log_file })
+    cache.save("dead-old", {
+      groups = { { title = "Stale", hunk_ids = { "gone.lua:1" } } },
+      hunk_hashes = { ["gone.lua:1"] = "vanished" },
+    })
+    local groups
+    classify.run(mk_inventory("dead-new"), {
+      provider = provider_returning({ { title = "Fresh", hunk_ids = { "a.lua:1" } } }),
+      previous_hash = "dead-old",
+    }, function(g) groups = g end)
+    helpers.wait_for(function() return groups end)
+
+    local line
+    for _, l in ipairs(log.read(log_file)) do
+      if l:find("outcome=rematch_miss", 1, true) then
+        line = l
+      end
+    end
+    assert.truthy(line, "no rematch_miss entry:\n" .. table.concat(log.read(log_file), "\n"))
+    assert.truthy(line:find("matched=0", 1, true), "missing matched count: " .. line)
+    assert.truthy(line:find("stale_count=1", 1, true), "missing stale count: " .. line)
+    assert.truthy(line:find("previous_hash=dead-old", 1, true), "missing previous hash: " .. line)
+  end)
+
   it("force bypasses the cache", function()
     cache.save("hash1", { groups = { { title = "Cached", hunk_ids = { "a.lua:1" } } }, hunk_hashes = {} })
     local groups

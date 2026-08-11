@@ -291,8 +291,35 @@ function M.run(inventory, opts, callback)
       local prev = cache.load(opts.previous_hash)
       if prev then
         local raw, stale = cache.rematch(prev, inventory)
-        log.classification({ outcome = "rematch", stale_count = stale, diff_hash = inventory.diff_hash })
-        return deliver(reconcile_and_log(raw), nil, { cached = true, stale_count = stale })
+        local matched = #inventory.hunks - stale
+        -- A rematch that recovered NOTHING is a cache miss, not an answer.
+        -- It happens whenever the previous classification describes a diff
+        -- that has since been replaced wholesale (work committed, branch
+        -- switched, a different feature started): no content hash survives,
+        -- so every hunk lands in "Ungrouped". Serving that was doubly bad —
+        -- the user saw an unclassified diff, AND the state was sticky:
+        -- init.lua's persist_last_hash deliberately does not advance
+        -- last_hash on the rematch path, so the scope stayed pinned to the
+        -- dead entry and EVERY later run took this same branch. The provider
+        -- was never called again for that scope short of a forced `r`.
+        if matched > 0 then
+          log.classification({
+            outcome = "rematch",
+            diff_hash = inventory.diff_hash,
+            previous_hash = opts.previous_hash,
+            matched = matched,
+            stale_count = stale,
+          })
+          return deliver(reconcile_and_log(raw), nil, { cached = true, stale_count = stale })
+        end
+        log.classification({
+          outcome = "rematch_miss",
+          diff_hash = inventory.diff_hash,
+          previous_hash = opts.previous_hash,
+          matched = 0,
+          stale_count = stale,
+          reason = "no cached hunk survived; classifying from scratch",
+        })
       end
     end
   end
