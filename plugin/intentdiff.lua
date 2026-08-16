@@ -58,3 +58,10 @@ vim.api.nvim_create_user_command("IntentDiffCommentsClear", function()
   end
   require("intentdiff.comments").clear()
 end, { desc = "intent-diff: delete every review comment" })
+
+vim.api.nvim_create_user_command("IntentDiffCommentsSubmit", function()
+  if comments_off() then
+    return
+  end
+  require("intentdiff.comments").submit()
+end, { desc = "intent-diff: submit the review to the pull request" })

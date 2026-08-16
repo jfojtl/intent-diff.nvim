@@ -126,6 +126,7 @@ local function build_sections(keymaps)
       { ckm.export_file, "Write the review to a file" },
       { ckm.clear_comments, "Delete every comment" },
       { ckm.export_and_close, "Copy the review, then close the tab" },
+      { ckm.submit_review, "Submit the review to the pull request" },
     })
     if comments then
       sections[#sections + 1] = comments

@@ -797,6 +797,13 @@ function M.export_and_close(tabpage)
   require("intentdiff").close(tabpage)
 end
 
+--- Submit the review to the service hosting it — a GitHub PR today. The flow
+--- lives in comments/submit.lua; this is the name the keymap and command bind
+--- to.
+function M.submit(tabpage)
+  require("intentdiff.comments.submit").run(tabpage)
+end
+
 --- Re-sign the sidebar's group rows. The row list comes from the sidebar
 --- handle, which knows its own layout.
 function M.refresh_sidebar(tabpage)
