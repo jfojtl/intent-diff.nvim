@@ -104,7 +104,7 @@ local function post(entry, tabpage, state, payload, sent_comments)
     vim.schedule(function()
       if not result then
         if kind == "self_approve" then
-          notify(err, vim.log.levels.WARN)
+          notify(err or "cannot approve your own pull request", vim.log.levels.WARN)
           local answer = vim.fn.confirm(
             "GitHub will not let you approve your own PR. Post the same review as a plain Comment?",
             "&Yes\n&No", 2)
@@ -127,8 +127,15 @@ local function post(entry, tabpage, state, payload, sent_comments)
       end
       require("intentdiff.comments.marks").refresh(tabpage)
       require("intentdiff.comments").refresh_sidebar(tabpage)
-      notify(("submitted %d comment(s) to PR #%s — %s")
-        :format(#sent_comments, state.target.id, result.url or ""))
+      if #sent_comments == 0 then
+        -- verdict_only: every comment was already posted, so "submitted 0
+        -- comment(s)" would read as if nothing happened when a verdict
+        -- (approve/request changes/comment) genuinely just landed.
+        notify(("submitted the verdict to PR #%s — %s"):format(state.target.id, result.url or ""))
+      else
+        notify(("submitted %d comment(s) to PR #%s — %s")
+          :format(#sent_comments, state.target.id, result.url or ""))
+      end
       local answer = vim.fn.confirm("Close the review tab?", "&Yes\n&No", 2)
       if answer == 1 then
         require("intentdiff").close(tabpage)
