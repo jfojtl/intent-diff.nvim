@@ -312,4 +312,42 @@ describe("comments.export", function()
     -- Not a vacuous comparison against another empty string.
     assert.is_truthy(expected:match("%*%*%[ISSUE%]%*%* `src/api/routes%.ts:5`"))
   end)
+
+  it("buckets comments by the intent owning their line", function()
+    local b = export.bucket({
+      { file = "src/api/routes.ts", line = 5, side = "new", type = "issue", text = "a" },
+      { file = "src/http/client.ts", line = 44, side = "new", type = "note", text = "b" },
+      { file = "nowhere.ts", line = 9, side = "new", type = "note", text = "c" },
+      { intent_title = "Add retry logic to HTTP client", type = "note", text = "d" },
+    }, model())
+    assert.is_false(b.flat)
+    assert.equals(1, #b.buckets[1].items)
+    assert.equals("a", b.buckets[1].items[1].text)
+    assert.equals(1, #b.buckets[2].items)
+    assert.equals(1, #b.buckets[2].intents)
+    assert.equals("d", b.buckets[2].intents[1].text)
+    assert.equals(1, #b.unmatched)
+    assert.equals("c", b.unmatched[1].text)
+  end)
+
+  it("buckets flat under key 0 when there are no groups", function()
+    local b = export.bucket({
+      { file = "a.ts", line = 1, side = "new", type = "note", text = "a" },
+      { intent_title = "Gone", type = "note", text = "d" },
+    }, { groups = {} })
+    assert.is_true(b.flat)
+    assert.equals(1, #b.buckets[0].items)
+    assert.equals(1, #b.buckets[0].intents)
+    assert.equals(0, #b.unmatched)
+  end)
+
+  it("renders a location for every comment shape", function()
+    assert.equals("a.ts", export.location({ file = "a.ts", line = 0 }))
+    assert.equals("a.ts:12", export.location({ file = "a.ts", line = 12, side = "new" }))
+    assert.equals("a.ts:12-18",
+      export.location({ file = "a.ts", line = 12, line_end = 18, side = "new" }))
+    assert.equals("a.ts:~41", export.location({ file = "a.ts", line = 41, side = "old" }))
+    assert.equals("a.ts:~12-~18",
+      export.location({ file = "a.ts", line = 12, line_end = 18, side = "old" }))
+  end)
 end)

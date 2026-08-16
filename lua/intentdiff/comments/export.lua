@@ -64,7 +64,11 @@ end
 
 --- `src/a.ts:12`, `src/a.ts:12-18`, `src/a.ts:~12`, `src/a.ts:~12-~18`, or a
 --- bare path for a file-level comment.
-local function location(c)
+---
+--- Exported because the forge payload builder writes the same coordinates into
+--- the PR review body's index, and two spellings of "where is this comment"
+--- would drift.
+function M.location(c)
   if (c.line or 0) == 0 then
     return c.file
   end
@@ -74,6 +78,8 @@ local function location(c)
   end
   return ("%s:%s%d"):format(c.file, mark, c.line)
 end
+
+local location = M.location
 
 --- Sort key within a group: file path, then line, with the file-level comment
 --- for a file ahead of its line comments, then side as a final tiebreak so an
@@ -100,6 +106,44 @@ local function entry_lines(index, c, out)
   out[#out + 1] = ""
 end
 
+--- Split `comments` into per-intent buckets, exactly as the Markdown export
+--- files them.
+---
+--- Shared with comments/payload.lua so the PR review body groups a comment
+--- under the same intent the clipboard export does. Membership is COMPUTED, not
+--- stored — see this file's header.
+---
+--- `flat` is the no-grouping fallback (classification still running, or it
+--- failed): every comment lands in `buckets[0]` and `unmatched` stays empty,
+--- because with no groups there is nothing for a comment to fail to match.
+--- @return { buckets: table, unmatched: table[], groups: table[], flat: boolean }
+function M.bucket(comments, model)
+  local groups = (model and model.groups) or {}
+  local flat = #groups == 0
+  local buckets, unmatched = {}, {}
+  local function place(key, c)
+    buckets[key] = buckets[key] or { intents = {}, items = {} }
+    if c.intent_title then
+      table.insert(buckets[key].intents, c)
+    else
+      table.insert(buckets[key].items, c)
+    end
+  end
+  for _, c in ipairs(comments or {}) do
+    if flat then
+      place(0, c)
+    else
+      local gi = group_index(c, model)
+      if gi then
+        place(gi, c)
+      else
+        unmatched[#unmatched + 1] = c
+      end
+    end
+  end
+  return { buckets = buckets, unmatched = unmatched, groups = groups, flat = flat }
+end
+
 --- @return string
 function M.generate(comments, model)
   comments = comments or {}
@@ -107,34 +151,8 @@ function M.generate(comments, model)
     return "No comments yet."
   end
 
-  local groups = (model and model.groups) or {}
-  -- Bucket by group index; unmatched comments collect separately.
-  local buckets, unmatched = {}, {}
-  for _, c in ipairs(comments) do
-    if #groups == 0 then
-      -- No grouping available (classification running or failed): flat
-      -- list. An intent comment has no group to hang under, so it still
-      -- reads as an unattached paragraph rather than a numbered entry.
-      buckets[0] = buckets[0] or { intents = {}, items = {} }
-      if c.intent_title then
-        table.insert(buckets[0].intents, c)
-      else
-        table.insert(buckets[0].items, c)
-      end
-    else
-      local gi = group_index(c, model)
-      if gi then
-        buckets[gi] = buckets[gi] or { intents = {}, items = {} }
-        if c.intent_title then
-          table.insert(buckets[gi].intents, c)
-        else
-          table.insert(buckets[gi].items, c)
-        end
-      else
-        unmatched[#unmatched + 1] = c
-      end
-    end
-  end
+  local b = M.bucket(comments, model)
+  local groups, buckets, unmatched = b.groups, b.buckets, b.unmatched
 
   local has_old = false
   for _, c in ipairs(comments) do
