@@ -73,6 +73,7 @@ describe("forges.github.submit", function()
         { path = "a.ts", line = 44, line_end = 51, side = "new", body = "r", file_level = false },
         { path = "b.ts", line = 41, side = "old", body = "o", file_level = false },
         { path = "c.ts", line = 0, side = "new", body = "f", file_level = true },
+        { path = "d.ts", line = 12, line_end = 12, side = "new", body = "s", file_level = false },
       },
     })
     assert.is_true(done)
@@ -87,6 +88,13 @@ describe("forges.github.submit", function()
     assert.equals("file", c[3].subject_type)
     assert.is_nil(c[3].line)
     assert.is_nil(c[3].side)
+    -- line_end == line is a single-line comment, not a zero-length range:
+    -- payload.lua passes line_end through unnormalized, so this input is
+    -- reachable, and a degenerate start_line == line is a 422.
+    assert.equals(12, c[4].line)
+    assert.is_nil(c[4].start_line)
+    assert.is_nil(c[4].start_side)
+    assert.equals("RIGHT", c[4].side)
   end)
 
   it("omits the comments key entirely when there are none", function()
