@@ -63,15 +63,40 @@ function M.default_branch(git_root)
   return (ref:gsub("^origin/", ""))
 end
 
---- Paths with uncommitted changes, from porcelain status. Renames report
---- `R  old -> new`; the NEW path is what a comment addresses.
+--- Paths with uncommitted changes.
+---
+--- `-z` rather than the default porcelain format: the default QUOTES a path
+--- containing special characters and renders a rename as `R  old -> "new"`,
+--- which no pattern can split unambiguously once the new path itself contains
+--- " -> ". With `-z` each record is NUL-terminated and never quoted, and a
+--- rename emits TWO records — the new path, then the old.
+---
+--- Vim converts those NULs to \n inside systemlist's single returned element,
+--- so the records are split here rather than by git.
 --- @return string[]
 function M.dirty_files(git_root)
+  local raw = M.git_lines(git_root, "status", "--porcelain", "-z")
+  if not raw then
+    return {}
+  end
+  local records = vim.split(table.concat(raw, "\n"), "\n", { plain = true })
   local out = {}
-  for _, line in ipairs(M.git_lines(git_root, "status", "--porcelain") or {}) do
-    local path = line:sub(4)
-    local _, new = path:match("^(.+) %-> (.+)$")
-    out[#out + 1] = new or path
+  local i = 1
+  while i <= #records do
+    local record = records[i]
+    i = i + 1
+    -- `XY path`: two status columns, a space, then the path. Anything shorter
+    -- is the empty trailing record after the final NUL.
+    if #record > 3 then
+      local x, y = record:sub(1, 1), record:sub(2, 2)
+      out[#out + 1] = record:sub(4)
+      -- A rename or copy emits its OLD path as the very next record. That path
+      -- is not dirty in its own right, and consuming it here is what keeps it
+      -- out of the commented-file intersection.
+      if x == "R" or x == "C" or y == "R" or y == "C" then
+        i = i + 1
+      end
+    end
   end
   return out
 end

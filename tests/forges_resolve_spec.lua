@@ -104,3 +104,28 @@ exit 1
     assert.equals("no_pr", forges.preflight(state).mode)
   end)
 end)
+
+describe("forges.dirty_files", function()
+  it("reports the new path of a rename, not the old", function()
+    local repo = helpers.make_repo({ ["a.ts"] = "one\n", ["keep.ts"] = "k\n" })
+    helpers.git(repo, "mv", "a.ts", "b.ts")
+    assert.same({ "b.ts" }, forges.dirty_files(repo))
+  end)
+
+  it("handles a rename whose new path contains the rename arrow", function()
+    local repo = helpers.make_repo({ ["a.ts"] = "one\n" })
+    helpers.git(repo, "mv", "a.ts", "b -> c.ts")
+    -- Default porcelain renders this `R  a.ts -> "b -> c.ts"`, which no pattern
+    -- can split unambiguously; -z makes it two unquoted NUL records.
+    assert.same({ "b -> c.ts" }, forges.dirty_files(repo))
+  end)
+
+  it("reports modified and untracked files", function()
+    local repo = helpers.make_repo({ ["a.ts"] = "one\n" })
+    helpers.write_file(repo, "a.ts", "changed\n")
+    helpers.write_file(repo, "new.ts", "new\n")
+    local dirty = forges.dirty_files(repo)
+    table.sort(dirty)
+    assert.same({ "a.ts", "new.ts" }, dirty)
+  end)
+end)
