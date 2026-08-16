@@ -533,21 +533,51 @@ describe("comments.payload", function()
       assert.is_nil(p.body:match("`src/api/routes%.ts:5` — ISSUE"))
     end)
 
-    it("puts a comment matching no intent under the unattached heading", function()
+    it("indexes a comment matching no intent, without repeating its text", function()
       local p = payload.build({
         { file = "nowhere.ts", line = 9, side = "new", type = "note", text = "orphan" },
       }, model(), "inline")
-      assert.is_truthy(p.body:match("## Not attached to a line"))
-      assert.is_truthy(p.body:match("orphan"))
-      -- Still posted inline: not matching an intent says nothing about whether
-      -- GitHub can anchor it.
+      -- Posted inline: matching no intent says nothing about whether GitHub can
+      -- anchor it, so its text lives inline and the body only points at it.
       assert.equals(1, #p.comments)
+      assert.is_truthy(p.body:match("## Not attached to an intent"))
+      assert.is_truthy(p.body:match("`nowhere%.ts:9` — NOTE"))
+      assert.is_nil(p.body:match("orphan"))
+      assert.is_nil(p.body:match("## Not attached to a line"))
+    end)
+
+    it("keeps the two unattached headings apart", function()
+      local anchorable = function(c) return c.file ~= "gone.ts" end
+      local p = payload.build({
+        { file = "nowhere.ts", line = 9, side = "new", type = "note", text = "orphan" },
+        { file = "gone.ts", line = 3, side = "new", type = "issue", text = "vanished" },
+      }, model(), "inline", anchorable)
+      assert.equals(1, #p.comments)
+      assert.equals(1, p.demoted)
+      -- Indexed: posted inline, just not under any intent.
+      assert.is_truthy(p.body:match("## Not attached to an intent"))
+      assert.is_truthy(p.body:match("`nowhere%.ts:9` — NOTE"))
+      -- Full text: nowhere else for it to live.
+      assert.is_truthy(p.body:match("## Not attached to a line"))
+      assert.is_truthy(p.body:match("vanished"))
+    end)
+
+    it("carries an orphaned intent comment's title in the body", function()
+      local p = payload.build({
+        { intent_title = "A group that was renamed away", type = "note", text = "prose" },
+      }, model(), "inline")
+      assert.equals(0, #p.comments)
+      assert.is_truthy(p.body:match("_Intent: A group that was renamed away_"))
+      assert.is_truthy(p.body:match("prose"))
     end)
 
     it("degrades to a flat body when classification produced no groups", function()
       local p = payload.build(comments(), { groups = {} }, "inline")
       assert.is_nil(p.body:match("## Rename"))
       assert.is_truthy(p.body:match("This rename missed the DI container entirely%."))
+      -- No heading names the intent in the flat fallback, so the title has to
+      -- travel with the comment — same rule as export.generate.
+      assert.is_truthy(p.body:match("_Intent: Rename UserService to AccountService_"))
       assert.equals(4, #p.comments)
     end)
   end)
@@ -601,7 +631,13 @@ local export = require("intentdiff.comments.export")
 local HEADER = "I reviewed your code and have the following comments. Please address them."
 local TYPE_LEGEND = "Comment types: ISSUE (problems to fix), SUGGESTION (improvements),\n"
   .. "NOTE (observations), PRAISE (positive feedback)"
-local UNATTACHED = "Not attached to a line"
+-- Two headings, two different failures, deliberately not merged. A comment can
+-- match no intent yet post perfectly well on its line (index it, its text is
+-- inline); or it can be impossible to anchor and have nowhere but the body to
+-- live (print it in full). Merging them would either repeat an inline comment's
+-- text or silently drop a demoted one.
+local NO_INTENT = "Not attached to an intent"
+local NO_LINE = "Not attached to a line"
 local VERDICT_ONLY = "Submitted from intent-diff with no new comments."
 
 local function typed(c)
@@ -671,8 +707,16 @@ function M.build(comments, model, mode, anchorable)
   local out = { HEADER, "", TYPE_LEGEND, "" }
 
   --- Intent prose, then one index line per inline comment under it.
-  local function emit(bucket)
+  ---
+  --- `has_heading` says whether a `## <title>` line is about to sit above these
+  --- comments. When one is, the heading IS the anchor. When there is none — the
+  --- flat fallback — the title has to travel WITH the comment, exactly as
+  --- export.generate does it, or the prose reads as a document preamble.
+  local function emit(bucket, has_heading)
     for _, c in ipairs(bucket.intents) do
+      if not has_heading and c.intent_title then
+        out[#out + 1] = ("_Intent: %s_"):format(c.intent_title)
+      end
       for _, line in ipairs(vim.split(c.text or "", "\n")) do
         out[#out + 1] = line
       end
@@ -693,41 +737,29 @@ function M.build(comments, model, mode, anchorable)
   if b.flat and b.buckets[0] then
     -- No grouping available: no headings to hang an index under, so the body
     -- is just the intent prose plus the index.
-    emit(b.buckets[0])
+    emit(b.buckets[0], false)
   end
   for gi, g in ipairs(b.groups) do
     if b.buckets[gi] then
       out[#out + 1] = "## " .. g.title
       out[#out + 1] = ""
-      emit(b.buckets[gi])
+      emit(b.buckets[gi], true)
     end
   end
 
-  -- Everything the body must carry itself: comments GitHub cannot anchor, and
-  -- comments matching no intent. An intent comment among the unmatched keeps
-  -- its title, since no heading above it names one.
-  local carried = {}
+  -- Matched no intent, but posts inline perfectly well: an index line, and an
+  -- orphaned intent comment as prose carrying its own title, since no heading
+  -- above it names one.
+  local no_intent = {}
   for _, c in ipairs(b.unmatched) do
-    if c.intent_title or not is_demoted[c] then
-      carried[#carried + 1] = c
+    if not is_demoted[c] then
+      no_intent[#no_intent + 1] = c
     end
   end
-  for _, c in ipairs(demoted_list) do
-    carried[#carried + 1] = c
-  end
-  local seen = {}
-  local unique = {}
-  for _, c in ipairs(carried) do
-    if not seen[c] then
-      seen[c] = true
-      unique[#unique + 1] = c
-    end
-  end
-  if #unique > 0 then
-    out[#out + 1] = "## " .. UNATTACHED
+  if #no_intent > 0 then
+    out[#out + 1] = "## " .. NO_INTENT
     out[#out + 1] = ""
-    local n = 0
-    for _, c in ipairs(unique) do
+    for _, c in ipairs(no_intent) do
       if c.intent_title then
         out[#out + 1] = ("_Intent: %s_"):format(c.intent_title)
         for _, line in ipairs(vim.split(c.text or "", "\n")) do
@@ -735,9 +767,20 @@ function M.build(comments, model, mode, anchorable)
         end
         out[#out + 1] = ""
       else
-        n = n + 1
-        full_of(c, n, out)
+        out[#out + 1] = index_of(c)
       end
+    end
+    if out[#out] ~= "" then
+      out[#out + 1] = ""
+    end
+  end
+
+  -- Could not be anchored: the body is the only place left, so print it whole.
+  if #demoted_list > 0 then
+    out[#out + 1] = "## " .. NO_LINE
+    out[#out + 1] = ""
+    for n, c in ipairs(demoted_list) do
+      full_of(c, n, out)
     end
   end
 
@@ -2413,7 +2456,10 @@ first; a remote that is not GitHub reports that no forge serves it.
 Comments GitHub cannot anchor — a line outside the PR diff — are moved into the
 review body under `## Not attached to a line` rather than dropped, and you are
 told how many. This is worked out locally against the PR's own diff, because
-the reviews API is atomic: one bad line would reject the entire review.
+the reviews API is atomic: one bad line would reject the entire review. A
+comment that anchors fine but belongs to no intent is listed under
+`## Not attached to an intent` — as a pointer, since its text is already on its
+line.
 
 **Posted comments are remembered.** Each one that lands is stamped, its box
 header reads `[ISSUE · POSTED]`, and a later submit offers only the comments
@@ -2471,6 +2517,10 @@ git commit -m "docs: submitting a review to a pull request"
 
 **Spec coverage.** Every spec section maps to a task: the forge interface and resolution → Tasks 4 and 6; preflight → Task 2; GitHub detect/submit → Tasks 4 and 5; local anchoring → Task 7; payload composition and the `export.bucket` refactor → Tasks 1 and 3; posted state → Task 8; the interactive flow, config, keys and command → Task 9; documentation → Task 10. The spec's `forge = false` distinction is covered by `forges.resolve` in Task 6 and its test. The verdict-only submit is covered by `submit.plan` in Task 9.
 
-**Known deviation from the spec.** The spec illustrates the posted marker as `╭─ Issue · posted ─╮`. The real `marks.build_box` renders `[ISSUE]`, uppercased and bracketed, so Task 8 implements `[ISSUE · POSTED]` to match the existing format.
+**Known deviations from the spec.**
+
+1. The spec illustrates the posted marker as `╭─ Issue · posted ─╮`. The real `marks.build_box` renders `[ISSUE]`, uppercased and bracketed, so Task 8 implements `[ISSUE · POSTED]` to match the existing format.
+2. The spec puts demoted **and** unmatched comments in full under one `## Not attached to a line` heading. Full text for an unmatched comment contradicts the spec's own binding rule that no text appears twice — an unmatched comment still posts inline. Task 3 therefore splits them: `## Not attached to an intent` indexes comments that anchor but match no intent, and `## Not attached to a line` prints in full only what could not be anchored.
+3. The spec's flat-fallback body did not say whether an intent comment keeps its title when no heading names it. Task 3 prints `_Intent: <title>_`, matching `export.generate`'s existing rule for the same situation.
 
 **Type consistency.** `payload.build(comments, model, mode, anchorable)` returns `{ body, comments, demoted }` and Task 9 sets `.verdict` on it before handing it to `forge.submit`, which reads `payload.verdict`, `payload.body` and `payload.comments` — consistent. Inline comment fields (`path`, `line`, `line_end`, `side`, `body`, `file_level`) are produced by Task 3 and consumed by Task 5's `api_comment` under exactly those names. `state.forge`, `state.target`, `state.git_root` are produced by Task 6's `collect` and consumed by Task 9. `store.mark_posted` / `store.unposted` are defined in Task 8 and called in Task 9.
