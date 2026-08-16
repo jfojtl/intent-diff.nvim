@@ -43,8 +43,13 @@ function M.covers(hunk_list, comment)
     return false
   end
   local side = comment.side or "new"
-  local first = comment.line
-  local last = comment.line_end or comment.line
+  -- math.min/max, not the fields as given: `for line = 12, 8` runs ZERO
+  -- iterations and falls through to `return true` below — every backwards
+  -- range accepted without one line being checked. visual_range normalizes at
+  -- creation, but covers() is a pure general-purpose function and stored
+  -- comments are never revalidated on load.
+  local first = math.min(comment.line, comment.line_end or comment.line)
+  local last = math.max(comment.line, comment.line_end or comment.line)
   for line = first, last do
     local found = false
     for _, h in ipairs(hunk_list or {}) do

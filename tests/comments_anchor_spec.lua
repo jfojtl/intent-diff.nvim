@@ -32,6 +32,15 @@ describe("comments.anchor", function()
       { file = "a.ts", line = 12, line_end = 30, side = "new" }))
   end)
 
+  it("rejects a backwards range the same as a forward one", function()
+    -- Written backwards on purpose: `for line = 30, 12` runs zero iterations,
+    -- so the old code accepted this without checking a single line.
+    assert.is_false(anchor.covers(hunk_list,
+      { file = "a.ts", line = 30, line_end = 12, side = "new" }))
+    assert.is_true(anchor.covers(hunk_list,
+      { file = "a.ts", line = 18, line_end = 12, side = "new" }))
+  end)
+
   it("accepts a file-level comment on any file in the diff", function()
     assert.is_true(anchor.covers(hunk_list, { file = "b.ts", line = 0 }))
     assert.is_false(anchor.covers(hunk_list, { file = "gone.ts", line = 0 }))
@@ -65,5 +74,31 @@ describe("comments.anchor", function()
     local hunks, err = anchor.pr_hunks(repo, "nosuchbranch")
     assert.is_nil(hunks)
     assert.is_truthy(err:match("nosuchbranch"))
+  end)
+
+  it("prefers the remote-tracking base over a local branch of the same name", function()
+    local repo = helpers.make_repo({ ["a.ts"] = "1\n2\n3\n", ["b.ts"] = "1\n2\n3\n" })
+    helpers.git(repo, "branch", "-M", "main")
+    -- origin/main stays pinned at the initial commit: this is what the service has.
+    local initial = vim.trim(helpers.git(repo, "rev-parse", "HEAD"))
+    helpers.git(repo, "update-ref", "refs/remotes/origin/main", initial)
+    -- Local main moves on ahead of the remote.
+    helpers.write_file(repo, "b.ts", "1\nLOCAL\n3\n")
+    helpers.git(repo, "commit", "-qam", "local-only change to b.ts")
+    helpers.git(repo, "checkout", "-q", "-b", "feat/x")
+    helpers.write_file(repo, "a.ts", "1\nBRANCH\n3\n")
+    helpers.git(repo, "commit", "-qam", "branch change to a.ts")
+
+    local hunks, err = anchor.pr_hunks(repo, "main")
+    assert.is_nil(err)
+    local files = {}
+    for _, h in ipairs(hunks) do
+      files[h.file] = true
+    end
+    -- Diffing from origin/main (the initial commit) reaches b.ts; diffing from
+    -- LOCAL main would start after that commit and show a.ts alone. b.ts is
+    -- therefore the proof that the remote-tracking ref won.
+    assert.is_true(files["a.ts"])
+    assert.is_true(files["b.ts"])
   end)
 end)
