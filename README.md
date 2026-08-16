@@ -386,7 +386,9 @@ Approve  ·  Request changes  ·  Comment (no verdict)  ·  Cancel
 
 Other states refuse, each with its own reason: on the default branch there is
 no PR to comment on; on a branch with no PR yet you are asked to create one
-first; a remote that is not GitHub reports that no forge serves it.
+first; a remote that is not GitHub reports that no forge serves it — if it *is*
+GitHub, on an Enterprise host `auto` cannot recognise, set `forge = "github"`
+to use it anyway.
 
 Comments GitHub cannot anchor — a line outside the PR diff — are moved into the
 review body under `## Not attached to a line` rather than dropped, and you are
@@ -394,7 +396,9 @@ told how many. This is worked out locally against the PR's own diff, because
 the reviews API is atomic: one bad line would reject the entire review. A
 comment that anchors fine but belongs to no intent is listed under
 `## Not attached to an intent` — as a pointer, since its text is already on its
-line.
+line. A whole-intent comment whose group was renamed away lands under the same
+heading, but in full: it addresses no line, so there is no inline copy of it to
+point at.
 
 **Posted comments are remembered.** Each one that lands is stamped, its box
 header reads `[ISSUE · POSTED]`, and a later submit offers only the comments

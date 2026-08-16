@@ -27,8 +27,15 @@ end
 ---
 --- A range must be covered ENTIRELY: GitHub anchors a multi-line comment to
 --- both endpoints, and half a range inside the diff is a 422 like any other.
---- A file-level comment needs only its file to appear in the diff, since
---- subject_type = "file" addresses no line.
+---
+--- A file-level comment addresses no line (subject_type = "file"), so it is
+--- tested only for its file being present — but present IN `hunk_list`, which
+--- is stricter than the service's own rule of "present in the diff". A file
+--- that appears in the diff while contributing no hunk at all — a binary
+--- change, a pure rename — is demoted here even though GitHub would have taken
+--- the comment. That is the safe direction: a comment moved into the review
+--- body is still read, while a comment the service rejects takes the entire
+--- atomic review down with it.
 --- @return boolean
 function M.covers(hunk_list, comment)
   if comment.intent_title then
