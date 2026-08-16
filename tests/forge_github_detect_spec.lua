@@ -45,6 +45,10 @@ exit 1
       got, err, done = t, e, true
     end)
     helpers.wait_for(function() return done end)
+    -- Without this, the two is_nil assertions below are exactly the
+    -- pre-callback values of these locals: a detect() that never called back
+    -- would pass. wait_for returns silently on timeout, so nothing else catches it.
+    assert.is_true(done)
     assert.is_nil(got)
     assert.is_nil(err)
   end)
