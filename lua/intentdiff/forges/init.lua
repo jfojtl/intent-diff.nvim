@@ -22,6 +22,121 @@ local function set_of(list)
   return out
 end
 
+--- `git -C git_root <...>`'s output lines, or nil on any failure — including
+--- git not being executable at all.
+---
+--- vim.fn.systemlist RAISES (E475) rather than returning an error value when
+--- argv[0] cannot be found, so this must be pcall'd, not merely checked against
+--- vim.v.shell_error.
+--- @return string[]|nil
+function M.git_lines(git_root, ...)
+  local ok, out = pcall(vim.fn.systemlist, { "git", "-C", git_root, ... })
+  if not ok or vim.v.shell_error ~= 0 then
+    return nil
+  end
+  return out
+end
+
+local function git_first(git_root, ...)
+  local out = M.git_lines(git_root, ...)
+  local first = out and out[1]
+  if not first or first == "" then
+    return nil
+  end
+  return first
+end
+
+--- @return string|nil
+function M.remote_url(git_root)
+  return git_first(git_root, "remote", "get-url", "origin")
+end
+
+--- The default branch, without the `origin/` prefix, or nil when it cannot be
+--- determined. nil is not an error: preflight simply skips its default-branch
+--- check rather than blocking a submit over a missing symbolic ref.
+--- @return string|nil
+function M.default_branch(git_root)
+  local ref = git_first(git_root, "rev-parse", "--abbrev-ref", "origin/HEAD")
+  if not ref then
+    return nil
+  end
+  return (ref:gsub("^origin/", ""))
+end
+
+--- Paths with uncommitted changes, from porcelain status. Renames report
+--- `R  old -> new`; the NEW path is what a comment addresses.
+--- @return string[]
+function M.dirty_files(git_root)
+  local out = {}
+  for _, line in ipairs(M.git_lines(git_root, "status", "--porcelain") or {}) do
+    local path = line:sub(4)
+    local _, new = path:match("^(.+) %-> (.+)$")
+    out[#out + 1] = new or path
+  end
+  return out
+end
+
+--- The forge serving this repository.
+---
+--- `false` disables the feature outright, which is NOT the same as no forge
+--- matching the remote: one means the user turned it off, the other that they
+--- are pushing somewhere this plugin cannot post to. They get different
+--- messages, so they get different return shapes.
+--- @return table|nil mod, string|nil name, string|nil err
+function M.resolve(remote_url)
+  local configured = require("intentdiff.config").options.forge
+  if configured == false then
+    return nil, nil, "review export is disabled (forge = false)"
+  end
+  if type(configured) == "table" then
+    return configured, "custom"
+  end
+  if type(configured) == "string" and configured ~= "auto" then
+    local ok, mod = pcall(require, "intentdiff.forges." .. configured)
+    if not ok or type(mod) ~= "table" then
+      return nil, nil, ("no forge named '%s'"):format(configured)
+    end
+    return mod, configured
+  end
+  for _, name in ipairs(REGISTRY) do
+    local ok, mod = pcall(require, "intentdiff.forges." .. name)
+    if ok and type(mod) == "table" and mod.matches(remote_url) then
+      return mod, name
+    end
+  end
+  return nil, nil
+end
+
+--- Everything preflight needs, gathered from git and the forge.
+---
+--- Detection is the only asynchronous part, so the git facts are read first and
+--- the callback fires once the forge answers. A detection ERROR still calls back
+--- with a state (target = nil) plus the error, so the caller reports the real
+--- reason instead of the generic "no PR".
+--- @param cb fun(state: table, err: string|nil)
+function M.collect(git_root, commented_files, cb)
+  local remote_url = M.remote_url(git_root)
+  local forge, forge_name, err = M.resolve(remote_url)
+  local state = {
+    branch = git_first(git_root, "rev-parse", "--abbrev-ref", "HEAD"),
+    head_sha = git_first(git_root, "rev-parse", "HEAD"),
+    default_branch = M.default_branch(git_root),
+    dirty_files = M.dirty_files(git_root),
+    commented_files = commented_files or {},
+    remote_url = remote_url,
+    forge_name = forge_name,
+    forge = forge,
+    git_root = git_root,
+  }
+  if not forge then
+    return cb(state, err)
+  end
+  forge.detect(git_root, state.branch, function(target, detect_err)
+    state.target = target
+    cb(state, detect_err)
+  end)
+end
+
 --- What may be posted, from plain facts. Pure — no git, no network, no Neovim
 --- state.
 ---
