@@ -10,6 +10,8 @@
 -- branch is tested with no repository and no network.
 local M = {}
 
+local git = require("intentdiff.git")
+
 --- Forges tried in order when `config.forge` is "auto".
 local REGISTRY = { "github" }
 
@@ -22,33 +24,9 @@ local function set_of(list)
   return out
 end
 
---- `git -C git_root <...>`'s output lines, or nil on any failure — including
---- git not being executable at all.
----
---- vim.fn.systemlist RAISES (E475) rather than returning an error value when
---- argv[0] cannot be found, so this must be pcall'd, not merely checked against
---- vim.v.shell_error.
---- @return string[]|nil
-function M.git_lines(git_root, ...)
-  local ok, out = pcall(vim.fn.systemlist, { "git", "-C", git_root, ... })
-  if not ok or vim.v.shell_error ~= 0 then
-    return nil
-  end
-  return out
-end
-
-local function git_first(git_root, ...)
-  local out = M.git_lines(git_root, ...)
-  local first = out and out[1]
-  if not first or first == "" then
-    return nil
-  end
-  return first
-end
-
 --- @return string|nil
 function M.remote_url(git_root)
-  return git_first(git_root, "remote", "get-url", "origin")
+  return git.first(git_root, "remote", "get-url", "origin")
 end
 
 --- The default branch, without the `origin/` prefix, or nil when it cannot be
@@ -56,7 +34,7 @@ end
 --- check rather than blocking a submit over a missing symbolic ref.
 --- @return string|nil
 function M.default_branch(git_root)
-  local ref = git_first(git_root, "rev-parse", "--abbrev-ref", "origin/HEAD")
+  local ref = git.first(git_root, "rev-parse", "--abbrev-ref", "origin/HEAD")
   if not ref then
     return nil
   end
@@ -75,7 +53,7 @@ end
 --- so the records are split here rather than by git.
 --- @return string[]
 function M.dirty_files(git_root)
-  local raw = M.git_lines(git_root, "status", "--porcelain", "-z")
+  local raw = git.lines(git_root, "status", "--porcelain", "-z")
   if not raw then
     return {}
   end
@@ -143,8 +121,8 @@ function M.collect(git_root, commented_files, cb)
   local remote_url = M.remote_url(git_root)
   local forge, forge_name, err = M.resolve(remote_url)
   local state = {
-    branch = git_first(git_root, "rev-parse", "--abbrev-ref", "HEAD"),
-    head_sha = git_first(git_root, "rev-parse", "HEAD"),
+    branch = git.first(git_root, "rev-parse", "--abbrev-ref", "HEAD"),
+    head_sha = git.first(git_root, "rev-parse", "HEAD"),
     default_branch = M.default_branch(git_root),
     dirty_files = M.dirty_files(git_root),
     commented_files = commented_files or {},

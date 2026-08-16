@@ -76,29 +76,40 @@ function M.predicate(hunk_list)
   end
 end
 
---- The PR's diff, parsed into hunks.
+--- The commit the service diffs the PR against: where the branch DIVERGED from
+--- the base branch, not the tip of the base branch.
 ---
---- Synchronous: this is `git diff` against local objects, not a network call,
---- and the flow is already mid-prompt when it runs. `merge-base` rather than a
---- plain two-dot diff, because the service diffs the PR against where the
---- branch DIVERGED, not against the tip of the base branch.
---- @return table[]|nil hunks, string|nil err
-function M.pr_hunks(git_root, base_ref)
-  local forges = require("intentdiff.forges")
-  local base = nil
+--- Its own function, and not merely a step inside pr_hunks, because preflight
+--- needs it as a FACT before it can decide anything: a review pinned to a base
+--- that is not this SHA was read against a different diff from the one the PR
+--- shows, and its line numbers must not be trusted inline. Synchronous — it is
+--- `git merge-base` against local objects, not a network call.
+--- @return string|nil sha, string|nil err
+function M.merge_base(git_root, base_ref)
+  local git = require("intentdiff.git")
   -- The remote-tracking ref first: it is what the service actually has. A local
   -- branch of the same name may be behind or ahead of it.
   for _, ref in ipairs({ "origin/" .. base_ref, base_ref }) do
-    local out = forges.git_lines(git_root, "merge-base", ref, "HEAD")
-    if out and out[1] and out[1] ~= "" then
-      base = out[1]
-      break
+    local sha = git.first(git_root, "merge-base", ref, "HEAD")
+    if sha then
+      return sha
     end
   end
+  return nil, ("cannot resolve the merge base with %s"):format(base_ref)
+end
+
+--- The PR's diff, parsed into hunks.
+---
+--- Synchronous: this is `git diff` against local objects, not a network call,
+--- and the flow is already mid-prompt when it runs.
+--- @return table[]|nil hunks, string|nil err
+function M.pr_hunks(git_root, base_ref)
+  local git = require("intentdiff.git")
+  local base, base_err = M.merge_base(git_root, base_ref)
   if not base then
-    return nil, ("cannot resolve the merge base with %s"):format(base_ref)
+    return nil, base_err
   end
-  local out = forges.git_lines(git_root, "diff", "-U" .. CONTEXT, base .. "...HEAD")
+  local out = git.lines(git_root, "diff", "-U" .. CONTEXT, base .. "...HEAD")
   if not out then
     return nil, ("cannot diff %s...HEAD"):format(base:sub(1, 8))
   end
