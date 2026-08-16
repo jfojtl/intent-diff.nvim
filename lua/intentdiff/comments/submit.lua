@@ -236,6 +236,9 @@ function M.run(tabpage)
       if state.target then
         state.merge_base = require("intentdiff.comments.anchor")
           .merge_base(git_root, state.target.base_ref)
+        -- Not used to DECIDE anything — only to explain a base mismatch in
+        -- terms the user can act on, instead of two hashes they cannot.
+        state.base_drift = forges.base_drift(git_root, state.target.base_ref)
       end
       local pf = forges.preflight(state)
       local unposted = st.unposted()

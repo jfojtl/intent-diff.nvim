@@ -179,3 +179,39 @@ describe("forges.dirty_files", function()
     assert.same({ "a.ts", "new.ts" }, dirty)
   end)
 end)
+
+describe("forges.base_drift", function()
+  --- A repo on `main` with a remote-tracking ref pinned at the initial commit.
+  --- `update-ref` fabricates origin/main directly: no bare repo, no fetch, no
+  --- network.
+  local function repo_with_origin_main()
+    local repo = helpers.make_repo({ ["a.ts"] = "one\n" })
+    helpers.git(repo, "branch", "-M", "main")
+    helpers.git(repo, "update-ref", "refs/remotes/origin/main",
+      vim.trim(helpers.git(repo, "rev-parse", "HEAD")))
+    return repo
+  end
+
+  it("reports how far the local base branch is ahead of its remote", function()
+    local repo = repo_with_origin_main()
+    helpers.write_file(repo, "a.ts", "two\n")
+    helpers.git(repo, "commit", "-qam", "unpushed work on main")
+    assert.same({ ref = "main", ahead = 1 }, forges.base_drift(repo, "main"))
+  end)
+
+  it("answers nil when the base branch matches its remote", function()
+    assert.is_nil(forges.base_drift(repo_with_origin_main(), "main"))
+  end)
+
+  it("answers nil when there is no remote-tracking ref to compare against", function()
+    -- rev-list against a ref that does not exist fails; an unknowable drift is
+    -- not a drift of zero, but it is equally not something to report.
+    local repo = helpers.make_repo({ ["a.ts"] = "one\n" })
+    helpers.git(repo, "branch", "-M", "main")
+    assert.is_nil(forges.base_drift(repo, "main"))
+  end)
+
+  it("answers nil when the PR names no base branch", function()
+    assert.is_nil(forges.base_drift(repo_with_origin_main(), nil))
+  end)
+end)

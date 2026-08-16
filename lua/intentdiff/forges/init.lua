@@ -47,6 +47,33 @@ function M.default_branch(git_root)
   return (ref:gsub("^origin/", ""))
 end
 
+--- How far the local base branch has run ahead of its remote counterpart, or
+--- nil when it has not, when there is no remote-tracking ref to compare
+--- against, or when the PR names no base branch.
+---
+--- Gathered as a FACT so preflight stays pure and can explain itself. A review
+--- whose base is not the PR's merge base is nearly always a review based on a
+--- local branch the remote has never seen, and that is a genuinely hard thing
+--- for the user to spot: `git status` on the FEATURE branch reports up to date,
+--- because the stale branch is the other one. Reporting two hashes and leaving
+--- them to work it out is what this exists to avoid.
+--- @return { ref: string, ahead: integer }|nil
+function M.base_drift(git_root, base_ref)
+  if not base_ref then
+    return nil
+  end
+  local count = git.first(git_root, "rev-list", "--count",
+    ("origin/%s..%s"):format(base_ref, base_ref))
+  local ahead = tonumber(count)
+  -- nil covers both "in sync" and "no origin/<base> to compare against": an
+  -- unknowable drift is not a drift, and guessing at one would send the user
+  -- chasing a branch that is perfectly fine.
+  if not ahead or ahead == 0 then
+    return nil
+  end
+  return { ref = base_ref, ahead = ahead }
+end
+
 --- Paths with uncommitted changes.
 ---
 --- `-z` rather than the default porcelain format: the default QUOTES a path
@@ -221,8 +248,19 @@ function M.preflight(state)
   if not state.merge_base then
     reasons[#reasons + 1] = "the PR's merge base could not be resolved locally"
   elseif state.base_revision ~= state.merge_base then
-    reasons[#reasons + 1] = ("this review's base (%s) is not the PR's merge base (%s)")
+    local why = ("this review's base (%s) is not the PR's merge base (%s)")
       :format(short(state.base_revision), short(state.merge_base))
+    -- When the cause is known, name it and the way out. Without this the user
+    -- sees two hashes, checks the branch they are ON, finds it pushed and up to
+    -- date, and has no path to the stale branch that actually caused it.
+    local drift = state.base_drift
+    if drift then
+      why = why .. ("; your local %s is %d commit(s) ahead of origin/%s, and the PR "
+        .. "is diffed against origin/%s — review with `:IntentDiff origin/%s...` "
+        .. "to comment on individual lines")
+        :format(drift.ref, drift.ahead, drift.ref, drift.ref, drift.ref)
+    end
+    reasons[#reasons + 1] = why
   end
   if state.head_sha ~= state.target.head_sha then
     reasons[#reasons + 1] = ("local HEAD is ahead of the PR head (%s vs %s)")

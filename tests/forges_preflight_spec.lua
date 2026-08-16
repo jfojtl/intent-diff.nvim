@@ -119,6 +119,31 @@ describe("forges.preflight", function()
     assert.is_truthy(r.reason:match("merge base"))
   end)
 
+  -- Two hashes are a fact, not a diagnosis. The overwhelmingly likely cause of
+  -- a base that is not the merge base is a local base branch the remote has
+  -- never seen, and the user has no reason to suspect it: `git status` on the
+  -- FEATURE branch says up to date, because the stale branch is the other one.
+  it("names the stale local base branch and the remedy when one is known", function()
+    local r = forges.preflight(state({
+      base_revision = "deadbeefdeadbeef",
+      base_drift = { ref = "main", ahead = 1 },
+    }))
+    assert.equals("general", r.mode)
+    assert.is_truthy(r.reason:match("merge base"))
+    assert.is_truthy(r.reason:match("local main"))
+    assert.is_truthy(r.reason:match("1 commit"))
+    assert.is_truthy(r.reason:match("origin/main%.%.%."))
+  end)
+
+  it("says nothing about drift when the base branch is in sync", function()
+    local r = forges.preflight(state({ base_revision = "deadbeefdeadbeef" }))
+    assert.equals("general", r.mode)
+    assert.is_truthy(r.reason:match("merge base"))
+    -- No drift fact: the bases differ for some other reason, and inventing a
+    -- cause would send the user chasing a branch that is perfectly fine.
+    assert.is_nil(r.reason:match("origin/main%.%.%."))
+  end)
+
   it("states both reasons when HEAD is stale and a file is dirty", function()
     local r = forges.preflight(state({ head_sha = "bbbb", dirty_files = { "a.ts" } }))
     assert.equals("general", r.mode)
