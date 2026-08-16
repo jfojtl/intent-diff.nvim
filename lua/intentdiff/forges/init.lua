@@ -126,6 +126,18 @@ end
 function M.collect(git_root, commented_files, cb)
   local remote_url = M.remote_url(git_root)
   local forge, forge_name, err = M.resolve(remote_url)
+  if not forge then
+    -- Bail BEFORE the four git subprocesses below. With no forge there is
+    -- nothing to preflight against — `forge = false` is documented as stopping
+    -- before any fact is gathered — and the only fact still needed, for the
+    -- no_forge message, is the remote URL that resolution already read.
+    return cb({
+      commented_files = commented_files or {},
+      dirty_files = {},
+      remote_url = remote_url,
+      git_root = git_root,
+    }, err)
+  end
   local state = {
     branch = git.first(git_root, "rev-parse", "--abbrev-ref", "HEAD"),
     head_sha = git.first(git_root, "rev-parse", "HEAD"),
@@ -137,8 +149,12 @@ function M.collect(git_root, commented_files, cb)
     forge = forge,
     git_root = git_root,
   }
-  if not forge then
-    return cb(state, err)
+  -- detect() takes a branch NAME; an unborn branch (a repository with no
+  -- commit) has none, and github.lua would splice that nil into the middle of
+  -- its argv, leaving a hole that makes the table's length undefined. There is
+  -- also nothing to look up: a branch with no commits has no PR.
+  if not state.branch then
+    return cb(state, ("cannot determine the current branch of %s"):format(git_root))
   end
   forge.detect(git_root, state.branch, function(target, detect_err)
     state.target = target

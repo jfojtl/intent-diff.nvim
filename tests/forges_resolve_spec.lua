@@ -66,11 +66,16 @@ describe("forges.collect", function()
       restore()
       restore = nil
     end
+    config.setup({})
   end)
 
   it("reads branch, head and dirty files from a real repo", function()
     local repo = helpers.make_repo({ ["a.ts"] = "one\n", ["b.ts"] = "two\n" })
     helpers.git(repo, "checkout", "-q", "-b", "feat/x")
+    -- The remote is what makes `assert.is_nil(state.target)` below mean
+    -- something: without it resolve finds no forge, collect returns before
+    -- detect is ever reached, and the assertion passes for the wrong reason.
+    helpers.git(repo, "remote", "add", "origin", "git@github.com:o/r.git")
     helpers.write_file(repo, "a.ts", "changed\n")
     restore = helpers.fake_bin("gh", [[
 echo "no pull requests found" >&2
@@ -102,6 +107,51 @@ exit 1
     helpers.wait_for(function() return done end)
     assert.equals("github", state.forge_name)
     assert.equals("no_pr", forges.preflight(state).mode)
+  end)
+
+  -- `forge = false` is documented as stopping before any fact is gathered.
+  -- The four git subprocesses (two rev-parses, origin/HEAD, status) sat above
+  -- the disabled check, so turning the feature off still paid for all of them.
+  it("gathers no repository facts when the forge is disabled", function()
+    config.setup({ forge = false })
+    local repo = helpers.make_repo({ ["a.ts"] = "one\n" })
+    helpers.write_file(repo, "a.ts", "changed\n")
+    local state, err, done
+    forges.collect(repo, { "a.ts" }, function(s, e)
+      state, err, done = s, e, true
+    end)
+    helpers.wait_for(function() return done end)
+    assert.is_truthy(err:match("disabled"))
+    assert.is_nil(state.branch)
+    assert.is_nil(state.head_sha)
+    assert.is_nil(state.default_branch)
+    assert.same({}, state.dirty_files)
+  end)
+
+  -- An unborn branch: `git init` with no commit, so `rev-parse --abbrev-ref
+  -- HEAD` fails and `branch` is nil. github.detect would then build
+  -- { cmd, "pr", "view", nil, "--json", … } — a hole at index 4 that leaves
+  -- `#argv` undefined and the argv malformed.
+  it("never asks the forge about a nil branch", function()
+    local repo = vim.fn.tempname()
+    vim.fn.mkdir(repo, "p")
+    helpers.git(repo, "init", "-q")
+    helpers.git(repo, "remote", "add", "origin", "git@github.com:o/r.git")
+    local detected = false
+    config.setup({ forge = {
+      matches = function() return true end,
+      capabilities = function() return {} end,
+      submit = function() end,
+      detect = function() detected = true end,
+    } })
+    local state, err, done
+    forges.collect(repo, { "a.ts" }, function(s, e)
+      state, err, done = s, e, true
+    end)
+    helpers.wait_for(function() return done end)
+    assert.is_false(detected, "detect must never be called without a branch")
+    assert.is_nil(state.branch)
+    assert.is_truthy(err:match("[Bb]ranch"))
   end)
 end)
 
