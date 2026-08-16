@@ -20,6 +20,10 @@ local function state(over)
     branch = "feat/x", default_branch = "main", target = target(),
     head_sha = "aaaa", dirty_files = {}, commented_files = { "a.ts" },
     forge_name = "github", remote_url = "git@github.com:o/r.git",
+    -- The review's OWN revisions, and the PR's merge base to compare the
+    -- base against. The default pair is the only one that can post inline:
+    -- the working tree, based exactly where the PR diverged.
+    target_revision = "WORKING", base_revision = "mb00mb00", merge_base = "mb00mb00",
   }, over)
   for key, value in pairs(over) do
     if value == NONE then
@@ -80,6 +84,39 @@ describe("forges.preflight", function()
       dirty_files = { "unrelated.ts" }, commented_files = { "a.ts" },
     }))
     assert.equals("inline", r.mode)
+  end)
+
+  -- The line numbers in a review pinned to `v1.1` describe the files AS OF
+  -- v1.1. HEAD can still equal the PR head and no commented file need be dirty
+  -- — the working tree is simply not what was read — so neither the head_sha
+  -- check nor the dirty check catches this, and without its own check the
+  -- comments post onto lines of the PR that nobody looked at.
+  it("degrades to general when the review is pinned to a revision", function()
+    local r = forges.preflight(state({ target_revision = "v1.1" }))
+    assert.equals("general", r.mode)
+    assert.is_truthy(r.reason:match("pinned to v1%.1"))
+  end)
+
+  it("degrades to general when target_revision is missing entirely", function()
+    local r = forges.preflight(state({ target_revision = NONE }))
+    assert.equals("general", r.mode)
+    assert.is_truthy(r.reason:match("pinned"))
+  end)
+
+  -- `:IntentDiff main` bases the review on main's TIP; GitHub's LEFT side is
+  -- the merge base. Every old-side line number is off by whatever main has
+  -- gained since the branch diverged.
+  it("degrades to general when the review's base is not the PR's merge base", function()
+    local r = forges.preflight(state({ base_revision = "deadbeefdeadbeef" }))
+    assert.equals("general", r.mode)
+    assert.is_truthy(r.reason:match("merge base"))
+    assert.is_truthy(r.reason:match("deadbeef"))
+  end)
+
+  it("degrades to general when the merge base could not be resolved", function()
+    local r = forges.preflight(state({ merge_base = NONE }))
+    assert.equals("general", r.mode)
+    assert.is_truthy(r.reason:match("merge base"))
   end)
 
   it("states both reasons when HEAD is stale and a file is dirty", function()

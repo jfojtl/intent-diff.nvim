@@ -203,6 +203,19 @@ function M.run(tabpage)
       if err then
         return notify(err, vim.log.levels.WARN)
       end
+      -- collect() gathers facts about the REPOSITORY. These three are facts
+      -- about THIS REVIEW — which revisions its line numbers describe, and
+      -- where the PR says its old side begins — and only the session and the
+      -- detected target know them. Without them preflight would happily call a
+      -- `:IntentDiff v1.0 v1.1` review inline, because HEAD does match the PR
+      -- head and the working tree is clean; the comments would then land on
+      -- whichever PR lines happen to share those numbers.
+      state.target_revision = entry.sess.target_revision
+      state.base_revision = entry.sess.base_revision
+      if state.target then
+        state.merge_base = require("intentdiff.comments.anchor")
+          .merge_base(git_root, state.target.base_ref)
+      end
       local pf = forges.preflight(state)
       local unposted = st.unposted()
       local plan = M.plan(state, pf, #unposted, #all)

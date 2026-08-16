@@ -15,6 +15,12 @@ local git = require("intentdiff.git")
 --- Forges tried in order when `config.forge` is "auto".
 local REGISTRY = { "github" }
 
+--- A SHA at reading length, and anything shorter (a tag, a branch name, or the
+--- literal "WORKING") untouched.
+local function short(rev)
+  return tostring(rev):sub(1, 8)
+end
+
 --- Comments' files, as a set, for the dirty-file intersection.
 local function set_of(list)
   local out = {}
@@ -150,6 +156,17 @@ end
 --- Only files that CARRY a comment count as dirty. An unrelated edit elsewhere
 --- in the repo cannot move a line number in a commented file, and degrading the
 --- whole export for it would be noise.
+---
+--- Inline posting needs FOUR things to line up, not two, and the two that are
+--- easy to forget are the review's own revisions. A `:IntentDiff v1.0 v1.1`
+--- review can sit at the PR head with a spotless working tree and still be
+--- describing lines nobody on the PR is looking at: its numbers are the files
+--- as of v1.1, and its old side is v1.0 rather than where the branch diverged.
+--- Neither the head_sha check nor the dirty check can see that — the dirty
+--- check compares the tree against HEAD, not against v1.1 — so both revisions
+--- are asked about explicitly. Mirrors comments/init.lua's is_worktree(), which
+--- draws the same distinction for the storage key: target_revision == "WORKING"
+--- plus a base that is where it should be.
 --- @return { mode: string, reason: string|nil, dirty: string[]|nil }
 function M.preflight(state)
   state = state or {}
@@ -174,9 +191,26 @@ function M.preflight(state)
   end
 
   local reasons = {}
+  -- The review is pinned to a revision, so its line numbers describe that
+  -- revision's files and not the working tree the PR head shows. A missing
+  -- target_revision fails here too: unknown provenance is not evidence of a
+  -- match, and every one of these checks fails towards `general`.
+  if state.target_revision ~= "WORKING" then
+    reasons[#reasons + 1] = ("this review is pinned to %s, not the working tree")
+      :format(short(state.target_revision))
+  end
+  -- The service's LEFT side is the merge base. A review based anywhere else —
+  -- `:IntentDiff main` bases on main's TIP — has a different old side, and its
+  -- old-side line numbers mis-anchor by however far the base branch has moved.
+  if not state.merge_base then
+    reasons[#reasons + 1] = "the PR's merge base could not be resolved locally"
+  elseif state.base_revision ~= state.merge_base then
+    reasons[#reasons + 1] = ("this review's base (%s) is not the PR's merge base (%s)")
+      :format(short(state.base_revision), short(state.merge_base))
+  end
   if state.head_sha ~= state.target.head_sha then
     reasons[#reasons + 1] = ("local HEAD is ahead of the PR head (%s vs %s)")
-      :format(tostring(state.head_sha):sub(1, 8), tostring(state.target.head_sha):sub(1, 8))
+      :format(short(state.head_sha), short(state.target.head_sha))
   end
   local commented = state.commented_files or {}
   local dirty_set = set_of(state.dirty_files)
