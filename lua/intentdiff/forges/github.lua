@@ -137,6 +137,84 @@ function M.detect(git_root, branch, cb)
   end)
 end
 
+--- One payload comment as the reviews API wants it.
+---
+--- A file-level comment uses subject_type = "file" and carries NO line or side:
+--- sending either alongside it is a validation error. A range sends start_line
+--- plus line, both on the same side — GitHub has no cross-side range.
+local function api_comment(c)
+  local side = (c.side == "old") and "LEFT" or "RIGHT"
+  if c.file_level then
+    return { path = c.path, subject_type = "file", body = c.body }
+  end
+  local out = { path = c.path, line = c.line, side = side, body = c.body }
+  if c.line_end and c.line_end ~= c.line then
+    out.start_line = c.line
+    out.start_side = side
+    out.line = c.line_end
+  end
+  return out
+end
+
+--- GitHub's refusal to let you approve your own PR, which is the common case
+--- when an agent pushes to your branch. Worth its own kind so the flow can
+--- offer the identical review as a plain COMMENT instead of just failing.
+local function is_self_approve(stderr)
+  return (stderr or ""):match("[Cc]an ?not approve your own pull request") ~= nil
+end
+
+--- Post ONE review: body, verdict and every inline comment, atomically.
+---
+--- Atomic is the API's choice, not ours — a single invalid line rejects the
+--- whole review. That is why comments/anchor.lua filters locally first, and why
+--- a failure here means NOTHING was posted, so no comment may be stamped.
+---
+--- `commit_id` pins the review to the head the preflight saw, so a push landing
+--- between preflight and submit fails loudly instead of attaching the review to
+--- a commit nobody reviewed.
+--- @param cb fun(result: { url: string }|nil, err: string|nil, kind: string|nil)
+function M.submit(target, payload, cb)
+  local body = {
+    commit_id = target.head_sha,
+    event = VERDICTS[payload.verdict] or "COMMENT",
+    body = payload.body,
+  }
+  -- Only when non-empty: vim.json.encode turns an empty Lua table into `{}`,
+  -- and GitHub rejects an object where it expects an array of comments.
+  if payload.comments and #payload.comments > 0 then
+    local list = {}
+    for _, c in ipairs(payload.comments) do
+      list[#list + 1] = api_comment(c)
+    end
+    body.comments = list
+  end
+
+  local ok, encoded = pcall(vim.json.encode, body)
+  if not ok then
+    return cb(nil, "could not encode the review payload")
+  end
+
+  local path = ("repos/{owner}/{repo}/pulls/%s/reviews"):format(target.id)
+  local argv = { M.opts().cmd, "api", "--method", "POST", path, "--input", "-" }
+  run(argv, target.git_root, encoded, function(code, stdout, stderr)
+    record({
+      event = "submit",
+      exit_code = code,
+      verdict = body.event,
+      comment_count = #(payload.comments or {}),
+    })
+    if code ~= 0 then
+      if is_self_approve(stderr) then
+        return cb(nil, failure(code, stderr, "submitting the review"), "self_approve")
+      end
+      return cb(nil, failure(code, stderr, "submitting the review"))
+    end
+    local decoded_ok, review = pcall(vim.json.decode, stdout)
+    local url = decoded_ok and type(review) == "table" and review.html_url or target.url
+    cb({ url = url })
+  end)
+end
+
 M._run = run
 M._failure = failure
 M._VERDICTS = VERDICTS
