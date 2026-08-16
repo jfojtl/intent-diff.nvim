@@ -22,11 +22,21 @@ local VERDICT_ORDER = { "approve", "request_changes", "comment" }
 --- `unposted` vs `total` is what keeps a second submit from duplicating a
 --- review: only the new comments are sent, and the prompt says how many are
 --- being skipped so the count is never a surprise.
+---
+--- `effective` is what will ACTUALLY happen, which is not always what preflight
+--- decided: inline degrades to general when the PR diff cannot be read locally,
+--- and some comments may already be known to be unanchorable. Both are settled
+--- before this prompt precisely so the prompt can state them — telling the user
+--- after the POST is telling them nothing they can act on. Omitted, it defaults
+--- to preflight's own verdict with nothing demoted.
+--- @param effective { mode: string, reason: string|nil, demoted: integer }|nil
 --- @return { ok: boolean, mode: string|nil, message: string, verdict_only: boolean }
-function M.plan(state, pf, unposted, total)
+function M.plan(state, pf, unposted, total, effective)
   if pf.mode ~= "inline" and pf.mode ~= "general" then
     return { ok = false, mode = pf.mode, message = pf.reason or pf.mode, verdict_only = false }
   end
+  effective = effective or { mode = pf.mode, reason = pf.reason, demoted = 0 }
+  local mode = effective.mode or pf.mode
   local target = state.target
   local lines = {}
   local verdict_only = unposted == 0
@@ -43,15 +53,19 @@ function M.plan(state, pf, unposted, total)
       lines[#lines + 1] = ("Submitting %d comment(s) to PR #%s (%s).")
         :format(unposted, target.id, target.title or "")
     end
-    if pf.mode == "general" then
-      lines[#lines + 1] = pf.reason
+    if mode == "general" then
+      lines[#lines + 1] = effective.reason or pf.reason
       lines[#lines + 1] =
         "Comments will be posted as ONE general comment on the PR, not on individual lines."
+    end
+    if (effective.demoted or 0) > 0 then
+      lines[#lines + 1] = ("%d comment(s) could not be anchored to a line and will be added to the review body.")
+        :format(effective.demoted)
     end
   end
   return {
     ok = true,
-    mode = pf.mode,
+    mode = mode,
     message = table.concat(lines, "\n"),
     verdict_only = verdict_only,
   }
@@ -144,8 +158,36 @@ local function post(entry, tabpage, state, payload, sent_comments)
   end)
 end
 
---- Ask for a verdict, build the payload, post.
-local function choose_verdict(entry, tabpage, state, pf, to_send, model)
+--- The mode that will actually be used, and the payload it produces. ENTIRELY
+--- LOCAL: `git diff` against local objects, then pure string building. Nothing
+--- here contacts the service, which is what lets it run before the confirm.
+---
+--- It has to run before the confirm, because both of its outcomes are things
+--- the user may want to refuse: an inline plan that quietly became a general
+--- one, and comments that will be moved out of the margin and into the body.
+--- @return table payload, { mode: string, reason: string|nil, demoted: integer } effective
+local function compose(state, pf, to_send, model)
+  local mode, anchorable, reason = pf.mode, nil, pf.reason
+  -- Skipped when there is nothing to anchor: a verdict-only submit carries no
+  -- comments, so reading the PR diff would answer a question nobody asked.
+  if mode == "inline" and #to_send > 0 then
+    local anchor = require("intentdiff.comments.anchor")
+    local hunk_list, err = anchor.pr_hunks(state.git_root, state.target.base_ref)
+    if not hunk_list then
+      -- No local view of the PR diff means no way to know which lines anchor.
+      -- Degrade rather than gamble on a 422 that costs the whole review.
+      mode = "general"
+      reason = err or "cannot read the PR diff"
+    else
+      anchorable = anchor.predicate(hunk_list)
+    end
+  end
+  local payload = require("intentdiff.comments.payload").build(to_send, model, mode, anchorable)
+  return payload, { mode = mode, reason = reason, demoted = payload.demoted }
+end
+
+--- Ask for a verdict, then post the payload that was already built.
+local function choose_verdict(entry, tabpage, state, payload, to_send)
   local choices = M.verdict_choices(state.forge.capabilities())
   vim.ui.select(choices, {
     prompt = ("Submit review to PR #%s"):format(state.target.id),
@@ -154,28 +196,7 @@ local function choose_verdict(entry, tabpage, state, pf, to_send, model)
     if not (choice and choice.verdict) then
       return notify("cancelled — nothing was posted")
     end
-    local anchorable = nil
-    local mode = pf.mode
-    if mode == "inline" then
-      local hunk_list, err = require("intentdiff.comments.anchor")
-        .pr_hunks(state.git_root, state.target.base_ref)
-      if not hunk_list then
-        -- No local view of the PR diff means no way to know which lines
-        -- anchor. Degrade rather than gamble on a 422 that costs the review.
-        notify((err or "cannot read the PR diff") .. " — posting as a general comment",
-          vim.log.levels.WARN)
-        mode = "general"
-      else
-        anchorable = require("intentdiff.comments.anchor").predicate(hunk_list)
-      end
-    end
-    local payload = require("intentdiff.comments.payload")
-      .build(to_send, model, mode, anchorable)
     payload.verdict = choice.verdict
-    if payload.demoted > 0 then
-      notify(("%d comment(s) could not be anchored and were added to the review body")
-        :format(payload.demoted), vim.log.levels.WARN)
-    end
     post(entry, tabpage, state, payload, to_send)
   end)
 end
@@ -218,7 +239,21 @@ function M.run(tabpage)
       end
       local pf = forges.preflight(state)
       local unposted = st.unposted()
-      local plan = M.plan(state, pf, #unposted, #all)
+      -- Nothing unposted means a verdict-only submit: the store's comments all
+      -- reached the PR in an earlier sitting, and re-sending them would open a
+      -- second thread on every line.
+      local to_send = (#unposted == 0) and {} or unposted
+
+      -- Composed BEFORE the confirm, so the prompt can state the mode that
+      -- will really be used and how many comments will be demoted. Only on a
+      -- mode preflight would let through: on a refusal there is nothing to
+      -- compose, and `state.target` may not even exist.
+      local payload, effective
+      if pf.mode == "inline" or pf.mode == "general" then
+        payload, effective = compose(state, pf, to_send, entry.model or { groups = {} })
+      end
+
+      local plan = M.plan(state, pf, #unposted, #all, effective)
       if not plan.ok then
         return notify(plan.message, vim.log.levels.WARN)
       end
@@ -226,8 +261,7 @@ function M.run(tabpage)
       if answer ~= 1 then
         return notify("cancelled — nothing was posted")
       end
-      local model = entry.model or { groups = {} }
-      choose_verdict(entry, tabpage, state, pf, plan.verdict_only and {} or unposted, model)
+      choose_verdict(entry, tabpage, state, payload, to_send)
     end)
   end)
 end

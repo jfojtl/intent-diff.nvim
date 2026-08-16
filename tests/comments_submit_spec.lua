@@ -42,6 +42,33 @@ describe("comments.submit.plan", function()
     assert.is_truthy(p.message:match("not on individual lines"))
   end)
 
+  -- The mode banner has to describe the mode that will actually be used, not
+  -- the one preflight hoped for. When the PR diff cannot be read locally the
+  -- flow degrades inline -> general BEFORE the confirm, and the prompt is the
+  -- only place the user can still say no.
+  it("announces the effective mode, not preflight's, when anchoring degraded", function()
+    local p = submit.plan({ target = target() }, { mode = "inline" }, 3, 3,
+      { mode = "general", reason = "cannot resolve the merge base with main", demoted = 0 })
+    assert.is_true(p.ok)
+    assert.equals("general", p.mode)
+    assert.is_truthy(p.message:match("merge base"))
+    assert.is_truthy(p.message:match("not on individual lines"))
+  end)
+
+  it("puts the demoted count in the confirmation prompt", function()
+    local p = submit.plan({ target = target() }, { mode = "inline" }, 3, 3,
+      { mode = "inline", demoted = 2 })
+    assert.is_true(p.ok)
+    assert.equals("inline", p.mode)
+    assert.is_truthy(p.message:match("2 comment%(s%) could not be anchored"))
+  end)
+
+  it("says nothing about anchoring when nothing was demoted", function()
+    local p = submit.plan({ target = target() }, { mode = "inline" }, 3, 3,
+      { mode = "inline", demoted = 0 })
+    assert.is_nil(p.message:match("anchored"))
+  end)
+
   it("reports how many were already posted", function()
     local p = submit.plan({ target = target() }, { mode = "inline" }, 2, 6)
     assert.is_truthy(p.message:match("4 of 6"))
@@ -121,12 +148,13 @@ describe("comments.submit.run (integration)", function()
   --- Stub forges.collect to hand `choose_verdict`/`post` a state built around
   --- `forge`, scheduled exactly as the real one is (a network call, even a
   --- fake one, never resolves synchronously).
-  local function stub_collect(forge)
+  local function stub_collect(forge, base_ref)
     forges.collect = function(git_root, _files, cb)
       vim.schedule(function()
         cb({
           git_root = git_root,
-          target = { service = "github", id = "123", url = "u", title = "T", base_ref = "main" },
+          target = { service = "github", id = "123", url = "u", title = "T",
+            base_ref = base_ref or "main" },
           forge = forge,
         })
       end)
@@ -202,6 +230,34 @@ describe("comments.submit.run (integration)", function()
     assert.equals("999", c2.posted.target)
     assert.equals("https://old", c2.posted.url)
     assert.equals(111, c2.posted.at)
+  end)
+
+  -- The mode banner belongs to the CONFIRM, not to the tick that posts. This
+  -- run's preflight says inline, but the target's base ref does not exist in
+  -- the temp repo, so anchoring degrades it to general — and the user has to
+  -- learn that while "Cancel" is still an available answer. Before the
+  -- reorder, pr_hunks ran inside the verdict-select callback and the warning
+  -- was emitted in the same tick as the POST.
+  it("states the degraded mode in the confirmation prompt, before the verdict", function()
+    local c1 = st.add({ file = "a.lua", line = 1, side = "new", type = "note", text = "one" })
+    local confirm_message, submit_called, select_called = nil, false, false
+    forges.preflight = function() return { mode = "inline" } end
+    stub_collect(fake_forge(function() submit_called = true end), "no-such-base-ref")
+    vim.fn.confirm = function(msg)
+      confirm_message = msg
+      return 2 -- Cancel: acting on what the prompt just told us.
+    end
+    vim.ui.select = function() select_called = true end
+
+    submit.run(tab)
+
+    assert.is_true(helpers.wait_for(function() return confirm_message ~= nil end),
+      "the confirm prompt never appeared")
+    assert.is_truthy(confirm_message:match("merge base"))
+    assert.is_truthy(confirm_message:match("not on individual lines"))
+    assert.is_false(select_called, "the verdict picker must not open before the confirm is answered")
+    assert.is_false(submit_called)
+    assert.is_nil(c1.posted)
   end)
 
   it("stamps nothing when the submit fails", function()
