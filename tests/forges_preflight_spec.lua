@@ -7,12 +7,26 @@ local function target(over)
   }, over or {})
 end
 
+--- A key set to `NONE` is REMOVED from the returned state.
+---
+--- Necessary because `state({ target = nil })` cannot express "no target":
+--- Lua drops `key = nil` from a table constructor, so vim.tbl_extend never sees
+--- it and the default survives — the test then passes for the wrong reason.
+local NONE = {}
+
 local function state(over)
-  return vim.tbl_extend("force", {
+  over = over or {}
+  local out = vim.tbl_extend("force", {
     branch = "feat/x", default_branch = "main", target = target(),
     head_sha = "aaaa", dirty_files = {}, commented_files = { "a.ts" },
     forge_name = "github", remote_url = "git@github.com:o/r.git",
-  }, over or {})
+  }, over)
+  for key, value in pairs(over) do
+    if value == NONE then
+      out[key] = nil
+    end
+  end
+  return out
 end
 
 describe("forges.preflight", function()
@@ -22,25 +36,25 @@ describe("forges.preflight", function()
   end)
 
   it("refuses when no forge serves the remote", function()
-    local r = forges.preflight(state({ forge_name = nil }))
+    local r = forges.preflight(state({ forge_name = NONE }))
     assert.equals("no_forge", r.mode)
     assert.is_truthy(r.reason:match("no supported forge"))
   end)
 
   it("names the default branch before asking about a PR", function()
     -- target is nil here too: the default-branch message must win, not "no_pr".
-    local r = forges.preflight(state({ branch = "main", target = nil }))
+    local r = forges.preflight(state({ branch = "main", target = NONE }))
     assert.equals("default_branch", r.mode)
     assert.is_truthy(r.reason:match("main"))
   end)
 
   it("skips the default-branch check when the default branch is unknown", function()
-    local r = forges.preflight(state({ default_branch = nil }))
+    local r = forges.preflight(state({ default_branch = NONE }))
     assert.equals("inline", r.mode)
   end)
 
   it("asks for a PR to be created when the branch has none", function()
-    local r = forges.preflight(state({ target = nil }))
+    local r = forges.preflight(state({ target = NONE }))
     assert.equals("no_pr", r.mode)
     assert.is_truthy(r.reason:match("gh pr create"))
   end)
