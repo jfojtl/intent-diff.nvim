@@ -374,11 +374,18 @@ Approve  ·  Request changes  ·  Comment (no verdict)  ·  Cancel
 
 **Two modes.** Which one you get is decided before anything is sent:
 
-- **Inline** — when local `HEAD` *is* the PR head and no commented file has
-  uncommitted changes. Each comment posts on its line: ranges as multi-line
-  comments, old-side comments on the left, file-level comments on the file
-  itself. The body carries the intent structure and an index of what went
-  where.
+- **Inline** — when local `HEAD` *is* the PR head, no commented file has
+  uncommitted changes, and the review is based exactly where the PR diverged.
+  Each comment posts on its line: ranges as multi-line comments, old-side
+  comments on the left, file-level comments on the file itself. The body
+  carries the intent structure and an index of what went where.
+
+  In practice that means reviewing against the base branch **as the remote has
+  it** — `:IntentDiff origin/main...`, not `:IntentDiff main...`. GitHub diffs
+  a PR against `origin/main`, so if your local `main` has drifted even one
+  commit, the two diffs are not the same one and the old side is off by
+  whatever `main` gained. The submit says so, names the drift, and degrades
+  rather than guessing.
 - **General** — anything else. Line numbers in a dirty tree, or at a commit the
   PR has not seen, do not mean what they mean on GitHub, so the whole review
   posts as one general comment carrying the Markdown export. You are told which
