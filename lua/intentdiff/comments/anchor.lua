@@ -94,6 +94,12 @@ end
 --- @return string|nil sha, string|nil err
 function M.merge_base(git_root, base_ref)
   local git = require("intentdiff.git")
+  -- A target with no base branch answers "unknown", not an error: concatenating
+  -- nil into "origin/" .. base_ref below would throw, and preflight already
+  -- reads a missing merge base as a reason to degrade.
+  if not base_ref then
+    return nil, "the PR does not name a base branch"
+  end
   -- The remote-tracking ref first: it is what the service actually has. A local
   -- branch of the same name may be behind or ahead of it.
   for _, ref in ipairs({ "origin/" .. base_ref, base_ref }) do
