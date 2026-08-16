@@ -144,6 +144,29 @@ describe("comments.payload", function()
       assert.is_truthy(p.body:match("prose"))
     end)
 
+    -- Every comment in the second group is on client.ts, so rejecting that
+    -- file empties the bucket. A `## <title>` over nothing is a stray heading
+    -- in the PR body — the `## Not attached to an intent` section already
+    -- gates itself on a non-empty check, and the group loop must too.
+    it("omits an intent heading whose comments were all demoted", function()
+      local anchorable = function(c) return c.file ~= "src/http/client.ts" end
+      local p = payload.build(comments(), model(), "inline", anchorable)
+      assert.equals(2, p.demoted)
+      assert.is_nil(p.body:match("## Add retry logic to HTTP client"))
+      -- The group that still has something to say keeps its heading.
+      assert.is_truthy(p.body:match("## Rename UserService to AccountService"))
+      assert.is_truthy(p.body:match("## Not attached to a line"))
+    end)
+
+    it("keeps a heading whose only surviving content is intent prose", function()
+      local p = payload.build({
+        { intent_title = "Rename UserService to AccountService", type = "note", text = "prose" },
+        { file = "src/api/routes.ts", line = 5, side = "new", type = "issue", text = "gone" },
+      }, model(), "inline", function(c) return c.file ~= "src/api/routes.ts" end)
+      assert.is_truthy(p.body:match("## Rename UserService to AccountService"))
+      assert.is_truthy(p.body:match("prose"))
+    end)
+
     it("degrades to a flat body when classification produced no groups", function()
       local p = payload.build(comments(), { groups = {} }, "inline")
       assert.is_nil(p.body:match("## Rename"))
@@ -166,6 +189,19 @@ describe("comments.payload", function()
     it("ignores the anchorable predicate entirely", function()
       local p = payload.build(comments(), model(), "general", function() return false end)
       assert.equals(0, p.demoted)
+    end)
+
+    -- The spec's headline two-sitting scenario ends here: everything was
+    -- posted inline last time, the user then edited a commented file, and
+    -- comes back only to approve. Preflight says general (dirty file), the
+    -- unposted list is empty — and export.generate({}) returns the literal
+    -- "No comments yet.", which is what would have landed on the PR as the
+    -- body of an approval.
+    it("states that it adds no new comments rather than the empty export", function()
+      local p = payload.build({}, model(), "general")
+      assert.equals(0, #p.comments)
+      assert.is_truthy(p.body:match("no new comments"))
+      assert.is_nil(p.body:match("No comments yet"))
     end)
   end)
 

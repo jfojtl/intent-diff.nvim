@@ -62,15 +62,22 @@ end
 function M.build(comments, model, mode, anchorable)
   comments = comments or {}
 
+  -- Nothing to say, in EITHER mode, and this check has to come first. A
+  -- verdict-only submit reaches general mode as readily as inline — the
+  -- comments were posted in an earlier sitting, the user has since edited a
+  -- commented file, and they come back to approve — and general mode would
+  -- otherwise fall through to export.generate({}), whose empty-list output is
+  -- the literal "No comments yet.". That is the body of a real approval on a
+  -- real PR.
+  if #comments == 0 then
+    return { body = VERDICT_ONLY, comments = {}, demoted = 0 }
+  end
+
   -- General mode is the Markdown export, unchanged. The reason it is general
   -- rather than inline is shown in Neovim, not written into the PR: the reader
   -- of the PR cannot act on the state of someone else's working tree.
   if mode ~= "inline" then
     return { body = export.generate(comments, model), comments = {}, demoted = 0 }
-  end
-
-  if #comments == 0 then
-    return { body = VERDICT_ONLY, comments = {}, demoted = 0 }
   end
 
   local can = anchorable or function() return true end
@@ -118,13 +125,32 @@ function M.build(comments, model, mode, anchorable)
     end
   end
 
+  --- Would `emit` write anything for this bucket?
+  ---
+  --- A bucket EXISTS as soon as one comment lands in it, but every one of its
+  --- line comments may then have been demoted into `## Not attached to a
+  --- line`, leaving a `## <title>` heading over nothing. The `## Not attached
+  --- to an intent` section below already gates itself this way; the group loop
+  --- has to as well, or the PR body carries stray empty sections.
+  local function has_content(bucket)
+    if #bucket.intents > 0 then
+      return true
+    end
+    for _, c in ipairs(bucket.items) do
+      if not is_demoted[c] then
+        return true
+      end
+    end
+    return false
+  end
+
   if b.flat and b.buckets[0] then
     -- No grouping available: no headings to hang an index under, so the body
     -- is just the intent prose plus the index.
     emit(b.buckets[0], false)
   end
   for gi, g in ipairs(b.groups) do
-    if b.buckets[gi] then
+    if b.buckets[gi] and has_content(b.buckets[gi]) then
       out[#out + 1] = "## " .. g.title
       out[#out + 1] = ""
       emit(b.buckets[gi], true)
