@@ -166,6 +166,9 @@ M.defaults = {
       -- above because it leaves the machine: it prompts for a verdict and
       -- posts nothing until one is chosen.
       submit_review = "<localleader>cP",
+      -- Read the existing PR discussion into this review session. Uppercase F
+      -- keeps the mnemonic next to `cf` (file comment) without colliding.
+      fetch_discussion = "<localleader>cF",
       -- Popup-local keys for the comment entry float (comments/popup.lua),
       -- buffer-local to its text area rather than installed tab-wide. Not
       -- listed in the g? cheatsheet, which only covers tab-wide surfaces.

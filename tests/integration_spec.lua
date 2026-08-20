@@ -1128,12 +1128,14 @@ describe("comments in a review tab", function()
     require("intentdiff.config").setup({})
   end)
 
-  it("registers the four comment commands", function()
+  it("registers the comment commands", function()
     local cmds = vim.api.nvim_get_commands({})
     assert.is_truthy(cmds.IntentDiffCommentsYank)
     assert.is_truthy(cmds.IntentDiffCommentsWrite)
     assert.is_truthy(cmds.IntentDiffCommentsList)
     assert.is_truthy(cmds.IntentDiffCommentsClear)
+    assert.is_truthy(cmds.IntentDiffCommentsSubmit)
+    assert.is_truthy(cmds.IntentDiffCommentsFetch)
   end)
 
   -- The commands are registered UNCONDITIONALLY (plugin/intentdiff.lua runs

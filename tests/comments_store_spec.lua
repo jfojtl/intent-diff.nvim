@@ -148,4 +148,34 @@ describe("comments.store", function()
     assert.equals(1, s.count())
     assert.equals(0, n)
   end)
+
+  it("keeps fetched discussion separate from local comments", function()
+    s.add({ file = "a.lua", line = 1, side = "new", type = "note", text = "local" })
+    local remote = { remote = true, remote_kind = "inline", file = "a.lua", line = 2,
+      side = "new", type = "note", text = "remote" }
+    s.set_remote({ remote })
+
+    assert.equals(1, s.count())
+    assert.equals(1, #s.get_all())
+    assert.same({ remote }, s.get_remote())
+    assert.equals(2, #s.get_visible())
+    s.clear()
+    assert.same({ remote }, s.get_visible())
+  end)
+
+  it("visually replaces a stamped local comment with its fetched thread", function()
+    local local_comment = s.add({
+      file = "a.lua", line = 3, side = "new", type = "issue", text = "fix this",
+      posted = { service = "github", target = "9" },
+    })
+    local remote = {
+      remote = true, remote_kind = "inline", file = "a.lua", line = 3,
+      side = "new", type = "note", text = "@me\n**[ISSUE]** fix this\n\n↳ @you\ndone",
+      original_body = "**[ISSUE]** fix this",
+    }
+    s.set_remote({ remote })
+
+    assert.same({ remote }, s.get_visible())
+    assert.same({ local_comment }, s.get_all(), "local submission state must remain intact")
+  end)
 end)

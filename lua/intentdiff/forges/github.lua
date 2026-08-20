@@ -22,6 +22,7 @@ function M.capabilities()
   return {
     inline = true,
     file_comments = true,
+    discussion = true,
     verdicts = { "approve", "request_changes", "comment" },
   }
 end
@@ -215,8 +216,203 @@ function M.submit(target, payload, cb)
   end)
 end
 
+--- Decode `gh api --paginate --slurp`: an array of pages, each containing an
+--- array of objects. Accept a flat array too, which makes this tolerant of a
+--- custom/fake gh and of a future CLI mode that returns a single page flat.
+local function decode_pages(stdout)
+  local ok, decoded = pcall(vim.json.decode, stdout)
+  if not ok or type(decoded) ~= "table" then
+    return nil
+  end
+  local out = {}
+  for _, item in ipairs(decoded) do
+    if type(item) == "table" and item[1] ~= nil then
+      for _, nested in ipairs(item) do
+        if type(nested) == "table" then
+          out[#out + 1] = nested
+        end
+      end
+    elseif type(item) == "table" then
+      out[#out + 1] = item
+    end
+  end
+  return out
+end
+
+local function present(value)
+  if value == nil or value == vim.NIL then return nil end
+  return value
+end
+
+local function login_of(item)
+  local user = type(item.user) == "table" and item.user or nil
+  return user and present(user.login) or "unknown"
+end
+
+local function nonempty(value)
+  return type(value) == "string" and vim.trim(value) ~= ""
+end
+
+--- Turn GitHub's three conversation resources into service-neutral records.
+--- Inline replies are collapsed into their root thread so one diff line gets
+--- one readable box. General issue comments and review summaries have no line;
+--- the comment list presents those in a Markdown float.
+function M.normalize_discussion(review_comments, issue_comments, reviews)
+  local by_id, threads = {}, {}
+  for _, item in ipairs(review_comments or {}) do
+    by_id[tostring(item.id)] = item
+  end
+  for _, item in ipairs(review_comments or {}) do
+    local root_id = tostring(present(item.in_reply_to_id) or item.id)
+    threads[root_id] = threads[root_id] or {}
+    threads[root_id][#threads[root_id] + 1] = item
+  end
+
+  local inline = {}
+  for root_id, items in pairs(threads) do
+    table.sort(items, function(a, b)
+      local at, bt = tostring(a.created_at or ""), tostring(b.created_at or "")
+      if at == bt then
+        return tostring(a.id) < tostring(b.id)
+      end
+      return at < bt
+    end)
+    local root = by_id[root_id] or items[1]
+    local anchor = root
+    if not present(anchor.path) then
+      for _, item in ipairs(items) do
+        if present(item.path) then anchor = item break end
+      end
+    end
+    if anchor and present(anchor.path) then
+      local last = present(anchor.line) or present(anchor.original_line)
+      local first = present(anchor.start_line) or present(anchor.original_start_line) or last
+      local side_name = present(anchor.side) or present(anchor.original_side)
+      local text = {}
+      for i, item in ipairs(items) do
+        local prefix = (i == 1 and "@" or "↳ @") .. login_of(item)
+        text[#text + 1] = prefix
+        text[#text + 1] = nonempty(item.body) and item.body or "_(empty comment)_"
+        if i < #items then text[#text + 1] = "" end
+      end
+      local author = login_of(root)
+      local label = "GitHub · @" .. author
+      if not present(anchor.line) and present(anchor.original_line) then
+        label = label .. " · outdated"
+      end
+      inline[#inline + 1] = {
+        remote = true,
+        remote_kind = "inline",
+        remote_id = root_id,
+        type = "note",
+        display_name = label,
+        author = author,
+        text = table.concat(text, "\n"),
+        original_body = present(root.body),
+        file = present(anchor.path),
+        line = anchor.subject_type == "file" and 0 or first,
+        line_end = (last and first and last ~= first) and last or nil,
+        side = side_name == "LEFT" and "old" or "new",
+        url = present(root.html_url),
+        created_at = present(root.created_at),
+        reply_count = math.max(0, #items - 1),
+      }
+    end
+  end
+  table.sort(inline, function(a, b)
+    local at, bt = tostring(a.created_at or ""), tostring(b.created_at or "")
+    if at == bt then return tostring(a.remote_id) < tostring(b.remote_id) end
+    return at < bt
+  end)
+
+  local general = {}
+  for _, item in ipairs(issue_comments or {}) do
+    if nonempty(item.body) then
+      local author = login_of(item)
+      general[#general + 1] = {
+        remote = true,
+        remote_kind = "general",
+        remote_id = "issue:" .. tostring(item.id),
+        type = "note",
+        display_name = "GitHub PR comment · @" .. author,
+        author = author,
+        text = item.body,
+        url = present(item.html_url),
+        created_at = present(item.created_at),
+      }
+    end
+  end
+  for _, item in ipairs(reviews or {}) do
+    if nonempty(item.body) then
+      local author = login_of(item)
+      local state = tostring(item.state or "commented"):lower():gsub("_", " ")
+      general[#general + 1] = {
+        remote = true,
+        remote_kind = "review",
+        remote_id = "review:" .. tostring(item.id),
+        type = "note",
+        display_name = ("GitHub review · @%s · %s"):format(author, state),
+        author = author,
+        text = item.body,
+        url = present(item.html_url),
+        created_at = present(item.submitted_at) or present(item.created_at),
+      }
+    end
+  end
+  table.sort(general, function(a, b)
+    return tostring(a.created_at or "") < tostring(b.created_at or "")
+  end)
+
+  local comments = {}
+  vim.list_extend(comments, inline)
+  vim.list_extend(comments, general)
+  return {
+    comments = comments,
+    inline = inline,
+    general = general,
+    comment_count = #(review_comments or {}) + #(issue_comments or {}),
+    thread_count = #inline,
+  }
+end
+
+--- Fetch inline review comments/replies, general PR comments, and review
+--- summaries. The three GETs run concurrently; a slow endpoint does not make
+--- the other two wait in series.
+--- @param cb fun(discussion: table|nil, err: string|nil)
+function M.fetch_comments(target, cb)
+  local specs = {
+    review_comments = ("repos/{owner}/{repo}/pulls/%s/comments"):format(target.id),
+    issue_comments = ("repos/{owner}/{repo}/issues/%s/comments"):format(target.id),
+    reviews = ("repos/{owner}/{repo}/pulls/%s/reviews"):format(target.id),
+  }
+  local remaining, results, completed = 3, {}, false
+  for key, path in pairs(specs) do
+    local argv = { M.opts().cmd, "api", "--paginate", "--slurp", path }
+    run(argv, target.git_root, nil, function(code, stdout, stderr)
+      record({ event = "fetch", endpoint = key, exit_code = code })
+      if completed then return end
+      if code ~= 0 then
+        completed = true
+        return cb(nil, failure(code, stderr, "fetching pull request discussion"))
+      end
+      local decoded = decode_pages(stdout)
+      if not decoded then
+        completed = true
+        return cb(nil, "could not read gh's pull request discussion JSON")
+      end
+      results[key] = decoded
+      remaining = remaining - 1
+      if remaining == 0 then
+        completed = true
+        cb(M.normalize_discussion(results.review_comments, results.issue_comments, results.reviews))
+      end
+    end)
+  end
+end
+
 M._run = run
 M._failure = failure
 M._VERDICTS = VERDICTS
+M._decode_pages = decode_pages
 
 return M

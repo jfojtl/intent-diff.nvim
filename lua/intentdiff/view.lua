@@ -712,6 +712,7 @@ M.COMMENT_DESCS = {
   clear_comments = "intent-diff: delete every comment",
   export_and_close = "intent-diff: copy the review, then close the tab",
   submit_review = "intent-diff: submit the review to the pull request",
+  fetch_discussion = "intent-diff: fetch pull request discussion",
 }
 
 --- The visual-mode comment actions, in the order the popup's type list uses.
@@ -759,6 +760,7 @@ function M.install_comment_keymaps(buf, tabpage)
     clear_comments = function() comments.clear(tabpage) end,
     export_and_close = function() comments.export_and_close(tabpage) end,
     submit_review = function() comments.submit(tabpage) end,
+    fetch_discussion = function() comments.fetch(tabpage) end,
   }, M.COMMENT_DESCS)
 
   -- Visual-mode variants: the same add actions, over the selected range.

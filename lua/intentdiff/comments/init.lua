@@ -67,19 +67,22 @@ local function label_for(c)
   if c.intent_title then
     where = "intent: " .. c.intent_title
   elseif (c.line or 0) == 0 then
-    where = c.file
+    where = c.file or "PR discussion"
   elseif c.line_end then
     where = ("%s:%d-%d"):format(c.file, c.line, c.line_end)
   else
     where = ("%s:%d"):format(c.file, c.line)
   end
-  return ("[%s] %s — %s"):format(tostring(c.type):upper(), where, first_line)
+  local kind = c.remote and "GITHUB" or tostring(c.type):upper()
+  local author = c.remote and c.author and ("@" .. c.author .. ": ") or ""
+  return ("[%s] %s — %s%s"):format(kind, where, author, first_line)
 end
 
 --- One selectable row per comment, for the list picker.
 function M.list_entries(st)
   local out = {}
-  for _, c in ipairs(st.get_all()) do
+  local all = st.get_visible and st.get_visible() or st.get_all()
+  for _, c in ipairs(all) do
     out[#out + 1] = { comment = c, label = label_for(c) }
   end
   return out
@@ -545,7 +548,8 @@ end
 --- which the old file-scoped walk could not express at all.
 local function comment_rows(st, pane)
   local seen, rows = {}, {}
-  for _, c in ipairs(st.get_all()) do
+  local all = st.get_visible and st.get_visible() or st.get_all()
+  for _, c in ipairs(all) do
     if not c.intent_title and (c.line or 0) ~= 0 then
       for _, row in ipairs(marks.rows_for_comment(pane, c)) do
         if not seen[row] then
@@ -675,6 +679,15 @@ function M.list(tabpage)
       return
     end
     local c = choice.comment
+    if c.remote and (not c.file or c.remote_kind ~= "inline") then
+      local title = c.display_name or "GitHub discussion"
+      local lines = { "# " .. title, "" }
+      vim.list_extend(lines, vim.split(c.text or "", "\n"))
+      return vim.lsp.util.open_floating_preview(lines, "markdown", {
+        border = "rounded",
+        focusable = true,
+      })
+    end
     -- An intent comment lives on a sidebar row and a file-level comment hangs
     -- above line 1: neither addresses a line to jump to.
     if c.intent_title or (c.line or 0) == 0 then
@@ -791,6 +804,13 @@ end
 --- to.
 function M.submit(tabpage)
   require("intentdiff.comments.submit").run(tabpage)
+end
+
+--- Fetch the discussion already on the pull request. This is explicitly
+--- user-triggered, like submit: opening an intent diff does not unexpectedly
+--- invoke a networked CLI.
+function M.fetch(tabpage)
+  require("intentdiff.comments.fetch").run(tabpage)
 end
 
 --- Re-sign the sidebar's group rows. The row list comes from the sidebar

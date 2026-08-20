@@ -104,7 +104,7 @@ return {
 | `:IntentDiff [revision-args]` | Open a review tab. Same argument forms as codediff's `:CodeDiff` — no args (working tree), a single revision, `revision...` for merge-base-relative, or `base target`. |
 | `:IntentDiffSidebar` | Show/hide the sidebar (same as `<leader>b`) |
 | `:IntentDiffToggleAll` | Collapse every intent if any is expanded, else expand every one |
-| `:IntentDiffCommentsYank` / `…Write` / `…List` / `…Clear` | Review comment actions — see below |
+| `:IntentDiffCommentsYank` / `…Write` / `…List` / `…Clear` / `…Submit` / `…Fetch` | Review comment actions — see below |
 | `:IntentDiffLog` | Open the diagnostics log |
 
 ## Usage
@@ -239,6 +239,7 @@ both surfaces need the export keys.
 | `<localleader>cx` | Delete every comment in this review, after confirmation |
 | `<localleader>q` | Copy the review as Markdown, then close the review tab |
 | `<localleader>cP` | Submit the review to the pull request |
+| `<localleader>cF` | Fetch the existing pull request discussion |
 
 ## Review comments
 
@@ -316,10 +317,27 @@ saves last wins on disk.
 | `<localleader>cw` | `:IntentDiffCommentsWrite [path]` | Write the Markdown to `path` (prompted when omitted, default `.intentdiff-review.md` relative to the git root) |
 | `<localleader>q` | — | Copy the Markdown, **then close the review tab** |
 | `<localleader>cP` | `:IntentDiffCommentsSubmit` | Submit the review to the pull request this branch is linked to |
+| `<localleader>cF` | `:IntentDiffCommentsFetch` | Fetch inline threads, replies, review summaries, and general PR comments |
 
 Plain `q` still means what it means everywhere else — close the tab, touch
 nothing else — so the clipboard is only ever written by a key that says it
 writes the clipboard.
+
+### Reading pull request discussion
+
+`<localleader>cF` (`:IntentDiffCommentsFetch`) reads the discussion from the
+GitHub PR linked to the current branch. Inline review threads, including their
+replies, are drawn on the corresponding diff lines. Review summaries and
+general PR comments have no line to attach to; they appear in
+`<localleader>cl` (`:IntentDiffCommentsList`) and open in a read-only Markdown
+float when selected. It uses the same authenticated `gh` CLI as submission.
+Fetched discussion is refreshed on demand and kept only for the current review
+session — GitHub remains its source of truth.
+
+If a local comment previously submitted by intent-diff is fetched back, its
+GitHub thread replaces the local `[... · POSTED]` box visually instead of
+drawing a duplicate. The local record remains intact for persistence and
+duplicate-submit protection.
 
 A sample export, for the two groups shown in the sidebar at the top of this
 file:
@@ -629,6 +647,7 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       -- still closes without touching the clipboard.
       export_and_close = "<localleader>q",
       submit_review = "<localleader>cP",
+      fetch_discussion = "<localleader>cF",
       -- Popup-local keys for the comment entry float, buffer-local to its
       -- text area rather than tab-wide.
       popup_cycle_type = "<Tab>",

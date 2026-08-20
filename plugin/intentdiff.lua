@@ -65,3 +65,10 @@ vim.api.nvim_create_user_command("IntentDiffCommentsSubmit", function()
   end
   require("intentdiff.comments").submit()
 end, { desc = "intent-diff: submit the review to the pull request" })
+
+vim.api.nvim_create_user_command("IntentDiffCommentsFetch", function()
+  if comments_off() then
+    return
+  end
+  require("intentdiff.comments").fetch()
+end, { desc = "intent-diff: fetch pull request discussion" })

@@ -55,6 +55,11 @@ end
 function M.new()
   --- @type intentdiff.Comment[]
   local comments = {}
+  -- Read-only comments fetched from the review service. They are deliberately
+  -- session-only: persistence belongs to the service, and mixing these into
+  -- `comments` would make edit/delete/export/submit treat somebody else's
+  -- discussion as local review input.
+  local remote_comments = {}
   local listeners = {}
   --- Storage key this review persists under, or nil for a non-persisting one.
   local key = nil
@@ -111,6 +116,51 @@ function M.new()
 
   function self.get_all()
     return comments
+  end
+
+  --- Replace the session's read-only forge discussion.
+  function self.set_remote(fetched)
+    remote_comments = fetched or {}
+  end
+
+  function self.get_remote()
+    return remote_comments
+  end
+
+  --- Comments that should be painted and listed: local input plus fetched
+  --- discussion. If a fetched root is the exact GitHub representation of a
+  --- stamped local inline comment, prefer the fetched thread visually. It
+  --- contains the same root plus any replies, whereas drawing both produces
+  --- duplicate boxes on the same line.
+  function self.get_visible()
+    local shadowed = {}
+    for _, remote in ipairs(remote_comments) do
+      if remote.remote and remote.original_body then
+        for _, local_comment in ipairs(comments) do
+          local expected = ("**[%s]** %s")
+            :format(tostring(local_comment.type):upper(), local_comment.text or "")
+          if local_comment.posted
+              and local_comment.file == remote.file
+              and (local_comment.line or 0) == (remote.line or 0)
+              and local_comment.line_end == remote.line_end
+              and (local_comment.side or "new") == (remote.side or "new")
+              and expected == remote.original_body then
+            shadowed[local_comment] = true
+            break
+          end
+        end
+      end
+    end
+    local out = {}
+    for _, c in ipairs(comments) do
+      if not shadowed[c] then
+        out[#out + 1] = c
+      end
+    end
+    for _, c in ipairs(remote_comments) do
+      out[#out + 1] = c
+    end
+    return out
   end
 
   --- Comments to render in one pane. `side` nil means both sides. File-level
