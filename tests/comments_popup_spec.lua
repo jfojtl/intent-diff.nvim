@@ -33,6 +33,23 @@ describe("comments.popup", function()
     assert.equals(popup._text_win, vim.api.nvim_get_current_win())
   end)
 
+  it("opens a plain multi-line editor without the type selector", function()
+    local got_type, got_text
+    popup.open({ plain = true, title = "Reply", no_insert = true }, function(t, text)
+      got_type, got_text = t, text
+    end)
+    assert.is_nil(popup._type_win)
+    assert.is_true(vim.api.nvim_win_is_valid(popup._text_win))
+    local title = vim.api.nvim_win_get_config(popup._text_win).title[1][1]
+    assert.truthy(title:find("Reply", 1, true))
+    local text_win = popup._text_win
+    vim.api.nvim_buf_set_lines(popup._text_buf, 0, -1, false, { "one", "two" })
+    popup.submit()
+    assert.equals("reply", got_type)
+    assert.equals("one\ntwo", got_text)
+    assert.is_false(vim.api.nvim_win_is_valid(text_win))
+  end)
+
   it("returns the typed text and selected type on submit", function()
     local got_type, got_text
     popup.open({ type = "issue", no_insert = true }, function(t, x)

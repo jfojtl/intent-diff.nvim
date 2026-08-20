@@ -128,6 +128,8 @@ local function build_sections(keymaps)
       { ckm.export_and_close, "Copy the review, then close the tab" },
       { ckm.submit_review, "Submit the review to the pull request" },
       { ckm.fetch_discussion, "Fetch pull request discussion" },
+      { ckm.reply_thread, "Reply to the GitHub thread" },
+      { ckm.resolve_thread, "Resolve/reopen the GitHub thread" },
     })
     if comments then
       sections[#sections + 1] = comments

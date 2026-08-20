@@ -713,6 +713,8 @@ M.COMMENT_DESCS = {
   export_and_close = "intent-diff: copy the review, then close the tab",
   submit_review = "intent-diff: submit the review to the pull request",
   fetch_discussion = "intent-diff: fetch pull request discussion",
+  reply_thread = "intent-diff: reply to the GitHub thread",
+  resolve_thread = "intent-diff: resolve/reopen the GitHub thread",
 }
 
 --- The visual-mode comment actions, in the order the popup's type list uses.
@@ -761,6 +763,8 @@ function M.install_comment_keymaps(buf, tabpage)
     export_and_close = function() comments.export_and_close(tabpage) end,
     submit_review = function() comments.submit(tabpage) end,
     fetch_discussion = function() comments.fetch(tabpage) end,
+    reply_thread = function() comments.reply(tabpage) end,
+    resolve_thread = function() comments.resolve(tabpage) end,
   }, M.COMMENT_DESCS)
 
   -- Visual-mode variants: the same add actions, over the selected range.

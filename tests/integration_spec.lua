@@ -1136,6 +1136,8 @@ describe("comments in a review tab", function()
     assert.is_truthy(cmds.IntentDiffCommentsClear)
     assert.is_truthy(cmds.IntentDiffCommentsSubmit)
     assert.is_truthy(cmds.IntentDiffCommentsFetch)
+    assert.is_truthy(cmds.IntentDiffCommentsReply)
+    assert.is_truthy(cmds.IntentDiffCommentsResolve)
   end)
 
   -- The commands are registered UNCONDITIONALLY (plugin/intentdiff.lua runs
@@ -1153,8 +1155,11 @@ describe("comments in a review tab", function()
     vim.fn.setreg("+", "SENTINEL")
     local out_path = vim.fn.tempname() .. "/refused.md"
     local ok, err = pcall(function()
-      for _, cmd in ipairs({ "IntentDiffCommentsYank", "IntentDiffCommentsList",
-        "IntentDiffCommentsClear", "IntentDiffCommentsWrite " .. out_path }) do
+      for _, cmd in ipairs({
+        "IntentDiffCommentsYank", "IntentDiffCommentsList", "IntentDiffCommentsClear",
+        "IntentDiffCommentsWrite " .. out_path, "IntentDiffCommentsSubmit",
+        "IntentDiffCommentsFetch", "IntentDiffCommentsReply", "IntentDiffCommentsResolve",
+      }) do
         vim.cmd(cmd)
       end
     end)
@@ -1171,7 +1176,7 @@ describe("comments in a review tab", function()
         refusals = refusals + 1
       end
     end
-    assert.equals(4, refusals,
+    assert.equals(8, refusals,
       "every comment command must say why it did nothing, got: " .. vim.inspect(messages))
   end)
 
@@ -1432,6 +1437,50 @@ describe("comments in a review tab", function()
       assert.equals(0, #vim.api.nvim_buf_get_extmarks(displayed, marks.ns, 0, -1, {}),
         "the review's comment extmarks outlived it")
     end
+  end)
+
+  it("fetches linked pull request discussion automatically when a review opens", function()
+    local repo = helpers.make_repo({ ["a.lua"] = "old\n" })
+    helpers.write_file(repo, "a.lua", "new\n")
+    vim.cmd("cd " .. repo)
+    local fetches = 0
+    local remote = {
+      remote = true, remote_kind = "inline", remote_id = "1", type = "note",
+      display_name = "GitHub · @reviewer", author = "reviewer", text = "@reviewer\ncontext",
+      file = "a.lua", line = 1, side = "new",
+    }
+    local forge = {
+      detect = function(root, branch, cb)
+        cb({ service = "test", id = "7", head_sha = "head", base_ref = "main" })
+      end,
+      fetch_comments = function(target, cb)
+        fetches = fetches + 1
+        cb({ comments = { remote }, comment_count = 1, thread_count = 1, general = {} })
+      end,
+    }
+    require("intentdiff").setup({
+      cache_dir = vim.fn.tempname(),
+      forge = forge,
+      provider = function(_, cb)
+        vim.schedule(function()
+          cb({ groups = { { title = "Only intent", hunk_ids = { "a.lua:1" } } } })
+        end)
+        return { cancel = function() end }
+      end,
+    })
+
+    require("intentdiff").open("")
+    local tab = vim.api.nvim_get_current_tabpage()
+    local entry = helpers.wait_for(function()
+      local current = require("intentdiff")._session(tab)
+      return current and current.comment_store
+        and #current.comment_store.get_remote() == 1 and current or nil
+    end, 10000)
+
+    assert.truthy(entry, "the PR discussion was not fetched on open")
+    assert.equals(1, fetches)
+    assert.same({ remote }, entry.comment_store.get_remote())
+    require("intentdiff").close(tab)
   end)
 
   -- The `comments.enabled = false` contract against a REAL review, which is

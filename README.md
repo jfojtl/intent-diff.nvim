@@ -104,7 +104,7 @@ return {
 | `:IntentDiff [revision-args]` | Open a review tab. Same argument forms as codediff's `:CodeDiff` — no args (working tree), a single revision, `revision...` for merge-base-relative, or `base target`. |
 | `:IntentDiffSidebar` | Show/hide the sidebar (same as `<leader>b`) |
 | `:IntentDiffToggleAll` | Collapse every intent if any is expanded, else expand every one |
-| `:IntentDiffCommentsYank` / `…Write` / `…List` / `…Clear` / `…Submit` / `…Fetch` | Review comment actions — see below |
+| `:IntentDiffCommentsYank` / `…Write` / `…List` / `…Clear` / `…Submit` / `…Fetch` / `…Reply` / `…Resolve` | Review comment actions — see below |
 | `:IntentDiffLog` | Open the diagnostics log |
 
 ## Usage
@@ -240,6 +240,8 @@ both surfaces need the export keys.
 | `<localleader>q` | Copy the review as Markdown, then close the review tab |
 | `<localleader>cP` | Submit the review to the pull request |
 | `<localleader>cF` | Fetch the existing pull request discussion |
+| `<localleader>cr` | Reply to the GitHub review thread at the cursor |
+| `<localleader>cR` | Resolve an open GitHub thread, or reopen a resolved one |
 
 ## Review comments
 
@@ -318,6 +320,8 @@ saves last wins on disk.
 | `<localleader>q` | — | Copy the Markdown, **then close the review tab** |
 | `<localleader>cP` | `:IntentDiffCommentsSubmit` | Submit the review to the pull request this branch is linked to |
 | `<localleader>cF` | `:IntentDiffCommentsFetch` | Fetch inline threads, replies, review summaries, and general PR comments |
+| `<localleader>cr` | `:IntentDiffCommentsReply` | Reply to the inline GitHub thread at the cursor |
+| `<localleader>cR` | `:IntentDiffCommentsResolve` | Resolve the inline thread at the cursor, or reopen it when already resolved |
 
 Plain `q` still means what it means everywhere else — close the tab, touch
 nothing else — so the clipboard is only ever written by a key that says it
@@ -325,14 +329,22 @@ writes the clipboard.
 
 ### Reading pull request discussion
 
-`<localleader>cF` (`:IntentDiffCommentsFetch`) reads the discussion from the
-GitHub PR linked to the current branch. Inline review threads, including their
-replies, are drawn on the corresponding diff lines. Review summaries and
-general PR comments have no line to attach to; they appear in
+When a review opens on a branch linked to a GitHub PR, intent-diff fetches its
+discussion automatically. `<localleader>cF` (`:IntentDiffCommentsFetch`)
+refreshes it on demand. Inline review threads, including their replies, are
+drawn on the corresponding diff lines. Review summaries and general PR
+comments have no line to attach to; they appear in
 `<localleader>cl` (`:IntentDiffCommentsList`) and open in a read-only Markdown
 float when selected. It uses the same authenticated `gh` CLI as submission.
-Fetched discussion is refreshed on demand and kept only for the current review
-session — GitHub remains its source of truth.
+Fetched discussion is refreshed on every open and on demand, and kept only for
+the current review session — GitHub remains its source of truth.
+
+With the cursor on a fetched inline thread, `<localleader>cr` opens a
+multi-line reply editor and posts the reply to that thread. `<localleader>cR`
+resolves an open thread or reopens a resolved one. Both actions honor GitHub's
+per-thread permissions and refresh the discussion from GitHub after success.
+Resolved boxes are labelled `RESOLVED`; these actions apply only to inline
+review threads because general PR comments do not have GitHub thread state.
 
 If a local comment previously submitted by intent-diff is fetched back, its
 GitHub thread replaces the local `[... · POSTED]` box visually instead of
@@ -550,6 +562,7 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   -- Markdown for an agent to act on.
   comments = {
     enabled = true,
+    fetch_on_open = true, -- silently ignored when the branch has no PR
 
     -- Comment types, in the order the popup cycles them. Each needs a name
     -- and an icon; its highlight groups are derived from `key` — see
@@ -648,6 +661,8 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       export_and_close = "<localleader>q",
       submit_review = "<localleader>cP",
       fetch_discussion = "<localleader>cF",
+      reply_thread = "<localleader>cr",
+      resolve_thread = "<localleader>cR",
       -- Popup-local keys for the comment entry float, buffer-local to its
       -- text area rather than tab-wide.
       popup_cycle_type = "<Tab>",

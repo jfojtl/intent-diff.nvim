@@ -122,6 +122,7 @@ describe("comments config", function()
   it("defaults to enabled with the four built-in types", function()
     config.setup({})
     assert.is_true(config.options.comments.enabled)
+    assert.is_true(config.options.comments.fetch_on_open)
     local keys = {}
     for _, t in ipairs(config.options.comments.types) do
       keys[#keys + 1] = t.key

@@ -72,3 +72,13 @@ vim.api.nvim_create_user_command("IntentDiffCommentsFetch", function()
   end
   require("intentdiff.comments").fetch()
 end, { desc = "intent-diff: fetch pull request discussion" })
+
+vim.api.nvim_create_user_command("IntentDiffCommentsReply", function()
+  if comments_off() then return end
+  require("intentdiff.comments").reply()
+end, { desc = "intent-diff: reply to the GitHub review thread at the cursor" })
+
+vim.api.nvim_create_user_command("IntentDiffCommentsResolve", function()
+  if comments_off() then return end
+  require("intentdiff.comments").resolve()
+end, { desc = "intent-diff: resolve or reopen the GitHub review thread at the cursor" })

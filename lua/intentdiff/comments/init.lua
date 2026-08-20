@@ -806,11 +806,18 @@ function M.submit(tabpage)
   require("intentdiff.comments.submit").run(tabpage)
 end
 
---- Fetch the discussion already on the pull request. This is explicitly
---- user-triggered, like submit: opening an intent diff does not unexpectedly
---- invoke a networked CLI.
-function M.fetch(tabpage)
-  require("intentdiff.comments.fetch").run(tabpage)
+--- Fetch the discussion already on the pull request. `opts.automatic` makes
+--- non-PR repositories quiet for the open-time refresh path.
+function M.fetch(tabpage, opts)
+  require("intentdiff.comments.fetch").run(tabpage, opts)
+end
+
+function M.reply(tabpage)
+  require("intentdiff.comments.discussion").reply(tabpage)
+end
+
+function M.resolve(tabpage)
+  require("intentdiff.comments.discussion").resolve(tabpage)
 end
 
 --- Re-sign the sidebar's group rows. The row list comes from the sidebar

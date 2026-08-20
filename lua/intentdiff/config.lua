@@ -72,6 +72,9 @@ M.defaults = {
   -- Markdown for an agent to act on. See :IntentDiffCommentsYank / …Write.
   comments = {
     enabled = true,
+    -- Read the linked PR's existing discussion whenever a review opens.
+    -- Repositories/branches with no PR are ignored without a notification.
+    fetch_on_open = true,
     -- The order the popup cycles them in. A type's highlight groups are
     -- derived from its key — see highlight.comment_groups.
     types = {
@@ -169,6 +172,9 @@ M.defaults = {
       -- Read the existing PR discussion into this review session. Uppercase F
       -- keeps the mnemonic next to `cf` (file comment) without colliding.
       fetch_discussion = "<localleader>cF",
+      reply_thread = "<localleader>cr",
+      -- Resolves an open GitHub thread, or reopens a resolved one.
+      resolve_thread = "<localleader>cR",
       -- Popup-local keys for the comment entry float (comments/popup.lua),
       -- buffer-local to its text area rather than installed tab-wide. Not
       -- listed in the g? cheatsheet, which only covers tab-wide surfaces.

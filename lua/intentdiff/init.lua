@@ -1291,6 +1291,16 @@ function M.open(argline)
             pcall(function()
               require("intentdiff.comments").attach_session(current)
             end)
+            -- Fetch only after attach_session has installed this review's
+            -- store: the async callback needs somewhere session-local to put
+            -- remote discussion. Non-PR branches are silent in automatic
+            -- mode, so opening an ordinary working-tree review stays quiet.
+            if current.comment_store
+                and (require("intentdiff.config").options.comments or {}).fetch_on_open ~= false then
+              pcall(function()
+                require("intentdiff.comments").fetch(current.sess.tabpage, { automatic = true })
+              end)
+            end
           end
           current.inventory = inventory
           classify_and_render(token)

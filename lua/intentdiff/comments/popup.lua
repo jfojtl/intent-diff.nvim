@@ -68,7 +68,9 @@ local function render_type()
 end
 
 local function close_windows()
-  for _, win in ipairs({ M._type_win, M._text_win }) do
+  -- Do not use ipairs here: the plain reply editor has no type window, and a
+  -- nil first element would stop iteration before reaching its text window.
+  for _, win in pairs({ M._type_win, M._text_win }) do
     if win and vim.api.nvim_win_is_valid(win) then
       pcall(vim.api.nvim_win_close, win, true)
     end
@@ -146,12 +148,16 @@ local function float(buf, row, height, title)
   })
 end
 
---- @param opts { type: string?, text: string? }
+--- `plain` hides the type selector and turns this into a generic multi-line
+--- text entry surface (used for GitHub thread replies).
+--- @param opts { type: string?, text: string?, plain: boolean?, title: string? }
 --- @param callback fun(comment_type: string|nil, text: string|nil)
 function M.open(opts, callback)
   M.cancel()
   opts = opts or {}
-  local list = types()
+  local list = opts.plain
+      and { { key = "reply", name = opts.title or "Reply", icon = "↩" } }
+    or types()
   local index = 1
   for i, t in ipairs(list) do
     if t.key == opts.type then
@@ -160,9 +166,9 @@ function M.open(opts, callback)
     end
   end
 
-  M._type_buf = vim.api.nvim_create_buf(false, true)
+  M._type_buf = not opts.plain and vim.api.nvim_create_buf(false, true) or nil
   M._text_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[M._type_buf].bufhidden = "wipe"
+  if M._type_buf then vim.bo[M._type_buf].bufhidden = "wipe" end
   vim.bo[M._text_buf].bufhidden = "wipe"
 
   state = {
@@ -170,6 +176,7 @@ function M.open(opts, callback)
     index = index,
     callback = callback,
     prev_win = vim.api.nvim_get_current_win(),
+    plain = opts.plain,
   }
 
   -- Read the popup-local keys once so both the titles and the bindings
@@ -179,13 +186,17 @@ function M.open(opts, callback)
   local cycle_hint = first_lhs(km.popup_cycle_type)
   local submit_hint = first_lhs(km.popup_submit)
   local type_title = cycle_hint and (" Type (" .. cycle_hint .. " to switch) ") or " Type "
-  local text_title = submit_hint and (" Comment (" .. submit_hint .. " submit) ") or " Comment "
+  local label = opts.title or "Comment"
+  local text_title = submit_hint and (" " .. label .. " (" .. submit_hint .. " submit) ")
+    or (" " .. label .. " ")
 
-  local total = 3 + TEXT_HEIGHT + 2
+  local total = opts.plain and (TEXT_HEIGHT + 2) or (3 + TEXT_HEIGHT + 2)
   local top = math.max(math.floor((vim.o.lines - total) / 2), 0)
-  M._type_win = float(M._type_buf, top, 1, type_title)
-  M._text_win = float(M._text_buf, top + 3, TEXT_HEIGHT, text_title)
-  render_type()
+  if not opts.plain then
+    M._type_win = float(M._type_buf, top, 1, type_title)
+  end
+  M._text_win = float(M._text_buf, opts.plain and top or top + 3, TEXT_HEIGHT, text_title)
+  if not opts.plain then render_type() end
 
   if opts.text and opts.text ~= "" then
     -- opts.text is a previously-stored, possibly hand-edited comment (the
@@ -209,7 +220,9 @@ function M.open(opts, callback)
       end
     end)
   end
-  bind({ "i", "n" }, km.popup_cycle_type, M.cycle_type)
+  if not opts.plain then
+    bind({ "i", "n" }, km.popup_cycle_type, M.cycle_type)
+  end
   bind({ "i", "n" }, km.popup_submit, M.submit)
   pcall(vim.keymap.set, "n", "<CR>", M.submit, { buffer = M._text_buf, nowait = true })
   -- Unconditional: <Esc> is a hard escape hatch, not a configurable action.

@@ -7,7 +7,9 @@ local function notify(message, level)
   vim.notify("intent-diff: " .. message, level or vim.log.levels.INFO)
 end
 
-function M.run(tabpage)
+function M.run(tabpage, opts)
+  opts = opts or {}
+  local automatic = opts.automatic == true
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
   local entry = require("intentdiff")._session(tabpage)
   if not (entry and entry.comment_store) then
@@ -20,7 +22,9 @@ function M.run(tabpage)
 
   entry.discussion_fetch_seq = (entry.discussion_fetch_seq or 0) + 1
   local fetch_seq = entry.discussion_fetch_seq
-  notify("fetching pull request discussion…")
+  if not automatic then
+    notify("fetching pull request discussion…")
+  end
 
   local function is_current()
     local current = require("intentdiff")._session(tabpage)
@@ -30,11 +34,16 @@ function M.run(tabpage)
   require("intentdiff.forges").collect(git_root, {}, function(state, err)
     if not is_current() then return end
     if err then
+      -- A repository with fetching disabled has no automatic work to do.
+      -- Authentication/detection failures still surface when a forge was
+      -- resolved: otherwise an actual PR would silently lose its context.
+      if automatic and not state.forge then return end
       return vim.schedule(function()
         if is_current() then notify(err, vim.log.levels.WARN) end
       end)
     end
     if not state.target then
+      if automatic then return end
       return vim.schedule(function()
         if is_current() then
           notify(("no PR for branch %s — create one first (gh pr create)")
@@ -43,6 +52,7 @@ function M.run(tabpage)
       end)
     end
     if type(state.forge.fetch_comments) ~= "function" then
+      if automatic then return end
       return vim.schedule(function()
         if is_current() then
           notify("this forge does not support fetching discussion", vim.log.levels.WARN)
@@ -61,9 +71,14 @@ function M.run(tabpage)
         end
         entry.comment_store.set_remote(discussion.comments)
         entry.forge_discussion = discussion
+        entry.forge = state.forge
+        entry.forge_target = state.target
         require("intentdiff.comments.marks").refresh(tabpage)
-        notify(("fetched %d PR comment(s) in %d inline thread(s); %d general item(s)")
-          :format(discussion.comment_count, discussion.thread_count, #discussion.general))
+        if not opts.quiet_success then
+          notify(("fetched %d PR comment(s) in %d inline thread(s); %d general item(s)")
+            :format(discussion.comment_count, discussion.thread_count, #discussion.general))
+        end
+        if opts.on_done then pcall(opts.on_done, discussion) end
       end)
     end)
   end)

@@ -32,6 +32,12 @@ describe("forges.github pull request discussion", function()
       { id = 40, body = "summary", state = "CHANGES_REQUESTED",
         submitted_at = "2026-08-19T09:00:00Z", user = { login = "erin" } },
       { id = 41, body = "", state = "APPROVED", user = { login = "frank" } },
+    }, {
+      ["10"] = {
+        id = "THREAD_10", isResolved = true, isOutdated = false,
+        viewerCanReply = true, viewerCanResolve = false, viewerCanUnresolve = true,
+        resolvedBy = { login = "maintainer" },
+      },
     })
 
     assert.equals(4, got.comment_count)
@@ -50,6 +56,13 @@ describe("forges.github pull request discussion", function()
     assert.equals("@alice\nroot\n\n↳ @bob\nreply", thread.text)
     assert.equals(1, thread.reply_count)
     assert.equals("root", thread.original_body)
+    assert.equals("THREAD_10", thread.thread_id)
+    assert.is_true(thread.is_resolved)
+    assert.is_true(thread.viewer_can_reply)
+    assert.is_false(thread.viewer_can_resolve)
+    assert.is_true(thread.viewer_can_unresolve)
+    assert.equals("maintainer", thread.resolved_by)
+    assert.truthy(thread.display_name:find("resolved", 1, true))
     assert.equals("review", got.general[1].remote_kind)
     assert.truthy(got.general[1].display_name:find("changes requested", 1, true))
     assert.equals("general", got.general[2].text)
@@ -57,6 +70,10 @@ describe("forges.github pull request discussion", function()
 
   it("fetches all three paginated GitHub resources", function()
     restore = helpers.fake_bin("gh", [=[
+if [ "$2" = "graphql" ]; then
+  echo '[{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"THREAD_1","isResolved":false,"isOutdated":false,"viewerCanReply":true,"viewerCanResolve":true,"viewerCanUnresolve":false,"resolvedBy":null,"comments":{"nodes":[{"fullDatabaseId":"1"}]}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}]'
+  exit 0
+fi
 case "$4" in
   */pulls/*/comments)
     echo '[[{"id":1,"path":"a.lua","line":3,"side":"RIGHT","body":"inline","created_at":"2026-01-01T00:00:00Z","user":{"login":"a"}}]]'
@@ -78,6 +95,8 @@ esac
     assert.equals(1, result.thread_count)
     assert.equals(2, #result.general)
     assert.equals(3, #result.comments)
+    assert.equals("THREAD_1", result.inline[1].thread_id)
+    assert.is_true(result.inline[1].viewer_can_resolve)
   end)
 
   it("surfaces an endpoint failure without returning partial discussion", function()

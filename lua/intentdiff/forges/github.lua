@@ -5,8 +5,8 @@
 -- resolves {owner}/{repo} from the checkout — none of which this plugin should
 -- reimplement.
 --
--- Only M.submit writes. detect and the repo lookups are read-only, so the
--- preflight can run freely before the user has chosen anything.
+-- Detecting and fetching are read-only. Submit, reply, and resolve/reopen only
+-- run after an explicit UI action from the user.
 local M = {}
 
 local VERDICTS = { approve = "APPROVE", request_changes = "REQUEST_CHANGES", comment = "COMMENT" }
@@ -239,6 +239,30 @@ local function decode_pages(stdout)
   return out
 end
 
+--- PullRequestReviewThread metadata is GraphQL-only. Key it by the REST
+--- database id of the thread's first comment, which is the bridge between the
+--- two APIs and lets REST remain the source for fully-paginated comment bodies.
+local function decode_thread_pages(stdout)
+  local ok, pages = pcall(vim.json.decode, stdout)
+  if not ok or type(pages) ~= "table" then return nil end
+  -- --slurp wraps every GraphQL response page; tolerate an unwrapped response
+  -- for custom gh shims in the same way decode_pages does for REST.
+  if pages.data then pages = { pages } end
+  local out = {}
+  for _, page in ipairs(pages) do
+    local connection = type(page) == "table" and page.data
+      and page.data.repository and page.data.repository.pullRequest
+      and page.data.repository.pullRequest.reviewThreads
+    for _, thread in ipairs(connection and connection.nodes or {}) do
+      local first = thread.comments and thread.comments.nodes and thread.comments.nodes[1]
+      if first and first.fullDatabaseId then
+        out[tostring(first.fullDatabaseId)] = thread
+      end
+    end
+  end
+  return out
+end
+
 local function present(value)
   if value == nil or value == vim.NIL then return nil end
   return value
@@ -257,7 +281,8 @@ end
 --- Inline replies are collapsed into their root thread so one diff line gets
 --- one readable box. General issue comments and review summaries have no line;
 --- the comment list presents those in a Markdown float.
-function M.normalize_discussion(review_comments, issue_comments, reviews)
+function M.normalize_discussion(review_comments, issue_comments, reviews, thread_metadata)
+  thread_metadata = thread_metadata or {}
   local by_id, threads = {}, {}
   for _, item in ipairs(review_comments or {}) do
     by_id[tostring(item.id)] = item
@@ -278,6 +303,7 @@ function M.normalize_discussion(review_comments, issue_comments, reviews)
       return at < bt
     end)
     local root = by_id[root_id] or items[1]
+    local metadata = thread_metadata[root_id] or {}
     local anchor = root
     if not present(anchor.path) then
       for _, item in ipairs(items) do
@@ -300,6 +326,9 @@ function M.normalize_discussion(review_comments, issue_comments, reviews)
       if not present(anchor.line) and present(anchor.original_line) then
         label = label .. " · outdated"
       end
+      if metadata.isResolved then
+        label = label .. " · resolved"
+      end
       inline[#inline + 1] = {
         remote = true,
         remote_kind = "inline",
@@ -316,6 +345,15 @@ function M.normalize_discussion(review_comments, issue_comments, reviews)
         url = present(root.html_url),
         created_at = present(root.created_at),
         reply_count = math.max(0, #items - 1),
+        thread_id = present(metadata.id),
+        is_resolved = metadata.isResolved == true,
+        is_outdated = metadata.isOutdated == true
+          or (not present(anchor.line) and present(anchor.original_line) ~= nil),
+        viewer_can_reply = metadata.viewerCanReply,
+        viewer_can_resolve = metadata.viewerCanResolve,
+        viewer_can_unresolve = metadata.viewerCanUnresolve,
+        resolved_by = type(metadata.resolvedBy) == "table"
+          and present(metadata.resolvedBy.login) or nil,
       }
     end
   end
@@ -376,8 +414,8 @@ function M.normalize_discussion(review_comments, issue_comments, reviews)
 end
 
 --- Fetch inline review comments/replies, general PR comments, and review
---- summaries. The three GETs run concurrently; a slow endpoint does not make
---- the other two wait in series.
+--- summaries. The three REST GETs and GraphQL metadata lookup run concurrently;
+--- a slow endpoint does not make the others wait in series.
 --- @param cb fun(discussion: table|nil, err: string|nil)
 function M.fetch_comments(target, cb)
   local specs = {
@@ -385,7 +423,15 @@ function M.fetch_comments(target, cb)
     issue_comments = ("repos/{owner}/{repo}/issues/%s/comments"):format(target.id),
     reviews = ("repos/{owner}/{repo}/pulls/%s/reviews"):format(target.id),
   }
-  local remaining, results, completed = 3, {}, false
+  local remaining, results, completed = 4, {}, false
+  local function complete_one()
+    remaining = remaining - 1
+    if remaining == 0 and not completed then
+      completed = true
+      cb(M.normalize_discussion(results.review_comments, results.issue_comments,
+        results.reviews, results.thread_metadata))
+    end
+  end
   for key, path in pairs(specs) do
     local argv = { M.opts().cmd, "api", "--paginate", "--slurp", path }
     run(argv, target.git_root, nil, function(code, stdout, stderr)
@@ -401,18 +447,84 @@ function M.fetch_comments(target, cb)
         return cb(nil, "could not read gh's pull request discussion JSON")
       end
       results[key] = decoded
-      remaining = remaining - 1
-      if remaining == 0 then
-        completed = true
-        cb(M.normalize_discussion(results.review_comments, results.issue_comments, results.reviews))
-      end
+      complete_one()
     end)
   end
+
+  local thread_query = [[
+query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $endCursor) {
+        nodes {
+          id isResolved isOutdated viewerCanReply viewerCanResolve viewerCanUnresolve
+          resolvedBy { login }
+          comments(first: 1) { nodes { fullDatabaseId } }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+]]
+  local graph_argv = {
+    M.opts().cmd, "api", "graphql", "--paginate", "--slurp",
+    "-F", "owner={owner}", "-F", "repo={repo}",
+    "-F", "number=" .. tostring(target.id), "-f", "query=" .. thread_query,
+  }
+  run(graph_argv, target.git_root, nil, function(code, stdout)
+    record({ event = "fetch", endpoint = "thread_metadata", exit_code = code })
+    if completed then return end
+    -- Metadata enriches the REST discussion with resolve permissions and ids.
+    -- A GraphQL failure must not discard readable REST comments, especially
+    -- on an Enterprise host whose schema may lag github.com.
+    results.thread_metadata = code == 0 and decode_thread_pages(stdout) or {}
+    if not results.thread_metadata then results.thread_metadata = {} end
+    complete_one()
+  end)
+end
+
+--- Reply to the top-level comment anchoring an inline review thread.
+function M.reply(target, thread, body, cb)
+  local path = ("repos/{owner}/{repo}/pulls/%s/comments/%s/replies")
+    :format(target.id, thread.remote_id)
+  local ok, encoded = pcall(vim.json.encode, { body = body })
+  if not ok then return cb(nil, "could not encode the reply") end
+  run({ M.opts().cmd, "api", "--method", "POST", path, "--input", "-" },
+    target.git_root, encoded, function(code, stdout, stderr)
+      record({ event = "reply", exit_code = code, thread = thread.remote_id })
+      if code ~= 0 then
+        return cb(nil, failure(code, stderr, "replying to the review thread"))
+      end
+      local decoded_ok, reply = pcall(vim.json.decode, stdout)
+      cb(decoded_ok and type(reply) == "table" and reply or {})
+    end)
+end
+
+--- Resolve or unresolve an inline review thread through GraphQL.
+function M.resolve_thread(target, thread, resolve, cb)
+  local mutation = resolve and "resolveReviewThread" or "unresolveReviewThread"
+  local query = ("mutation($threadId: ID!) { %s(input: {threadId: $threadId}) "
+    .. "{ thread { id isResolved } } }"):format(mutation)
+  local argv = {
+    M.opts().cmd, "api", "graphql", "-f", "query=" .. query,
+    "-F", "threadId=" .. tostring(thread.thread_id),
+  }
+  run(argv, target.git_root, nil, function(code, stdout, stderr)
+    record({ event = resolve and "resolve" or "unresolve", exit_code = code })
+    if code ~= 0 then
+      local action = resolve and "resolving" or "reopening"
+      return cb(nil, failure(code, stderr, action .. " the review thread"))
+    end
+    local decoded_ok, result = pcall(vim.json.decode, stdout)
+    cb(decoded_ok and type(result) == "table" and result or {})
+  end)
 end
 
 M._run = run
 M._failure = failure
 M._VERDICTS = VERDICTS
 M._decode_pages = decode_pages
+M._decode_thread_pages = decode_thread_pages
 
 return M
