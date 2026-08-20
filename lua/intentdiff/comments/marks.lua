@@ -61,14 +61,20 @@ end
 --- The bordered comment body, as `virt_lines`. Every line is padded to the
 --- same DISPLAY width — a box padded by byte count misaligns the moment the
 --- text contains anything non-ASCII.
+--- @param opts { posted: boolean|nil }|nil
 --- @return table[] virt_lines
-function M.build_box(text, type_name, hl_group)
+function M.build_box(text, type_name, hl_group, opts)
   local lines = vim.split(text or "", "\n")
   local width = MIN_BOX_WIDTH
   for _, line in ipairs(lines) do
     width = math.max(width, vim.fn.strdisplaywidth(line))
   end
+  -- `· POSTED` rides INSIDE the brackets so the header stays one token and the
+  -- clamp below still measures the whole thing.
   local header = ("[%s]"):format(tostring(type_name):upper())
+  if opts and opts.posted then
+    header = ("[%s · POSTED]"):format(tostring(type_name):upper())
+  end
   -- `comments.types[].name` is free user text: a header longer than
   -- `width + 1` would otherwise make the `string.rep` count below negative.
   -- Lua's string.rep silently returns "" for n <= 0 (no error, so the pcalls
@@ -168,7 +174,7 @@ local function draw_rows(bufnr, c, rows)
   end
   local info = type_info(c.type)
   local sign_hl, line_hl = hl.comment_groups(c.type)
-  local box = M.build_box(c.text, info.name, sign_hl)
+  local box = M.build_box(c.text, info.name, sign_hl, { posted = c.posted ~= nil })
   if n == 1 then
     pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, rows[1], 0, {
       sign_text = info.icon,
@@ -198,7 +204,7 @@ end
 local function draw_file_level(bufnr, c, row0)
   local info = type_info(c.type)
   local sign_hl = hl.comment_groups(c.type)
-  local box = M.build_box(c.text, info.name, sign_hl)
+  local box = M.build_box(c.text, info.name, sign_hl, { posted = c.posted ~= nil })
   local ok = pcall(vim.api.nvim_buf_set_extmark, bufnr, M.ns, row0, 0, {
     sign_text = info.icon,
     sign_hl_group = sign_hl,

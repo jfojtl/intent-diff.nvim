@@ -108,23 +108,12 @@ function M.store_for(tabpage)
 end
 
 --- `git -C git_root <...>`'s first output line, or nil on any failure —
---- including `git` not being executable at all. `vim.fn.systemlist` throws
---- (E475) rather than returning an error value when the argv[0] executable
---- cannot be found, so this must be pcall'd like every other Neovim API call
---- that can fail on the user's environment, not just checked via
---- vim.v.shell_error.
+--- including `git` not being executable at all. See intentdiff.git for the
+--- E475 hazard this wraps; it lives there, and not in a private copy here,
+--- because two copies of an environment workaround is how the next one gets
+--- fixed in only one of them.
 --- @return string|nil
-local function git_rev(git_root, ...)
-  local ok, out = pcall(vim.fn.systemlist, { "git", "-C", git_root, ... })
-  if not ok or vim.v.shell_error ~= 0 then
-    return nil
-  end
-  local first = out and out[1]
-  if not first or first == "" then
-    return nil
-  end
-  return first
-end
+local git_rev = require("intentdiff.git").first
 
 --- Current branch of `git_root`, for the storage key of a working-tree review.
 local function branch_of(git_root)
@@ -795,6 +784,13 @@ function M.export_and_close(tabpage)
     notify("no comments to export")
   end
   require("intentdiff").close(tabpage)
+end
+
+--- Submit the review to the service hosting it — a GitHub PR today. The flow
+--- lives in comments/submit.lua; this is the name the keymap and command bind
+--- to.
+function M.submit(tabpage)
+  require("intentdiff.comments.submit").run(tabpage)
 end
 
 --- Re-sign the sidebar's group rows. The row list comes from the sidebar

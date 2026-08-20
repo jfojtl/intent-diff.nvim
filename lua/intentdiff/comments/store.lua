@@ -155,6 +155,37 @@ function M.new()
     return #comments
   end
 
+  --- Record that `posted_list` reached a review service.
+  ---
+  --- One change event for the whole batch, not one per comment: the listener
+  --- writes the entire store to disk, and a 40-comment review would otherwise
+  --- rewrite the file 40 times.
+  ---
+  --- Editing a stamped comment deliberately does NOT clear the stamp — see
+  --- comments/submit.lua. The edit is local; the service still holds what was
+  --- sent, and re-posting would open a second thread.
+  function self.mark_posted(posted_list, stamp)
+    if #(posted_list or {}) == 0 then
+      return
+    end
+    for _, c in ipairs(posted_list) do
+      c.posted = stamp
+    end
+    changed()
+  end
+
+  --- Comments not yet sent to a review service.
+  --- @return intentdiff.Comment[]
+  function self.unposted()
+    local out = {}
+    for _, c in ipairs(comments) do
+      if not c.posted then
+        out[#out + 1] = c
+      end
+    end
+    return out
+  end
+
   function self.clear()
     comments = {}
     changed()

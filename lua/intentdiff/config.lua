@@ -45,6 +45,14 @@ M.defaults = {
   auto_open = true,
   max_full_diff_bytes = 100 * 1024, -- above this, prompt gets per-hunk summaries only
   max_hunks = 600, -- above this, skip classification with a notice
+  -- Where a finished review can be sent, besides the clipboard and a file.
+  -- "auto" resolves by the origin remote's host; a name loads
+  -- intentdiff.forges.<name>; a table is used directly; false disables the
+  -- feature entirely. Nothing is ever sent without an explicit verdict.
+  forge = "auto",
+  forge_opts = {
+    github = { cmd = "gh", timeout_ms = 30000 },
+  },
   -- Added and untracked files arrive from git as a single whole-file hunk, so
   -- they could only ever belong to one intent. Splitting them at blank-line
   -- boundaries lets different parts of one new file land in different intents,
@@ -154,6 +162,10 @@ M.defaults = {
       -- The review.nvim end-of-review flow: copy, then close. Plain `q` still
       -- closes without touching the clipboard.
       export_and_close = "<localleader>q",
+      -- Submit to the PR this branch is linked to. Distinct from the exports
+      -- above because it leaves the machine: it prompts for a verdict and
+      -- posts nothing until one is chosen.
+      submit_review = "<localleader>cP",
       -- Popup-local keys for the comment entry float (comments/popup.lua),
       -- buffer-local to its text area rather than installed tab-wide. Not
       -- listed in the g? cheatsheet, which only covers tab-wide surfaces.

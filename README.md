@@ -238,6 +238,7 @@ both surfaces need the export keys.
 | `<localleader>cw` | Write the review to a file |
 | `<localleader>cx` | Delete every comment in this review, after confirmation |
 | `<localleader>q` | Copy the review as Markdown, then close the review tab |
+| `<localleader>cP` | Submit the review to the pull request |
 
 ## Review comments
 
@@ -314,6 +315,7 @@ saves last wins on disk.
 | `<localleader>cy` | `:IntentDiffCommentsYank` | Copy the Markdown to `+`/`*`, notify with the count |
 | `<localleader>cw` | `:IntentDiffCommentsWrite [path]` | Write the Markdown to `path` (prompted when omitted, default `.intentdiff-review.md` relative to the git root) |
 | `<localleader>q` | — | Copy the Markdown, **then close the review tab** |
+| `<localleader>cP` | `:IntentDiffCommentsSubmit` | Submit the review to the pull request this branch is linked to |
 
 Plain `q` still means what it means everywhere else — close the tab, touch
 nothing else — so the clipboard is only ever written by a key that says it
@@ -356,6 +358,65 @@ classification is still running (or if it failed) the export degrades to one
 flat numbered list with no headings, and a comment whose line lands in no hunk
 at all is emitted under a trailing `## Unmatched comments` heading rather than
 dropped.
+
+### Submitting to a pull request
+
+When the branch is linked to a GitHub pull request, `<localleader>cP`
+(`:IntentDiffCommentsSubmit`) posts the review to it as **one atomic review** —
+inline comments, a body, and a verdict together. Requires the
+[`gh` CLI](https://cli.github.com), authenticated.
+
+Nothing leaves your machine until you pick a verdict:
+
+```
+Approve  ·  Request changes  ·  Comment (no verdict)  ·  Cancel
+```
+
+**Two modes.** Which one you get is decided before anything is sent:
+
+- **Inline** — when local `HEAD` *is* the PR head, no commented file has
+  uncommitted changes, and the review is based exactly where the PR diverged.
+  Each comment posts on its line: ranges as multi-line comments, old-side
+  comments on the left, file-level comments on the file itself. The body
+  carries the intent structure and an index of what went where.
+
+  In practice that means reviewing against the base branch **as the remote has
+  it** — `:IntentDiff origin/main...`, not `:IntentDiff main...`. GitHub diffs
+  a PR against `origin/main`, so if your local `main` has drifted even one
+  commit, the two diffs are not the same one and the old side is off by
+  whatever `main` gained. The submit says so, names the drift, and degrades
+  rather than guessing.
+- **General** — anything else. Line numbers in a dirty tree, or at a commit the
+  PR has not seen, do not mean what they mean on GitHub, so the whole review
+  posts as one general comment carrying the Markdown export. You are told which
+  it will be, and why, before you confirm.
+
+Other states refuse, each with its own reason: on the default branch there is
+no PR to comment on; on a branch with no PR yet you are asked to create one
+first; a remote that is not GitHub reports that no forge serves it — if it *is*
+GitHub, on an Enterprise host `auto` cannot recognise, set `forge = "github"`
+to use it anyway.
+
+Comments GitHub cannot anchor — a line outside the PR diff — are moved into the
+review body under `## Not attached to a line` rather than dropped, and you are
+told how many. This is worked out locally against the PR's own diff, because
+the reviews API is atomic: one bad line would reject the entire review. A
+comment that anchors fine but belongs to no intent is listed under
+`## Not attached to an intent` — as a pointer, since its text is already on its
+line. A whole-intent comment whose group was renamed away lands under the same
+heading, but in full: it addresses no line, so there is no inline copy of it to
+point at.
+
+**Posted comments are remembered.** Each one that lands is stamped, its box
+header reads `[ISSUE · POSTED]`, and a later submit offers only the comments
+you have added since — so a second pass cannot duplicate the first. When every
+comment is already posted, you are offered a verdict on its own. Editing a
+posted comment does not clear the stamp: the edit is local, and the PR still
+holds what was sent.
+
+The abstraction behind this is service-neutral (`lua/intentdiff/forges/`), with
+GitHub as the first implementation; the payload is expressed in the plugin's own
+vocabulary so another git-based service can be added as one module.
 
 ## Configuration
 
@@ -431,6 +492,14 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   -- Above this many hunks, classification is skipped entirely with a
   -- notice — the sidebar stays in flat file-list mode.
   max_hunks = 600,
+
+  -- Where a finished review can be sent, besides the clipboard and a file.
+  -- "auto" picks by the origin remote's host; "github" forces it; a table
+  -- implementing the forge interface is used directly; false disables it.
+  forge = "auto",
+  forge_opts = {
+    github = { cmd = "gh", timeout_ms = 30000 },
+  },
 
   -- Added and untracked files arrive from git as a single whole-file hunk, so
   -- they could only ever belong to one intent. Splitting them at blank-line
@@ -559,6 +628,7 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       -- The review.nvim end-of-review flow: copy, then close. Plain `q`
       -- still closes without touching the clipboard.
       export_and_close = "<localleader>q",
+      submit_review = "<localleader>cP",
       -- Popup-local keys for the comment entry float, buffer-local to its
       -- text area rather than tab-wide.
       popup_cycle_type = "<Tab>",
