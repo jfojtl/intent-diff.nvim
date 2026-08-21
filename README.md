@@ -1,37 +1,24 @@
 # intent-diff.nvim
 
-Review a git diff grouped by *reason of change* instead of by file. A sidebar
-lists LLM-generated groups ("Rename UserService → AccountService", "Add retry
-logic", "Drive-by lint fixes"); each group contains the files it touches, and
-opening a file shows only that group's hunks — the rest of the file's diff is
-folded away. Add review comments on any line or whole intent and export them
-as Markdown for an agent to act on.
+**The review feedback loop, inside Neovim.**
 
-```
-▾ Rename UserService to AccountService
-  2 hunks · 2 files  +2 -2
-   ▾ src
-     ▾ api
- M       routes.ts  +1 -1
-     ▾ services
- M       account.ts  +1 -1
-▾ Add retry logic to HTTP client
-  1 hunks · 1 files  +3
-   ▾ src/http
- M     client.ts  +3
-▾ Ungrouped
-  1 hunks · 1 files  +3
-   ▾ docs
- ?     notes.md  +3
-4/4 hunks · claude:haiku
-```
+Whether code comes from local coding agents or large-scale software factories,
+you can review it with the editor you already know and love. intent-diff lets
+you move through generated changes using familiar Neovim workflows, while
+cutting through the noise so you can focus on what matters.
+
+![Reviewing a GitHub pull request by intent in Neovim](demo/intentdiff-pr.gif)
+
+Instead of presenting a git diff file by file, intent-diff groups its hunks by
+the *reason for the change*. Its sidebar turns a large diff into coherent
+intents such as "Rename UserService → AccountService", "Add retry logic", or
+"Drive-by lint fixes". Open an intent to review only the relevant hunks across
+all the files it touches, then leave feedback without stepping out of Neovim.
 
 The LLM never decides *what* changed, only how to *label* it: every hunk in
 the diff ends up in exactly one group or in the visible "Ungrouped" bucket —
 never silently dropped. Worst case with a bad LLM response is one boring
 Ungrouped group, degrading toward a plain diff, never below it.
-
-**The review feedback loop, inside Neovim.**
 
 - Review one coherent change at a time, even when it spans several files.
 - Preview an intent, directory, or file without leaving the sidebar.
