@@ -55,8 +55,9 @@ are in [ATTRIBUTION.md](ATTRIBUTION.md).
 
 intent-diff requires Neovim 0.10 or newer and
 [codediff.nvim](https://github.com/esmuellert/codediff.nvim). The default
-grouping provider also requires the `claude` CLI on `$PATH`; you can replace it
-with a custom provider.
+grouping provider requires the `claude` CLI on `$PATH`. The built-in Codex
+provider requires the `codex` CLI instead; you can also replace either with a
+custom provider.
 
 ### `lazy.nvim`
 
@@ -139,6 +140,34 @@ reviewed base line up, comments are attached inline; otherwise intent-diff
 explains why and offers the same feedback as a general PR comment. Submitted
 comments are marked locally so a later pass does not post them twice.
 
+### Use Codex
+
+Select the built-in Codex provider to group with `codex exec`. Luna is its
+default model; runs are explicitly read-only and ephemeral, while still being
+able to inspect the repository for context.
+
+```lua
+require("intentdiff").setup({
+  provider = "codex_cli",
+})
+```
+
+Override any Codex CLI default through `provider_opts`:
+
+```lua
+require("intentdiff").setup({
+  provider = "codex_cli",
+  provider_opts = {
+    cmd = "codex",
+    model = "gpt-5.6-luna",
+    timeout_ms = 180000,
+    sandbox = "read-only",
+    ephemeral = true,
+    agentic = true,
+  },
+})
+```
+
 ### Use a custom provider
 
 Set `provider` to an asynchronous function if you want to group with another
@@ -179,7 +208,8 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
   -- function(request, callback) — see "Use a custom provider" above.
   provider = "claude_cli",
 
-  -- Options passed to the resolved provider. For claude_cli:
+  -- Options passed to the resolved provider. Each built-in provider starts
+  -- from its own defaults; these are the defaults for claude_cli:
   provider_opts = {
     cmd = "claude",        -- CLI binary to run
     model = "haiku",       -- --model passed to `claude -p`

@@ -1,27 +1,33 @@
 local M = {}
 
-M.defaults = {
-  provider = "claude_cli", -- name under intentdiff.providers.*, or a function(request, callback)
-  provider_opts = {
+-- Built-in providers own their CLI-specific defaults. Without this registry,
+-- changing only `provider = "codex_cli"` would accidentally carry Claude's
+-- command and model through the generic provider_opts table.
+M.provider_defaults = {
+  claude_cli = {
     cmd = "claude",
     model = "haiku",
     timeout_ms = 180000,
-    -- Tool restrictions passed to `claude -p` as --disallowedTools /
-    -- --allowedTools: the process runs pointed at the user's (possibly
-    -- uncommitted) working tree, so it must not be able to edit it. An
-    -- empty/nil list omits the corresponding flag entirely rather than
-    -- passing an empty value.
     disallowed_tools = { "Edit", "Write", "NotebookEdit" },
     allowed_tools = {
       "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
       "Bash(git blame:*)", "Bash(git status:*)", "Read", "Grep", "Glob",
     },
-    -- Let the model run read-only git commands / read files in the repo
-    -- (cwd is set to git_root) to understand WHY a change was made, instead
-    -- of us pre-stuffing commit messages/log output into the prompt. Set to
-    -- false to keep the prompt fully self-contained.
     agentic = true,
   },
+  codex_cli = {
+    cmd = "codex",
+    model = "gpt-5.6-luna",
+    timeout_ms = 180000,
+    sandbox = "read-only",
+    ephemeral = true,
+    agentic = true,
+  },
+}
+
+M.defaults = {
+  provider = "claude_cli", -- name under intentdiff.providers.*, or a function(request, callback)
+  provider_opts = vim.deepcopy(M.provider_defaults.claude_cli),
   context_lines = 3, -- lines of context kept around each visible hunk when folding
   -- Above this many lines on either side, a file falls back to hunks-only
   -- rendering instead of the whole file, stating why on its separator.
@@ -270,7 +276,12 @@ function M.setup(opts)
     opts.comments = vim.tbl_extend("force", {}, opts.comments)
     opts.comments.types = nil
   end
-  M.options = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
+  local effective_defaults = vim.deepcopy(M.defaults)
+  local provider_defaults = M.provider_defaults[opts.provider or M.defaults.provider]
+  if provider_defaults then
+    effective_defaults.provider_opts = vim.deepcopy(provider_defaults)
+  end
+  M.options = vim.tbl_deep_extend("force", effective_defaults, opts)
   if types then
     M.options.comments.types = vim.deepcopy(types)
   end
