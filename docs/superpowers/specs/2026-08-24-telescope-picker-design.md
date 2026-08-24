@@ -51,18 +51,60 @@ directly from our own module is what buys the conventions:
   `telescope-smart-history` keys history by picker name and cwd. Only a named,
   registered picker can be scoped that way.
 
-Telescope stays optional. `plugin/intentdiff.lua` gains:
+#### Optional dependency
 
-```lua
-vim.api.nvim_create_user_command("IntentDiffFind", function()
-  require("intentdiff").find()
-end, { desc = "intent-diff: fuzzy-find an intent, directory or file" })
-```
+Telescope is never a hard dependency. The plugin follows the pattern it
+already uses for `nvim-web-devicons` (`sidebar.lua:64-74`) — `pcall(require,
+...)` at call time, degrade when it fails — rather than the one it uses for
+codediff (`view.load()`, `view.lua`), which is a genuine requirement and says
+so with an ERROR.
 
-`M.find()` resolves the current tab's session, then `pcall`s
-`require("telescope")` and `load_extension("intentdiff")`. When Telescope is
-absent it notifies once at WARN level and returns. Nothing else in the plugin
-changes behaviour based on whether Telescope is installed.
+Three guarantees:
+
+1. **Nothing requires Telescope at load or setup time.** The only `require` is
+   inside `M.find()`, on the invocation path. `plugin/intentdiff.lua` gains:
+
+   ```lua
+   vim.api.nvim_create_user_command("IntentDiffFind", function()
+     require("intentdiff").find()
+   end, { desc = "intent-diff: fuzzy-find an intent, directory or file" })
+   ```
+
+   Registering a command creates no dependency; its body never runs unless
+   called.
+
+2. **`lua/telescope/_extensions/intentdiff.lua` is inert without Telescope.**
+   It sits in our `lua/` tree and is therefore on the runtimepath, but Lua
+   loads a module only when something requires it, and the only thing that
+   ever requires this one is Telescope's own `load_extension`. With Telescope
+   absent the file is never read.
+
+3. **`M.find()` degrades, it does not error.** It resolves the tab's session,
+   then `pcall`s `require("telescope")` and `load_extension("intentdiff")`.
+   Either failing produces one WARN notification naming Telescope as the
+   missing piece, and returns. No stack trace, and no effect on any other
+   part of the plugin.
+
+#### Why availability is not checked up front
+
+The obvious reading of "not available when not installed" is to skip
+registering `:IntentDiffFind` and the keymap when Telescope is missing. That
+is not reliably detectable, and the failure mode is worse than the problem.
+
+Under lazy.nvim an installed-but-not-yet-loaded plugin is **not on the
+runtimepath**, so a startup-time `pcall(require, "telescope")` returns false
+for users who do have it. Gating registration on that check would hide the
+picker from exactly the people most likely to want it. Conversely, probing at
+`g?`-render time would force-load Telescope just to draw a help popup.
+
+So the entry points always exist and resolution happens at invocation, where a
+`require` is both safe and correct — lazy.nvim loads a plugin on first require
+of its module, so the lazy case resolves properly. A user without Telescope who
+runs `:IntentDiffFind` gets "intent-diff: this needs telescope.nvim", which is
+a better outcome than `E492: Not an editor command`.
+
+`keymap_help.lua` marks the row as requiring Telescope rather than hiding it,
+for the same reason.
 
 ### 2. `lua/intentdiff/targets.lua` — the data layer
 
@@ -209,7 +251,7 @@ plugin currently binds. It is user-overridable, as all of them are.
 
 | Condition | Behaviour |
 |---|---|
-| Telescope not installed | `:IntentDiffFind` notifies WARN, returns. Nothing else affected. |
+| Telescope not installed | `:IntentDiffFind` notifies WARN naming telescope.nvim, returns. No other surface changes; the extension file is never loaded. |
 | Not in a review tab | Notify WARN: no review in this tab. |
 | Classification still running | Picker opens against the current `"loading"` model — the flat "All changes" group. It is a snapshot; reopening picks up the regrouped model. |
 | Target missing after reclassify | Notify WARN, degrade per section 3. |
@@ -243,6 +285,12 @@ it is being kept.
 `tests/telescope_extension_spec.lua` — smoke only, guarded on
 `pcall(require, "telescope")` so it skips cleanly when absent: the extension
 loads, registers `intents`, and builds a finder without error.
+
+Telescope is a **test-time** dependency only, and only for that last spec.
+`targets_spec` and `telescope_select_spec` cover the data layer and the
+resolution logic with plain tables and never touch it — which is the point of
+keeping `targets.list` pure and `M.select` target-table-driven. Runtime
+remains optional regardless of what CI installs.
 
 CI: `tests/init.lua` clones plenary and codediff into `stdpath("data")` on
 first run; Telescope is added the same way. `.github/workflows/tests.yml` keys
