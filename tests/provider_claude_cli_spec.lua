@@ -1,5 +1,5 @@
 local claude_cli = require("intentdiff.providers.claude_cli")
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 local log = require("intentdiff.log")
 local config = require("intentdiff.config")
 

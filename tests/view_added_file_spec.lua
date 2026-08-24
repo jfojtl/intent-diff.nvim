@@ -1,4 +1,4 @@
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 describe("view: added files", function()
   local view

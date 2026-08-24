@@ -1,5 +1,5 @@
 local codex_cli = require("intentdiff.providers.codex_cli")
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 local REQUEST = {
   diff_text = "diff --git a/a.lua b/a.lua\n@@ -1,1 +1,1 @@\n-x\n+y\n",

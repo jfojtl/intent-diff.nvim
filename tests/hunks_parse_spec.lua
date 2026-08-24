@@ -207,7 +207,7 @@ describe("hunks.parse binary files", function()
 end)
 
 describe("hunks.is_binary", function()
-  local helpers = require("tests.helpers")
+  local helpers = require("tests.intentdiff_helpers")
   local hunks = require("intentdiff.hunks")
 
   local function repo()

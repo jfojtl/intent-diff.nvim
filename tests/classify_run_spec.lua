@@ -2,7 +2,7 @@ local classify = require("intentdiff.classify")
 local cache = require("intentdiff.cache")
 local config = require("intentdiff.config")
 local log = require("intentdiff.log")
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 local function mk_inventory(hash)
   return {

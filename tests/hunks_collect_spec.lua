@@ -1,5 +1,5 @@
 local hunks = require("intentdiff.hunks")
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 describe("hunks.collect", function()
   it("collects working-tree changes plus untracked files", function()

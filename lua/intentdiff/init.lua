@@ -1168,13 +1168,7 @@ function M.find(tabpage)
     vim.notify("intent-diff: no review in this tab", vim.log.levels.WARN)
     return false
   end
-  -- pcall wraps a closure, not the require function directly by name: passing
-  -- require as pcall's first argument is equally safe, but this plugin's
-  -- optional-dependency guarantee is verified by grepping for the call spelled
-  -- out below, so it has to appear literally (see Step 8 of the task brief).
-  local ok, telescope = pcall(function()
-    return require("telescope")
-  end)
+  local ok, telescope = pcall(require, "telescope")
   if not ok then
     vim.notify("intent-diff: :IntentDiffFind needs telescope.nvim", vim.log.levels.WARN)
     return false

@@ -7,7 +7,7 @@ local comments = require("intentdiff.comments")
 local storage = require("intentdiff.comments.storage")
 local marks = require("intentdiff.comments.marks")
 local config = require("intentdiff.config")
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 --- A session entry shaped like the plugin's own, attached to a review of
 --- `repo` pinned to an explicit revision pair (so its key is deterministic and

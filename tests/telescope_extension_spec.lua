@@ -28,6 +28,19 @@ describe("telescope extension", function()
     }, nil)
     assert.equals("Add retry logic src/a.lua", entry.ordinal)
     assert.is_function(entry.display)
+    -- Actually call it, so the nil-store path comment_icon takes runs for
+    -- real, not just the file_icon call _entry_maker already made eagerly.
+    -- The displayer's fixed-width columns resolve their width against a real
+    -- picker's results window (telescope.state.get_status(bufnr).layout...),
+    -- which doesn't exist outside an active picker, so fake just enough of
+    -- that state for the current buffer/window to let the real column-width
+    -- math run instead of erroring. `displayer` returns `string, highlights`;
+    -- asserting on just the first return is enough.
+    require("telescope.state").set_status(vim.api.nvim_get_current_buf(), {
+      layout = { results = { winid = vim.api.nvim_get_current_win() } },
+      picker = { selection_caret = "> " },
+    })
+    assert.is_string(entry.display(entry))
   end)
 end)
 

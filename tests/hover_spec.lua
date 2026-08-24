@@ -1,4 +1,4 @@
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 describe("sidebar hover preview", function()
   local repo

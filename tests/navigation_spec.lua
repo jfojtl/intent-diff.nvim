@@ -1,4 +1,4 @@
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 describe("navigation.next_hunk / navigation.prev_hunk read plan.hunk_rows", function()
   -- Unit-level: stub view.current_plan with a bare `{ hunk_rows = ... }` so

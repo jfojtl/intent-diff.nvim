@@ -10,7 +10,7 @@
 -- to the hunks' own frozen text instead, and say why on the separator — see
 -- view.lua's "stale-on-write" section and render/plan.lua's `file.stale`
 -- branch.
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 local view = require("intentdiff.view")
 local content = require("intentdiff.render.content")
 

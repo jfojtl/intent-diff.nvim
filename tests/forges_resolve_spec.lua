@@ -1,4 +1,4 @@
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 local forges = require("intentdiff.forges")
 local config = require("intentdiff.config")
 

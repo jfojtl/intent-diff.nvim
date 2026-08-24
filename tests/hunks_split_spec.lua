@@ -1,5 +1,5 @@
 local hunks = require("intentdiff.hunks")
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 --- Build a whole-file addition hunk from `lines`, the shape git emits for a
 --- new file and `untracked_hunk` synthesises.

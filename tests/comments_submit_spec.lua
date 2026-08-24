@@ -2,7 +2,7 @@ local submit = require("intentdiff.comments.submit")
 local store = require("intentdiff.comments.store")
 local forges = require("intentdiff.forges")
 local config = require("intentdiff.config")
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 local function target()
   return { service = "github", id = "123", url = "u", title = "T",

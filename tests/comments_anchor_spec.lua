@@ -1,4 +1,4 @@
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 local anchor = require("intentdiff.comments.anchor")
 
 describe("comments.anchor", function()

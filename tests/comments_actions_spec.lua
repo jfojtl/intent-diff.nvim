@@ -1,7 +1,7 @@
 local comments = require("intentdiff.comments")
 local store = require("intentdiff.comments.store")
 local config = require("intentdiff.config")
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 describe("comments actions", function()
   --- The store of the review under test. The action layer resolves it from the
@@ -51,7 +51,7 @@ describe("comments actions", function()
   --- attach it is about.
   describe("session attach", function()
     it("keys a working-tree session by branch", function()
-      local repo = require("tests.helpers").make_repo({ ["a.lua"] = "x" })
+      local repo = require("tests.intentdiff_helpers").make_repo({ ["a.lua"] = "x" })
       local first = comments.attach_session({ sess = { git_root = repo } })
       first.add({ file = "a.lua", line = 1, side = "new", type = "note", text = "x" })
       -- Re-attaching the same session must find the comment on disk.
@@ -61,7 +61,7 @@ describe("comments actions", function()
     end)
 
     it("hangs the store off the session entry it was given", function()
-      local repo = require("tests.helpers").make_repo({ ["a.lua"] = "x" })
+      local repo = require("tests.intentdiff_helpers").make_repo({ ["a.lua"] = "x" })
       local entry = { sess = { git_root = repo } }
       local returned = comments.attach_session(entry)
       assert.equals(returned, entry.comment_store)
@@ -74,7 +74,7 @@ describe("comments actions", function()
     end)
 
     it("keeps two revision ranges of one repo apart", function()
-      local repo = require("tests.helpers").make_repo({ ["a.lua"] = "x" })
+      local repo = require("tests.intentdiff_helpers").make_repo({ ["a.lua"] = "x" })
       local a = comments.attach_session({
         sess = { git_root = repo, base_revision = "aaa", target_revision = "bbb" } })
       a.add({ file = "a.lua", line = 1, side = "new", type = "note", text = "one" })

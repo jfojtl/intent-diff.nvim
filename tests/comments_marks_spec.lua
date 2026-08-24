@@ -1,7 +1,7 @@
 local marks = require("intentdiff.comments.marks")
 local store = require("intentdiff.comments.store")
 local config = require("intentdiff.config")
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 --- A painted pane over `n` lines of "a.lua" on `side`. Every comment placement
 --- goes through a pane's row map now — there is no file-shaped render path.

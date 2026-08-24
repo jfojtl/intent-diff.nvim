@@ -15,7 +15,7 @@ local marks = require("intentdiff.comments.marks")
 local popup = require("intentdiff.comments.popup")
 local store = require("intentdiff.comments.store")
 local config = require("intentdiff.config")
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 local view = require("intentdiff.view")
 
 --- Two files. `zz/late.lua` carries an early insertion, so its old and new line

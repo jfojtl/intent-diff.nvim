@@ -1,4 +1,4 @@
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 local content = require("intentdiff.render.content")
 
 local function sess_for(repo, base)

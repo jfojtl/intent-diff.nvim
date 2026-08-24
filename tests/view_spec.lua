@@ -1,4 +1,4 @@
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 
 --- A repo, its base revision, and the parsed file entries of its diff — the
 --- shape `view.show` takes.

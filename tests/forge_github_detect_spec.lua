@@ -1,4 +1,4 @@
-local helpers = require("tests.helpers")
+local helpers = require("tests.intentdiff_helpers")
 local github = require("intentdiff.forges.github")
 
 local restore
