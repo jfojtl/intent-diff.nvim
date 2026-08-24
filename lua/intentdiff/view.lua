@@ -683,6 +683,7 @@ end
 --- Descriptions for the `keymaps.view` actions, shown in :map / which-key.
 M.VIEW_DESCS = {
   toggle_sidebar = "intent-diff: show/hide the sidebar",
+  find = "intent-diff: fuzzy-find an intent, file or directory",
   show_help = "intent-diff: toggle this help",
   quit = "intent-diff: close",
   next_hunk = "intent-diff: next hunk in group",
@@ -814,6 +815,9 @@ function M.install_keymaps(tabpage)
     M.map_view_keys(buf, {
       toggle_sidebar = function()
         require("intentdiff").toggle_sidebar(tabpage)
+      end,
+      find = function()
+        require("intentdiff").find()
       end,
       show_help = function()
         require("intentdiff.keymap_help").toggle()

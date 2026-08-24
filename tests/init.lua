@@ -27,5 +27,29 @@ if vim.fn.isdirectory(codediff_dir) == 0 then
   end
 end
 vim.opt.rtp:prepend(codediff_dir)
+
+-- Warm the require cache for our OWN test helper before telescope.nvim ever
+-- reaches the runtimepath. telescope.nvim's checkout ships its own
+-- lua/tests/helpers.lua (its busted suite's helper), and once its directory
+-- is on 'runtimepath' Neovim's rtp-aware module loader resolves
+-- require("tests.helpers") to THAT file instead of ours — the rtp loader is
+-- tried before the plain package.path fallback that finds tests/helpers.lua
+-- here, and it wins outright the moment any rtp entry has a matching
+-- lua/tests/helpers.lua, regardless of prepend/append order. require()
+-- caches by module name in package.loaded, so resolving ours first and for
+-- good means every later require("tests.helpers") in a spec, even after
+-- telescope is on the runtimepath, is served from that cache and never
+-- re-resolved.
+require("tests.helpers")
+
+-- telescope: optional at runtime, but the extension smoke spec needs it.
+-- Cloned the same way as plenary; the CI cache key is hashFiles('tests/init.lua'),
+-- so adding this invalidates the cache exactly once.
+local telescope_dir = vim.fn.stdpath("data") .. "/telescope.nvim"
+if vim.fn.isdirectory(telescope_dir) == 0 then
+  vim.fn.system({ "git", "clone", "--depth=1", "https://github.com/nvim-telescope/telescope.nvim", telescope_dir })
+end
+vim.opt.rtp:prepend(telescope_dir)
+
 vim.cmd("runtime! plugin/*.lua")
 pcall(function() require("codediff").setup() end)

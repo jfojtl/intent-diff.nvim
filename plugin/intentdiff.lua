@@ -19,6 +19,14 @@ vim.api.nvim_create_user_command("IntentDiffSidebar", function()
   require("intentdiff").toggle_sidebar()
 end, { desc = "Show or hide the intent-diff sidebar" })
 
+-- Registered unconditionally. Registering a command creates no dependency —
+-- its body never runs unless called — and gating it on a startup probe for
+-- telescope.nvim would hide it from lazy.nvim users whose telescope is
+-- installed but not yet on the runtimepath.
+vim.api.nvim_create_user_command("IntentDiffFind", function()
+  require("intentdiff").find()
+end, { desc = "intent-diff: fuzzy-find an intent, directory or file" })
+
 --- Review-comment commands. Registered unconditionally — this file runs long
 --- before setup() decides whether comments are enabled — but each one refuses
 --- to do anything while `comments.enabled = false`, so the feature really is

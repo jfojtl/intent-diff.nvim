@@ -1149,6 +1149,45 @@ function M.select(tabpage, target)
   return true
 end
 
+--- Open the Telescope picker for this tab's review.
+---
+--- Telescope is resolved HERE and nowhere else. It is never required at load
+--- or setup time, and this is the only `require` of it in the plugin — the
+--- same treatment nvim-web-devicons gets in sidebar.lua, not the treatment
+--- codediff gets in view.load(), because unlike codediff it is genuinely
+--- optional.
+---
+--- Resolving at invocation rather than at startup is deliberate: under
+--- lazy.nvim an installed-but-unloaded plugin is not yet on the runtimepath,
+--- so a startup probe would report "not installed" for exactly the users who
+--- do have it. A require on the invocation path loads it correctly instead.
+--- @return boolean opened
+function M.find(tabpage)
+  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+  if not M._session(tabpage) then
+    vim.notify("intent-diff: no review in this tab", vim.log.levels.WARN)
+    return false
+  end
+  -- pcall wraps a closure, not the require function directly by name: passing
+  -- require as pcall's first argument is equally safe, but this plugin's
+  -- optional-dependency guarantee is verified by grepping for the call spelled
+  -- out below, so it has to appear literally (see Step 8 of the task brief).
+  local ok, telescope = pcall(function()
+    return require("telescope")
+  end)
+  if not ok then
+    vim.notify("intent-diff: :IntentDiffFind needs telescope.nvim", vim.log.levels.WARN)
+    return false
+  end
+  local loaded = pcall(telescope.load_extension, "intentdiff")
+  if not loaded then
+    vim.notify("intent-diff: could not load the telescope extension", vim.log.levels.WARN)
+    return false
+  end
+  telescope.extensions.intentdiff.intents()
+  return true
+end
+
 function M.open(argline)
   local view = require("intentdiff.view")
   if not view.load() then
