@@ -124,9 +124,14 @@ function M.list(model, opts)
   path = string | nil,    -- file path, or directory path for kind == "dir"
   additions = integer,
   deletions = integer,
-  hunk_count = integer,
 }
 ```
+
+`targets.lua` also owns `M.resolve(model, target)`, which maps a target back to
+`{ kind, group_i, file_i | dir_path }` against the current model, or nil when it
+is gone. Section 3 covers what it decides; it lives here because it is a pure
+decision over a model, and keeping it out of `init.lua` is what lets the
+identity behaviour be tested with plain tables rather than a stubbed session.
 
 Ordering is sidebar order: each intent's own row, then its directory rows and
 file rows in `tree.flatten` order, ignoring collapse state — a fuzzy list has

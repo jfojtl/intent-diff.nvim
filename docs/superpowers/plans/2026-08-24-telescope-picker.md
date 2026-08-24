@@ -40,7 +40,7 @@
 
 ---
 
-## Task 1: `targets.lua` — the pure data layer
+## Task 1: `targets.list` — the pure data layer
 
 **Files:**
 - Create: `lua/intentdiff/targets.lua`
@@ -59,8 +59,7 @@
     group_title = string,
     path = string|nil,      -- file path, or directory path when kind == "dir"
     additions = integer,
-    deletions = integer,
-    hunk_count = integer }
+    deletions = integer }
   ```
 
 Background the implementer needs: a `model` is `{ state, groups }`; each group is `{ title, files, hunks, collapsed, collapsed_dirs }`; each file is `{ path, status, hunks }`; each hunk carries `additions` and `deletions`. `tree.flatten` is called with an **empty** collapsed table here — a fuzzy list has no folds, so every row is always emitted regardless of the sidebar's current fold state.
@@ -114,7 +113,7 @@ describe("targets.list", function()
     assert.equals("Second", out[#out].group_title)
   end)
 
-  it("sums additions, deletions and hunk counts per kind", function()
+  it("sums additions and deletions per kind", function()
     local out = targets.list(model({
       { title = "T", files = {
         file("src/a.lua", { hunk(3, 1), hunk(2, 0) }),
@@ -123,13 +122,10 @@ describe("targets.list", function()
     }))
     assert.equals(10, out[1].additions) -- intent: every hunk it owns
     assert.equals(5, out[1].deletions)
-    assert.equals(3, out[1].hunk_count)
     assert.equals(10, out[2].additions) -- dir "src": every file beneath it
     assert.equals(5, out[2].deletions)
-    assert.equals(3, out[2].hunk_count)
-    assert.equals(5, out[3].additions) -- file src/a.lua
+    assert.equals(5, out[3].additions)  -- file src/a.lua
     assert.equals(1, out[3].deletions)
-    assert.equals(2, out[3].hunk_count)
   end)
 
   it("omits directory rows when include_dirs is false", function()
@@ -162,7 +158,7 @@ describe("targets.list", function()
     local out = targets.list(model({ { title = "Empty", files = {} } }))
     assert.equals(1, #out)
     assert.equals("group", out[1].kind)
-    assert.equals(0, out[1].hunk_count)
+    assert.equals(0, out[1].additions)
   end)
 end)
 ```
@@ -191,14 +187,18 @@ local M = {}
 
 local tree = require("intentdiff.tree")
 
-local function sum_hunks(hunks)
-  local additions, deletions, count = 0, 0, 0
+--- True when `path` is at or beneath directory `prefix`.
+local function under_dir(path, prefix)
+  return path:sub(1, #prefix + 1) == prefix .. "/"
+end
+
+local function sum_stats(hunks)
+  local additions, deletions = 0, 0
   for _, h in ipairs(hunks or {}) do
     additions = additions + (h.additions or 0)
     deletions = deletions + (h.deletions or 0)
-    count = count + 1
   end
-  return additions, deletions, count
+  return additions, deletions
 end
 
 --- Every hunk of every file at or beneath `prefix`, or of the whole group when
@@ -206,7 +206,7 @@ end
 local function hunks_under(group, prefix)
   local out = {}
   for _, f in ipairs(group.files or {}) do
-    if not prefix or f.path:sub(1, #prefix + 1) == prefix .. "/" then
+    if not prefix or under_dir(f.path, prefix) then
       vim.list_extend(out, f.hunks or {})
     end
   end
@@ -228,38 +228,33 @@ function M.list(model, opts)
   local include_dirs = opts.include_dirs ~= false
   local out = {}
   for _, g in ipairs(model and model.groups or {}) do
-    local additions, deletions, count = sum_hunks(hunks_under(g, nil))
+    local additions, deletions = sum_stats(hunks_under(g, nil))
     out[#out + 1] = {
       kind = "group",
       group_title = g.title,
       path = nil,
       additions = additions,
       deletions = deletions,
-      hunk_count = count,
     }
     for _, row in ipairs(tree.flatten(tree.build(g.files or {}), {})) do
       if row.kind == "dir" then
         if include_dirs then
-          local a, d, c = sum_hunks(hunks_under(g, row.path))
+          local a, d = sum_stats(hunks_under(g, row.path))
           out[#out + 1] = {
             kind = "dir",
             group_title = g.title,
             path = row.path,
             additions = a,
             deletions = d,
-            hunk_count = c,
           }
         end
       else
-        local f = (g.files or {})[row.file_i]
-        local _, _, c = sum_hunks(f and f.hunks)
         out[#out + 1] = {
           kind = "file",
           group_title = g.title,
           path = row.path,
           additions = row.additions,
           deletions = row.deletions,
-          hunk_count = c,
         }
       end
     end
@@ -292,32 +287,55 @@ cached result set stays correct across a reclassification."
 
 ---
 
-## Task 2: `intentdiff.select` — identity re-resolution
+## Task 2: `targets.resolve` and `intentdiff.select`
 
 **Files:**
-- Modify: `lua/intentdiff/init.lua` (add `M.select` after `subtree_group`, which ends around `:978`, and before `M.open` at `:1104`)
+- Modify: `lua/intentdiff/targets.lua` (add `M.resolve` alongside `M.list`)
+- Modify: `lua/intentdiff/init.lua` (add `M.select` immediately before `function M.open(argline)`, `:1104`)
 - Test: `tests/telescope_select_spec.lua`
 
 **Interfaces:**
-- Consumes: `M.list` targets from Task 1. Internal locals already in `init.lua`: `sessions`, `locate_in_model` (`:729` area), `select_file` (`:661`), `show_group` (`:~980`), `subtree_group` (`:967`), `focus_diff_pane` (`:475`).
+- Consumes: Targets from `M.list` (Task 1). Internal locals already in `init.lua`: `select_file` (`:661`), `show_group` (just below `:967`), `subtree_group` (`:967`), `focus_diff_pane` (`:475`), `locate_in_model`, `M._session` (`:83`).
 - Produces:
   ```lua
-  --- @param tabpage integer|nil
-  --- @param target table  a target from intentdiff.targets.list
+  --- @return table|nil resolution
+  function M.resolve(model, target)   -- in intentdiff.targets
+
   --- @return boolean opened
-  function M.select(tabpage, target)
+  function M.select(tabpage, target)  -- in intentdiff
+  ```
+  A resolution is one of:
+  ```lua
+  { kind = "file",  group_i = integer, file_i = integer }
+  { kind = "group", group_i = integer }
+  { kind = "dir",   group_i = integer, dir_path = string }
+  nil  -- the target is no longer in this model
   ```
 
-Background: sidebar `<CR>` renders only **file** rows; on a group or directory row it toggles a fold. Whole-intent rendering lives only in `apply_hover` → `show_group` / `subtree_group`. So `M.select` has two delegation paths. `show_group(entry, group, opts)` forwards `opts` to `view.show`, whose `opts.on_ready` fires once after the first paint (`lua/intentdiff/view.lua:476-480`) — that is where focus moves, because hover deliberately leaves focus in the sidebar.
+**Why the split.** All the interesting behaviour — identity re-resolution and
+the degradation rules — is a pure decision over a model, so it lives in
+`targets.lua` where it is testable with plain tables. `M.select` is then
+straight-line delegation and needs no test seam in production code.
 
-Degradation rule: a missing file falls back to its intent if the intent still exists; a missing intent opens nothing and notifies. Degrade toward *less* specific, never toward a different target.
+Background the implementer needs: the sidebar has **two** render paths, not
+one. `<CR>` on a *file* row goes through `select_file` (`init.lua:661`). `<CR>`
+on a *group* or *directory* row only toggles a fold — whole-intent rendering
+lives in `apply_hover`, via `show_group(entry, group)` and, for a directory,
+`show_group(entry, subtree_group(group, dir_path))` (`init.lua:967`). Hover
+deliberately leaves focus in the sidebar, so an explicit pick asks `view.show`
+to move focus once the first paint lands: `show_group` forwards `opts` to
+`view.show`, whose `opts.on_ready` fires exactly once after that paint
+(`lua/intentdiff/view.lua:476-480`).
+
+Degradation rule: a missing file falls back to its intent if the intent still
+exists; a missing intent resolves to nil. Degrade toward *less* specific, never
+toward a different target.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/telescope_select_spec.lua`. `helpers.lua` exists in `tests/` — read it first and follow its session-construction pattern if it provides one; otherwise drive through the public API as below.
+Create `tests/telescope_select_spec.lua`:
 
 ```lua
-local intentdiff = require("intentdiff")
 local targets = require("intentdiff.targets")
 
 local function hunk(adds, dels)
@@ -326,104 +344,87 @@ end
 local function file(path)
   return { path = path, status = "M", hunks = { hunk(1, 0) } }
 end
-
---- A session entry stubbed far enough for M.select: a model, a tabpage, and
---- recording stand-ins for the two render paths.
-local function stub_session(groups)
-  local calls = {}
-  local entry = {
-    model = { state = "ready", groups = groups },
-    sess = { tabpage = vim.api.nvim_get_current_tabpage() },
-    _test_hooks = {
-      select_file = function(_, gi, fi) calls[#calls + 1] = { "file", gi, fi } end,
-      show_group = function(_, group) calls[#calls + 1] = { "group", group.title } end,
-    },
-  }
-  intentdiff._register_test_session(entry)
-  return entry, calls
+local function model(groups)
+  return { state = "ready", groups = groups }
+end
+local function target_for(m, pred)
+  return vim.tbl_filter(pred, targets.list(m))[1]
 end
 
-describe("intentdiff.select", function()
-  after_each(function()
-    intentdiff._clear_test_sessions()
-  end)
-
-  it("opens a file target at its current indices", function()
-    local entry, calls = stub_session({
+describe("targets.resolve", function()
+  it("resolves a file target to its current indices", function()
+    local m = model({
       { title = "First", files = { file("a.lua") } },
       { title = "Second", files = { file("b.lua") } },
     })
-    local list = targets.list(entry.model)
-    local t = vim.tbl_filter(function(x) return x.path == "b.lua" end, list)[1]
-    assert.is_true(intentdiff.select(entry.sess.tabpage, t))
-    assert.same({ "file", 2, 1 }, calls[1])
+    local t = target_for(m, function(x) return x.path == "b.lua" end)
+    assert.same({ kind = "file", group_i = 2, file_i = 1 }, targets.resolve(m, t))
   end)
 
   it("follows the file when the model is reordered underneath it", function()
-    local entry, calls = stub_session({
+    local before = model({
       { title = "First", files = { file("a.lua") } },
       { title = "Second", files = { file("b.lua") } },
     })
-    local list = targets.list(entry.model)
-    local t = vim.tbl_filter(function(x) return x.path == "b.lua" end, list)[1]
+    local t = target_for(before, function(x) return x.path == "b.lua" end)
 
-    -- Reclassification swaps the model: the intents change places.
-    entry.model = { state = "ready", groups = {
+    -- Reclassification swaps the model: the intents change places. Index 2
+    -- would now address the WRONG intent, which is the whole reason targets
+    -- carry identity instead.
+    local after = model({
       { title = "Second", files = { file("b.lua") } },
       { title = "First", files = { file("a.lua") } },
-    } }
-
-    assert.is_true(intentdiff.select(entry.sess.tabpage, t))
-    -- Index 2 would now be the WRONG intent. Identity must win.
-    assert.same({ "file", 1, 1 }, calls[1])
+    })
+    assert.same({ kind = "file", group_i = 1, file_i = 1 }, targets.resolve(after, t))
   end)
 
-  it("renders a whole intent for a group target", function()
-    local entry, calls = stub_session({
+  it("resolves a group target by title", function()
+    local m = model({
       { title = "Add retry logic", files = { file("a.lua") } },
+      { title = "Other", files = { file("b.lua") } },
     })
-    local t = targets.list(entry.model)[1]
-    assert.is_true(intentdiff.select(entry.sess.tabpage, t))
-    assert.same({ "group", "Add retry logic" }, calls[1])
+    local t = target_for(m, function(x) return x.group_title == "Other" and x.kind == "group" end)
+    assert.same({ kind = "group", group_i = 2 }, targets.resolve(m, t))
   end)
 
-  it("narrows a directory target to its subtree", function()
-    local entry, calls = stub_session({
+  it("resolves a directory target to its intent and path", function()
+    local m = model({
       { title = "T", files = { file("src/a.lua"), file("other/b.lua") } },
     })
-    local t = vim.tbl_filter(function(x) return x.kind == "dir" and x.path == "src" end,
-      targets.list(entry.model))[1]
-    assert.is_true(intentdiff.select(entry.sess.tabpage, t))
-    assert.same({ "group", "src" }, calls[1]) -- subtree_group titles itself by dir
+    local t = target_for(m, function(x) return x.kind == "dir" and x.path == "src" end)
+    assert.same({ kind = "dir", group_i = 1, dir_path = "src" }, targets.resolve(m, t))
   end)
 
   it("degrades a vanished file to its intent", function()
-    local entry, calls = stub_session({
-      { title = "T", files = { file("gone.lua"), file("kept.lua") } },
-    })
-    local t = vim.tbl_filter(function(x) return x.path == "gone.lua" end,
-      targets.list(entry.model))[1]
-    entry.model = { state = "ready", groups = {
-      { title = "T", files = { file("kept.lua") } },
-    } }
-    assert.is_true(intentdiff.select(entry.sess.tabpage, t))
-    assert.same({ "group", "T" }, calls[1])
+    local before = model({ { title = "T", files = { file("gone.lua"), file("kept.lua") } } })
+    local t = target_for(before, function(x) return x.path == "gone.lua" end)
+    local after = model({ { title = "T", files = { file("kept.lua") } } })
+    assert.same({ kind = "group", group_i = 1 }, targets.resolve(after, t))
   end)
 
-  it("opens nothing when the intent is gone too", function()
-    local entry, calls = stub_session({
-      { title = "T", files = { file("gone.lua") } },
-    })
-    local t = targets.list(entry.model)[1]
-    entry.model = { state = "ready", groups = {
-      { title = "Different", files = { file("other.lua") } },
-    } }
-    assert.is_false(intentdiff.select(entry.sess.tabpage, t))
-    assert.equals(0, #calls)
+  it("degrades a vanished directory to its intent", function()
+    local before = model({ { title = "T", files = { file("src/a.lua") } } })
+    local t = target_for(before, function(x) return x.kind == "dir" end)
+    local after = model({ { title = "T", files = { file("elsewhere/b.lua") } } })
+    assert.same({ kind = "group", group_i = 1 }, targets.resolve(after, t))
   end)
 
+  it("resolves to nil when the intent is gone too", function()
+    local before = model({ { title = "T", files = { file("gone.lua") } } })
+    local t = target_for(before, function(x) return x.path == "gone.lua" end)
+    local after = model({ { title = "Different", files = { file("other.lua") } } })
+    assert.is_nil(targets.resolve(after, t))
+  end)
+
+  it("resolves to nil for a nil model or nil target", function()
+    assert.is_nil(targets.resolve(nil, { kind = "group", group_title = "T" }))
+    assert.is_nil(targets.resolve(model({}), nil))
+  end)
+end)
+
+describe("intentdiff.select", function()
   it("returns false when the tab holds no review", function()
-    assert.is_false(intentdiff.select(vim.api.nvim_get_current_tabpage(),
+    assert.is_false(require("intentdiff").select(vim.api.nvim_get_current_tabpage(),
       { kind = "group", group_title = "T" }))
   end)
 end)
@@ -432,89 +433,119 @@ end)
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `make test TEST=tests/telescope_select_spec.lua`
-Expected: FAIL — `attempt to call field '_register_test_session' (a nil value)`.
+Expected: FAIL — `attempt to call field 'resolve' (a nil value)`.
 
-- [ ] **Step 3: Add the test seam and `M.select` to `init.lua`**
+- [ ] **Step 3: Add `M.resolve` to `lua/intentdiff/targets.lua`**
 
-Add near `M._session` (`lua/intentdiff/init.lua:83`), keeping the existing `_`-prefix convention for test-facing entry points:
-
-```lua
---- Register a stubbed session entry. Test-only: M.select's resolution logic is
---- worth testing on its own, and standing up a real review tab to do it would
---- test the renderer instead.
-function M._register_test_session(entry)
-  next_token = next_token + 1
-  sessions[next_token] = entry
-  entry._token = next_token
-  return next_token
-end
-
-function M._clear_test_sessions()
-  for token, entry in pairs(sessions) do
-    if entry._test_hooks then
-      sessions[token] = nil
-    end
-  end
-end
-```
-
-Then add `M.select` **after** `subtree_group` and `show_group` are both in scope — place it immediately before `function M.open(argline)` (`lua/intentdiff/init.lua:1104`):
+Append before `return M`:
 
 ```lua
---- Open `target` — an entry from intentdiff.targets.list — in `tabpage`.
+--- Locate `target` in `model` by IDENTITY — intent title and file path — and
+--- return what to render.
 ---
---- Targets carry identity (intent title, file path), never indices, so this
---- re-resolves against the CURRENT model on every call. That is what makes
---- `:Telescope resume` safe: resume replays a cached result set, and a
---- reclassification between the original pick and the resume would otherwise
---- have moved the indices under it.
+--- Re-resolving on every call is what makes `:Telescope resume` safe: resume
+--- replays a cached result set, and a reclassification between the original
+--- pick and the resume would otherwise have moved the indices under it.
 ---
---- Two delegation paths, because the sidebar has two. A file row's <CR> goes
---- through select_file; a group or directory row's <CR> only toggles a fold,
---- and whole-intent rendering lives in apply_hover's show_group/subtree_group.
---- Hover leaves focus in the sidebar on purpose, so an explicit pick asks
---- view.show to move it once the first paint lands.
+--- Degrades toward LESS specific, never toward a different target: a file or
+--- directory that is gone falls back to its intent, and a missing intent
+--- resolves to nil so the caller can say so rather than opening something
+--- arbitrary.
 ---
---- Degrades toward LESS specific, never toward a different target: a file that
---- is gone falls back to its intent, and a missing intent opens nothing.
---- @return boolean opened
-function M.select(tabpage, target)
-  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
-  local entry = M._session(tabpage)
-  if not (entry and target) then
-    return false
+--- @param model table|nil
+--- @param target table|nil one entry from M.list
+--- @return table|nil { kind = "file", group_i, file_i }
+---   | { kind = "group", group_i } | { kind = "dir", group_i, dir_path }
+function M.resolve(model, target)
+  if not (model and model.groups and target) then
+    return nil
   end
-  local hooks = entry._test_hooks or {}
-  local do_select_file = hooks.select_file or select_file
-  local do_show_group = hooks.show_group or show_group
-
-  if target.path and target.kind == "file" then
-    local group_i, file_i = locate_in_model(entry.model, { path = target.path })
-    if group_i then
-      do_select_file(entry._token, group_i, file_i, { focus_diff = true })
-      return true
-    end
-    -- Fall through: the file is gone, so try its intent.
-  end
-
   local group_i
-  for gi, g in ipairs(entry.model and entry.model.groups or {}) do
+  for gi, g in ipairs(model.groups) do
     if g.title == target.group_title then
       group_i = gi
       break
     end
   end
   if not group_i then
+    return nil
+  end
+  local group = model.groups[group_i]
+
+  if target.kind == "file" and target.path then
+    for fi, f in ipairs(group.files or {}) do
+      if f.path == target.path then
+        return { kind = "file", group_i = group_i, file_i = fi }
+      end
+    end
+  elseif target.kind == "dir" and target.path then
+    for _, f in ipairs(group.files or {}) do
+      if under_dir(f.path, target.path) then
+        return { kind = "dir", group_i = group_i, dir_path = target.path }
+      end
+    end
+  end
+
+  -- Either a group target, or a file/directory that is no longer there.
+  return { kind = "group", group_i = group_i }
+end
+```
+
+Note for the implementer: this deliberately resolves the *intent* first and
+then searches only within it, rather than reusing `init.lua`'s
+`locate_in_model` (which scans every group for a path). A file that moved to a
+different intent during reclassification should follow its **intent**, because
+that is the target the user picked; `locate_in_model`'s first-group-wins scan
+would silently jump them somewhere else.
+
+- [ ] **Step 4: Add `M.select` to `lua/intentdiff/init.lua`**
+
+Place it immediately before `function M.open(argline)` (`:1104`) — `select_file`,
+`show_group`, `subtree_group` and `focus_diff_pane` are all file-locals declared
+earlier, so `M.select` must appear textually after all four.
+
+```lua
+--- Open `target` — an entry from intentdiff.targets.list — in `tabpage`.
+---
+--- The interesting part is intentdiff.targets.resolve, which re-derives
+--- indices from the target's identity against the CURRENT model. This function
+--- is only the dispatch: two render paths, because the sidebar has two. A file
+--- row's <CR> goes through select_file; a group or directory row's <CR> only
+--- toggles a fold, and whole-intent rendering lives in apply_hover's
+--- show_group / subtree_group. Hover leaves focus in the sidebar on purpose,
+--- so an explicit pick asks view.show to move it once the first paint lands.
+--- @return boolean opened
+function M.select(tabpage, target)
+  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+  local entry = M._session(tabpage)
+  if not entry then
+    return false
+  end
+  local token
+  for t, e in pairs(sessions) do
+    if e == entry then
+      token = t
+      break
+    end
+  end
+  local resolved = require("intentdiff.targets").resolve(entry.model, target)
+  if not resolved then
     vim.notify(("intent-diff: %s is no longer in this review")
-      :format(target.path or target.group_title or "that target"), vim.log.levels.WARN)
+      :format((target and (target.path or target.group_title)) or "that target"),
+      vim.log.levels.WARN)
     return false
   end
 
-  local group = entry.model.groups[group_i]
-  if target.kind == "dir" and target.path then
-    group = subtree_group(group, target.path)
+  if resolved.kind == "file" then
+    select_file(token, resolved.group_i, resolved.file_i, { focus_diff = true })
+    return true
   end
-  do_show_group(entry, group, {
+
+  local group = entry.model.groups[resolved.group_i]
+  if resolved.kind == "dir" then
+    group = subtree_group(group, resolved.dir_path)
+  end
+  show_group(entry, group, {
     on_ready = function()
       focus_diff_pane(tabpage)
     end,
@@ -523,26 +554,25 @@ function M.select(tabpage, target)
 end
 ```
 
-Note for the implementer: `select_file` and `show_group` are locals declared earlier in the file, so `M.select` must appear textually after both. `subtree_group` is at `:967` and `show_group` just below it — placing `M.select` immediately before `M.open` satisfies all of them.
-
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run test to verify it passes**
 
 Run: `make test TEST=tests/telescope_select_spec.lua`
-Expected: PASS, all 7 examples. In particular "follows the file when the model is reordered underneath it" must pass — that is the regression this task exists for.
+Expected: PASS, all 9 examples. In particular "follows the file when the model is reordered underneath it" must pass — that is the regression this task exists for.
 
-- [ ] **Step 5: Run the whole suite**
+- [ ] **Step 6: Run the whole suite**
 
 Run: `make test`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add lua/intentdiff/init.lua tests/telescope_select_spec.lua
+git add lua/intentdiff/targets.lua lua/intentdiff/init.lua tests/telescope_select_spec.lua
 git commit -m "feat(select): resolve picker targets by identity, not index
 
 A cached target from :Telescope resume must still open the intent that
-owns the file after a reclassification reorders the model."
+owns the file after a reclassification reorders the model. Resolution is
+pure and lives in targets.lua; intentdiff.select is the dispatch."
 ```
 
 ---
@@ -718,7 +748,6 @@ describe("telescope extension", function()
       path = "src/a.lua",
       additions = 3,
       deletions = 1,
-      hunk_count = 2,
     }, nil)
     assert.equals("Add retry logic src/a.lua", entry.ordinal)
     assert.is_function(entry.display)
