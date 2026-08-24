@@ -204,3 +204,33 @@ describe("config after the renderer unification", function()
     assert.equals(3, config.options.context_lines)
   end)
 end)
+
+describe("telescope options", function()
+  it("defaults to directory rows on and a 500-line preview cap", function()
+    require("intentdiff.config").setup({})
+    local opts = require("intentdiff.config").options
+    assert.is_true(opts.telescope.include_dirs)
+    assert.equals(500, opts.telescope.preview_lines)
+  end)
+
+  it("lets a user turn directory rows off without losing preview_lines", function()
+    require("intentdiff.config").setup({ telescope = { include_dirs = false } })
+    local opts = require("intentdiff.config").options
+    assert.is_false(opts.telescope.include_dirs)
+    assert.equals(500, opts.telescope.preview_lines)
+  end)
+
+  it("binds find on both the view and the sidebar", function()
+    require("intentdiff.config").setup({})
+    local km = require("intentdiff.config").options.keymaps
+    assert.equals("<leader>f", km.view.find)
+    assert.equals("<leader>f", km.sidebar.find)
+  end)
+
+  it("honours false to disable the find key", function()
+    require("intentdiff.config").setup({ keymaps = { view = { find = false } } })
+    local km = require("intentdiff.config").options.keymaps
+    assert.is_false(km.view.find)
+    assert.equals("q", km.view.quit) -- sibling actions survive the override
+  end)
+end)

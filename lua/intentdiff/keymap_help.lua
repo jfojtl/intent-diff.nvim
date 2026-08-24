@@ -83,6 +83,7 @@ local function build_sections(keymaps)
     { vkm.next_hunk, "Next hunk in the current intent" },
     { vkm.prev_hunk, "Previous hunk in the current intent" },
     { vkm.open_file, "Open the real file at this line (new tab)" },
+    { vkm.find, "Fuzzy-find an intent, file or directory (needs telescope.nvim)" },
     { vkm.toggle_sidebar, "Show/hide the sidebar (works in both)" },
     { vkm.quit, "Close the review" },
   }

@@ -74,6 +74,14 @@ M.defaults = {
   -- keeps this cheap: holding `j` through a large tree never settles, so it
   -- renders once, at rest, instead of thrashing the panes on every row.
   preview = { enabled = true, debounce_ms = 120 },
+  -- Optional Telescope picker (:IntentDiffFind). Telescope is never required:
+  -- these options are inert when it is not installed.
+  telescope = {
+    include_dirs = true, -- directory rows alongside intents and files
+    -- Cap on previewed diff lines. Without it, moving the cursor onto a large
+    -- intent re-renders thousands of lines on every keystroke.
+    preview_lines = 500,
+  },
   -- Review comments attached to diff lines and to whole intents, exported as
   -- Markdown for an agent to act on. See :IntentDiffCommentsYank / …Write.
   comments = {
@@ -114,6 +122,11 @@ M.defaults = {
       -- No collision on the pane buffers: sidebar's own `gf` (goto_file) is a
       -- different surface/buffer entirely.
       open_file = "gf",
+      -- Fuzzy-find any intent, directory or file. Installed on the sidebar
+      -- too, since the picker's whole point is being reachable with the
+      -- sidebar hidden. No-op with an explanatory notice when telescope.nvim
+      -- is not installed.
+      find = "<leader>f",
     },
     -- The intent sidebar.
     sidebar = {
@@ -146,6 +159,7 @@ M.defaults = {
       -- (codediff's meaning), so this is unbound by default and reachable as
       -- :IntentDiffToggleAll.
       fold_toggle_all = false,
+      find = "<leader>f",
     },
     -- Review comments. Cross-surface by nature: installed on the diff panes
     -- AND the sidebar, since an intent comment is added from a group row and a
