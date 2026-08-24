@@ -87,4 +87,54 @@ function M.list(model, opts)
   return out
 end
 
+--- Locate `target` in `model` by IDENTITY — intent title and file path — and
+--- return what to render.
+---
+--- Re-resolving on every call is what makes `:Telescope resume` safe: resume
+--- replays a cached result set, and a reclassification between the original
+--- pick and the resume would otherwise have moved the indices under it.
+---
+--- Degrades toward LESS specific, never toward a different target: a file or
+--- directory that is gone falls back to its intent, and a missing intent
+--- resolves to nil so the caller can say so rather than opening something
+--- arbitrary.
+---
+--- @param model table|nil
+--- @param target table|nil one entry from M.list
+--- @return table|nil { kind = "file", group_i, file_i }
+---   | { kind = "group", group_i } | { kind = "dir", group_i, dir_path }
+function M.resolve(model, target)
+  if not (model and model.groups and target) then
+    return nil
+  end
+  local group_i
+  for gi, g in ipairs(model.groups) do
+    if g.title == target.group_title then
+      group_i = gi
+      break
+    end
+  end
+  if not group_i then
+    return nil
+  end
+  local group = model.groups[group_i]
+
+  if target.kind == "file" and target.path then
+    for fi, f in ipairs(group.files or {}) do
+      if f.path == target.path then
+        return { kind = "file", group_i = group_i, file_i = fi }
+      end
+    end
+  elseif target.kind == "dir" and target.path then
+    for _, f in ipairs(group.files or {}) do
+      if under_dir(f.path, target.path) then
+        return { kind = "dir", group_i = group_i, dir_path = target.path }
+      end
+    end
+  end
+
+  -- Either a group target, or a file/directory that is no longer there.
+  return { kind = "group", group_i = group_i }
+end
+
 return M

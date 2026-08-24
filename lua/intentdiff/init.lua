@@ -1101,6 +1101,54 @@ local function attach_hover(token)
   })
 end
 
+--- Open `target` — an entry from intentdiff.targets.list — in `tabpage`.
+---
+--- The interesting part is intentdiff.targets.resolve, which re-derives
+--- indices from the target's identity against the CURRENT model. This function
+--- is only the dispatch: two render paths, because the sidebar has two. A file
+--- row's <CR> goes through select_file; a group or directory row's <CR> only
+--- toggles a fold, and whole-intent rendering lives in apply_hover's
+--- show_group / subtree_group. Hover leaves focus in the sidebar on purpose,
+--- so an explicit pick asks view.show to move it once the first paint lands.
+--- @return boolean opened
+function M.select(tabpage, target)
+  tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+  local entry = M._session(tabpage)
+  if not entry then
+    return false
+  end
+  local token
+  for t, e in pairs(sessions) do
+    if e == entry then
+      token = t
+      break
+    end
+  end
+  local resolved = require("intentdiff.targets").resolve(entry.model, target)
+  if not resolved then
+    vim.notify(("intent-diff: %s is no longer in this review")
+      :format((target and (target.path or target.group_title)) or "that target"),
+      vim.log.levels.WARN)
+    return false
+  end
+
+  if resolved.kind == "file" then
+    select_file(token, resolved.group_i, resolved.file_i, { focus_diff = true })
+    return true
+  end
+
+  local group = entry.model.groups[resolved.group_i]
+  if resolved.kind == "dir" then
+    group = subtree_group(group, resolved.dir_path)
+  end
+  show_group(entry, group, {
+    on_ready = function()
+      focus_diff_pane(tabpage)
+    end,
+  })
+  return true
+end
+
 function M.open(argline)
   local view = require("intentdiff.view")
   if not view.load() then
