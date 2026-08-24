@@ -1035,8 +1035,8 @@ Expected: PASS. The first run clones telescope.nvim, so allow extra time.
 
 This is the constraint most easily broken by a stray `require`, so check it directly:
 
-Run: `grep -rn 'require("telescope' lua/intentdiff/`
-Expected: exactly one hit, inside `M.find` in `lua/intentdiff/init.lua`. Any hit at module top level is a bug — fix it before committing.
+Run: `grep -rn telescope lua/intentdiff/`
+Expected: exactly one `require` of telescope, inside `M.find` in `lua/intentdiff/init.lua`. Any require at module top level, or in `setup()`, is a bug — fix it before committing. Deliberately a plain substring search over the whole word: a pattern matching only `require("telescope"` would miss the idiomatic `pcall(require, "telescope")`, and a check that pushes production code into an unidiomatic shape to satisfy itself is a broken check.
 
 Run: `nvim --headless --clean -c 'set rtp+=.' -c 'runtime! plugin/*.lua' -c 'lua require("intentdiff").setup()' -c 'lua print(vim.fn.exists(":IntentDiffFind"))' -c 'qa'`
 Expected: prints `2` (the command exists) with no error, on a runtimepath that has no Telescope at all.
