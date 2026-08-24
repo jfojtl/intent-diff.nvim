@@ -54,6 +54,15 @@ describe("paint.render", function()
     end
   end)
 
+  it("opts the pane buffers out of third-party smooth-scroll animation", function()
+    local p = plan.build({ modified_file() }, {}, "side-by-side")
+    local painted = paint.render(p, wins)
+    for _, buf in pairs(painted.bufs) do
+      assert.is_false(vim.b[buf].snacks_scroll)
+      assert.is_true(vim.b[buf].minianimate_disable)
+    end
+  end)
+
   it("displays the buffers in the given windows", function()
     local p = plan.build({ modified_file() }, {}, "side-by-side")
     local painted = paint.render(p, wins)

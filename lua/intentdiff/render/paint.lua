@@ -117,6 +117,29 @@ function M.foldexpr()
   return set[vim.v.lnum] and "1" or "0"
 end
 
+--- Opt a pane buffer out of every third-party SMOOTH-SCROLL animator we know
+--- how to name. Same reasoning as turning `scrollbind` off below, one layer up.
+---
+--- An animator turns one scroll into a stream of intermediate toplines. Our
+--- alignment answers each of those by `winrestview`-ing the OTHER pane — a
+--- programmatic view change the animator cannot tell from a user scroll, so it
+--- starts animating that pane too, and its steps drive our alignment back. The
+--- two animations and the alignment then chase each other for as long as the
+--- animations keep re-targeting: the panes visibly wiggle up and down for
+--- seconds after the reader's fingers have left the trackpad. Measured with
+--- snacks.scroll on LazyVim defaults: 40 wheel events produced 41 alignments
+--- with the animator off and 236 with it on, reversing scroll direction 78
+--- times during a single downward scroll.
+---
+--- These panes want no animation regardless: alignment is expressed as an
+--- ABSOLUTE topline, so an interpolated one is never a position we asked for.
+local function disable_scroll_animation(buf)
+  -- snacks.nvim (`snacks.scroll`) — enabled by LazyVim's defaults.
+  vim.b[buf].snacks_scroll = false
+  -- mini.animate's `scroll` submodule.
+  vim.b[buf].minianimate_disable = true
+end
+
 --- A fresh scratch buffer holding `pane`.
 ---
 --- bufhidden is deliberately "hide", not "wipe": a window may still be being
@@ -128,6 +151,7 @@ local function pane_buf(pane)
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].bufhidden = "hide"
   vim.bo[buf].swapfile = false
+  disable_scroll_animation(buf)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, pane.lines)
   vim.bo[buf].modifiable = false
   for _, s in ipairs(pane.spans) do
