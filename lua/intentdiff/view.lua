@@ -314,6 +314,7 @@ local function render_now(tabpage, sess, files, visible, layout)
       status = f.status,
       filetype = filetype_of(f.path),
       binary = binary,
+      no_diff_reason = f.no_diff_reason,
       hunks = f.hunks or {},
       original = original,
       modified = modified,

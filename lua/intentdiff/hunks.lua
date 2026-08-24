@@ -7,6 +7,64 @@ local function range(start, len)
   return { start_line = start, end_line = start + len } -- end exclusive
 end
 
+--- Why a file appears in the diff while producing no hunk at all.
+---
+--- Binary wins over rename: a renamed binary is still, to a reader, a binary
+--- file. The trailing fallback is deliberate rather than an assert — git grows
+--- new headers (typechange, submodule commits), and an unfamiliar one must
+--- still leave the file visible in the review with an honest label.
+local function no_diff_reason(f)
+  if f.binary then
+    return "binary — no diff"
+  end
+  if f.old_path then
+    return ("renamed from %s — no content change"):format(f.old_path)
+  end
+  if f.old_mode and f.new_mode then
+    return ("mode changed %s → %s"):format(f.old_mode, f.new_mode)
+  end
+  return "no content change"
+end
+
+--- One synthetic hunk standing in for a file that has no real hunks.
+---
+--- It exists to carry the file somewhere, not to be read: classify.group_files
+--- keeps a file only if it owns at least one hunk, so without this a binary
+--- change, a pure rename and a chmod were dropped between the inventory and
+--- the sidebar — silently absent from a review that claims to be complete.
+---
+--- The body is the reason line and nothing else. That matters twice over:
+--- classify.build_request ships only a hunk's first four lines to the provider,
+--- so the model sees one honest sentence instead of a file's bytes; and
+--- split_added bails on the first body line (it does not start with "+"), so a
+--- marker can never be mistaken for a whole-file addition and split.
+local function marker_hunk(f, reason)
+  local header = ("@@ %s @@"):format(f.path)
+  local text = header .. "\n" .. reason .. "\n"
+  return {
+    id = f.path .. ":1",
+    file = f.path,
+    old_path = f.old_path,
+    status = f.status,
+    header = header,
+    -- Zero-width on both sides: the file paints no rows, so nothing may
+    -- resolve a pane line to this hunk (comments/anchor.lua walks these).
+    original = { start_line = 1, end_line = 1 },
+    modified = { start_line = 1, end_line = 1 },
+    text = text,
+    additions = 0,
+    deletions = 0,
+    content_hash = vim.fn.sha256(text),
+  }
+end
+
+--- Record on `f` why it has no diff and hand back its marker hunk.
+local function mark_no_diff(f)
+  local reason = no_diff_reason(f)
+  f.no_diff_reason = reason
+  return marker_hunk(f, reason)
+end
+
 --- Parse unified `git diff` output.
 --- @return Hunk[] hunks, table[] files
 function M.parse(diff_text)
@@ -21,6 +79,18 @@ function M.parse(diff_text)
       current = nil
     end
   end
+  -- Runs as the NEXT `diff --git` arrives (and once more at the end), while
+  -- files[#files] is still the file just finished. Appending the marker here
+  -- rather than in a sweep afterwards is what keeps hunk order file order,
+  -- which is the order build_request numbers hunks in for the provider.
+  local function close_file()
+    flush()
+    local f = files[#files]
+    if not f or per_file[f.path] then
+      return
+    end
+    hunks[#hunks + 1] = mark_no_diff(f)
+  end
   -- Only append "\n" if diff_text doesn't already end with one (FINDING 1 fix)
   local needs_newline = #diff_text == 0 or diff_text:sub(-1) ~= "\n"
   local text_to_parse = diff_text .. (needs_newline and "\n" or "")
@@ -29,7 +99,7 @@ function M.parse(diff_text)
     line = line:gsub("\r$", "")
     local a, b = line:match("^diff %-%-git a/(.-) b/(.+)$")
     if a then
-      flush()
+      close_file()
       file, old_path, status = b, (a ~= b) and a or nil, "M"
       files[#files + 1] = { path = file, status = "M", old_path = old_path, binary = false }
     elseif line:match("^new file mode") then
@@ -38,6 +108,12 @@ function M.parse(diff_text)
     elseif line:match("^deleted file mode") then
       status = "D"
       files[#files].status = "D"
+    elseif line:match("^old mode ") then
+      -- Distinct from "new file mode", matched above: this pair is a chmod,
+      -- which git reports with no hunk of any kind.
+      files[#files].old_mode = line:match("^old mode (%S+)")
+    elseif line:match("^new mode ") then
+      files[#files].new_mode = line:match("^new mode (%S+)")
     elseif line:match("^Binary files ") then
       -- No @@ header follows, so `current` stays nil and this file
       -- contributes no hunks. Mark it so the renderer shows a marker row
@@ -73,8 +149,32 @@ function M.parse(diff_text)
       end
     end
   end
-  flush()
+  close_file()
   return hunks, files
+end
+
+-- git reads this many bytes before deciding text-vs-binary
+-- (xdiff-interface.c's FIRST_FEW_BYTES).
+local SNIFF_BYTES = 8000
+
+--- Whether `abs_path` looks binary to git.
+---
+--- Deliberately git's own heuristic (buffer_is_binary): a NUL byte anywhere in
+--- the first SNIFF_BYTES. Matching it is the point — an untracked file is
+--- called binary here exactly when git would call it binary in a diff, so a
+--- file's rendering does not change the moment someone `git add`s it.
+---
+--- An unopenable path answers false rather than raising: the caller's readfile
+--- fails on it too and skips the file, which is the pre-existing behaviour for
+--- a path `ls-files` named but nobody can read.
+function M.is_binary(abs_path)
+  local fh = io.open(abs_path, "rb")
+  if not fh then
+    return false
+  end
+  local chunk = fh:read(SNIFF_BYTES)
+  fh:close()
+  return chunk ~= nil and chunk:find("\0", 1, true) ~= nil
 end
 
 --- Whole-file synthetic hunk for an untracked file.
@@ -213,10 +313,22 @@ function M.collect(opts, callback)
       local diff_text = diff_out.stdout or ""
       local hunks, files = M.parse(diff_text)
       for _, path in ipairs(untracked or {}) do
-        local ok, lines = pcall(vim.fn.readfile, opts.git_root .. "/" .. path)
-        if ok then
-          files[#files + 1] = { path = path, status = "??" }
-          hunks[#hunks + 1] = M.untracked_hunk(path, lines)
+        local abs = opts.git_root .. "/" .. path
+        if M.is_binary(abs) then
+          -- No hunk, on purpose. readfile would happily hand back the raw
+          -- bytes as `+` lines, which then get split, hashed, rendered as a
+          -- wall of garbage AND shipped to the classifier. Marking the file
+          -- instead is all the renderer needs: it draws the binary marker row
+          -- off this flag alone (render/plan.lua's separator).
+          local entry = { path = path, status = "??", binary = true }
+          files[#files + 1] = entry
+          hunks[#hunks + 1] = mark_no_diff(entry)
+        else
+          local ok, lines = pcall(vim.fn.readfile, abs)
+          if ok then
+            files[#files + 1] = { path = path, status = "??", binary = false }
+            hunks[#hunks + 1] = M.untracked_hunk(path, lines)
+          end
         end
       end
       -- Split BEFORE hashing: the inventory hash must describe the hunks the

@@ -790,3 +790,68 @@ describe("the equal-pane-line-count invariant", function()
     assert.is_true(checked > 0, "no row addressed a line on both panes")
   end)
 end)
+
+--- A file git named that carries no diff: binary, pure rename, chmod. It gets
+--- exactly one row — the separator, which states the reason in place of stats.
+local function no_diff_file(reason, overrides)
+  local f = {
+    path = "logo.png", status = "M", filetype = "", binary = true,
+    no_diff_reason = reason,
+    original = {}, modified = {},
+    hunks = { {
+      id = "logo.png:1", file = "logo.png", header = "@@ logo.png @@",
+      text = "@@ logo.png @@\n" .. reason .. "\n",
+      original = { start_line = 1, end_line = 1 },
+      modified = { start_line = 1, end_line = 1 },
+      additions = 0, deletions = 0,
+    } },
+  }
+  return vim.tbl_extend("force", f, overrides or {})
+end
+
+describe("plan.build files with no diff", function()
+  it("states the reason on the separator instead of a stat count", function()
+    local p = plan.build({ no_diff_file("binary — no diff") }, { ["logo.png:1"] = true }, "split")
+    assert.equals("── logo.png   M   binary — no diff", p.modified.lines[1])
+  end)
+
+  it("names a rename's old path on the separator", function()
+    local f = no_diff_file("renamed from moved.txt — no content change", {
+      path = "renamed.txt", binary = false,
+    })
+    f.hunks[1].file, f.hunks[1].id = "renamed.txt", "renamed.txt:1"
+    local p = plan.build({ f }, { ["renamed.txt:1"] = true }, "split")
+    assert.equals(
+      "── renamed.txt   M   renamed from moved.txt — no content change",
+      p.modified.lines[1]
+    )
+  end)
+
+  it("paints the separator and nothing else", function()
+    local p = plan.build({ no_diff_file("binary — no diff") }, { ["logo.png:1"] = true }, "split")
+    assert.equals(1, #p.modified.lines)
+    assert.equals(1, #p.original.lines)
+  end)
+
+  it("paints only the separator for a non-binary no-diff file too", function()
+    local f = no_diff_file("mode changed 100644 → 100755", {
+      path = "run.sh", binary = false,
+      original = { "#!/bin/sh", "echo hi" }, modified = { "#!/bin/sh", "echo hi" },
+    })
+    f.hunks[1].file, f.hunks[1].id = "run.sh", "run.sh:1"
+    local p = plan.build({ f }, { ["run.sh:1"] = true }, "split")
+    assert.equals("── run.sh   M   mode changed 100644 → 100755", p.modified.lines[1])
+    assert.equals(1, #p.modified.lines)
+    assert.equals(0, #(p.hunk_rows or {}))
+  end)
+
+  it("contributes no hunk_rows, so ]c and [c skip past it", function()
+    local p = plan.build({ no_diff_file("binary — no diff") }, { ["logo.png:1"] = true }, "split")
+    assert.equals(0, #(p.hunk_rows or {}))
+  end)
+
+  it("addresses no line, so no comment can anchor to it", function()
+    local p = plan.build({ no_diff_file("binary — no diff") }, { ["logo.png:1"] = true }, "split")
+    assert.is_nil(p.modified.map[1])
+  end)
+end)

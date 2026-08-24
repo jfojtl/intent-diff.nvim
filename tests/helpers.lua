@@ -12,6 +12,19 @@ function M.write_file(repo, path, content)
   vim.fn.writefile(vim.split(content, "\n"), abs)
 end
 
+--- Write raw bytes to `path`, NUL bytes included.
+---
+--- Not M.write_file: vim.fn.writefile is line-oriented and rewrites NUL, so a
+--- binary fixture has to go through io to survive the round trip.
+function M.write_bytes(repo, path, bytes)
+  local abs = repo .. "/" .. path
+  vim.fn.mkdir(vim.fn.fnamemodify(abs, ":h"), "p")
+  local fh = assert(io.open(abs, "wb"))
+  fh:write(bytes)
+  fh:close()
+  return abs
+end
+
 --- Create a temp git repo with an initial commit of `files` ({[path]=content}).
 function M.make_repo(files)
   local repo = vim.fn.tempname()

@@ -732,3 +732,71 @@ describe("paint pane alignment", function()
     assert.equals(before, topline(wins.modified))
   end)
 end)
+
+describe("paint.ts_language", function()
+  local paint = require("intentdiff.render.paint")
+
+  --- Stand-in for "is a parser of this name installed?", so these tests assert
+  --- the resolution mechanism rather than whichever parsers this machine has.
+  local function installed(...)
+    local set = {}
+    for _, l in ipairs({ ... }) do set[l] = true end
+    return function(lang) return set[lang] == true end
+  end
+
+  --- Swap the registry loader for `fn`, run `body`, always put the real one
+  --- back. Returns how many times the loader was called.
+  local function with_loader(fn, body)
+    local real, calls = paint.ensure_language_registry, 0
+    paint.ensure_language_registry = function()
+      calls = calls + 1
+      fn()
+    end
+    local ok, err = pcall(body)
+    paint.ensure_language_registry = real
+    assert(ok, err)
+    return calls
+  end
+
+  it("passes a filetype through when it names a real parser", function()
+    assert.equals("typescript", paint.ts_language("typescript", installed("typescript")))
+  end)
+
+  it("resolves through the treesitter filetype registry", function()
+    vim.treesitter.language.register("lua", "intentdiff_registered_ft")
+    assert.equals("lua", paint.ts_language("intentdiff_registered_ft", installed("lua")))
+  end)
+
+  it("loads the registry when the first lookup misses, then resolves", function()
+    local got
+    local calls = with_loader(function()
+      vim.treesitter.language.register("lua", "intentdiff_lazy_ft")
+    end, function()
+      got = paint.ts_language("intentdiff_lazy_ft", installed("lua"))
+    end)
+    -- This is the .tsx case: nvim-treesitter is lazy-loaded, so its
+    -- plugin/filetypes.lua has not registered tsx→typescriptreact yet.
+    assert.equals("lua", got)
+    assert.equals(1, calls)
+  end)
+
+  it("does not touch the registry when the filetype already resolves", function()
+    local calls = with_loader(function() end, function()
+      assert.equals("lua", paint.ts_language("lua", installed("lua")))
+    end)
+    assert.equals(0, calls)
+  end)
+
+  it("returns the filetype unchanged when nothing can resolve it", function()
+    -- No parser and no registration: the caller pcalls and degrades to no
+    -- highlighting, exactly as before. Never invent a language.
+    local calls = with_loader(function() end, function()
+      assert.equals("elvish", paint.ts_language("elvish", installed()))
+    end)
+    assert.equals(1, calls)
+  end)
+
+  it("answers empty for a file with no filetype", function()
+    assert.equals("", paint.ts_language("", installed("lua")))
+  end)
+end)

@@ -195,6 +195,70 @@ function M.retire(bufs)
   end)
 end
 
+--- Is a parser named `lang` anywhere on the runtimepath?
+local function parser_installed(lang)
+  return #vim.api.nvim_get_runtime_file("parser/" .. lang .. ".*", false) > 0
+end
+
+--- Make sure vim.treesitter's filetype→language registry is populated. Once.
+---
+--- That registry IS the shared, ecosystem-wide answer to "which parser
+--- highlights this filetype": vim.treesitter.language.register() writes it,
+--- get_lang() reads it. Neovim core seeds it with `help` and `checkhealth` and
+--- nothing else — every real mapping (64 of them, tsx→typescriptreact among
+--- them) is registered by nvim-treesitter's plugin/filetypes.lua.
+---
+--- Under a lazy plugin manager that file has typically NOT run when a review
+--- opens: nvim-treesitter loads on FileType, and a user who went straight to
+--- the diff has opened no source buffer yet, so get_lang answers with the
+--- filetype it was handed and every .tsx pane renders flat. Requiring the
+--- module is what makes a lazy manager load it, plugin/ files and all.
+---
+--- pcall'd because having no nvim-treesitter at all is a normal setup, and
+--- once-only because a filetype that genuinely has no parser must not cost a
+--- require attempt per file per render.
+local registry_loaded = false
+function M.ensure_language_registry()
+  if registry_loaded then
+    return
+  end
+  registry_loaded = true
+  pcall(require, "nvim-treesitter")
+end
+
+--- The treesitter LANGUAGE for a filetype. The two are usually spelled the
+--- same, which is exactly why the difference goes unnoticed: vim.filetype.match
+--- answers "typescriptreact" for a .tsx file, the parser is named "tsx", and
+--- vim.treesitter.get_string_parser wants the LANGUAGE. codediff pcalls that
+--- call and returns {} when it throws, so the mismatch surfaced as silently
+--- unhighlighted panes rather than as an error — .ts highlighted, .tsx did not.
+---
+--- No table of our own: the registry is the only authority worth consulting,
+--- so a miss means loading it rather than guessing. A language is used only
+--- once a parser of that name is actually installed; otherwise the filetype is
+--- returned untouched and the caller degrades to no highlighting, as before.
+---
+--- `available` is injected by the tests so they assert the resolution itself
+--- rather than whichever parsers the machine running them happens to have.
+--- @return string a language name, or `ft` unchanged when nothing better is known
+function M.ts_language(ft, available)
+  if type(ft) ~= "string" or ft == "" then
+    return ""
+  end
+  available = available or parser_installed
+  local lang = vim.treesitter.language.get_lang(ft) or ft
+  if available(lang) then
+    return lang
+  end
+  -- A miss can just mean nobody has registered anything yet.
+  M.ensure_language_registry()
+  lang = vim.treesitter.language.get_lang(ft) or ft
+  if available(lang) then
+    return lang
+  end
+  return ft
+end
+
 --- Treesitter highlights for every (file, side) the plan draws, keyed
 --- syntax[path][side][file_line] = { {start_col, end_col, hl_group}, ... }.
 ---
@@ -212,9 +276,12 @@ local function compute_syntax(plan, content)
   for _, file in ipairs(plan.files) do
     local per_file = content[file.path]
     if per_file and file.filetype and file.filetype ~= "" then
+      -- codediff takes a treesitter language here, not a filetype, and does not
+      -- convert between them. This is the boundary where that has to happen.
+      local lang = M.ts_language(file.filetype)
       syntax[file.path] = {
-        old = inline.compute_syntax_highlights(per_file.old or {}, file.filetype),
-        new = inline.compute_syntax_highlights(per_file.new or {}, file.filetype),
+        old = inline.compute_syntax_highlights(per_file.old or {}, lang),
+        new = inline.compute_syntax_highlights(per_file.new or {}, lang),
       }
     end
   end

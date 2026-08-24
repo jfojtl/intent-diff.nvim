@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # >= 0.11 is the floor: render/paint.lua calls the four-argument
+      # vim.str_byteindex(s, "utf-16", i, false), which older versions lack.
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: stable
+
+      # tests/init.lua clones plenary and codediff into stdpath("data") on
+      # first run, and codediff downloads its native diff library the first
+      # time it is required. Cache the lot so a run costs one clone rather
+      # than one per push. The key follows tests/init.lua, which is what
+      # decides where those dependencies come from.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.local/share/nvim
+          key: nvim-deps-${{ runner.os }}-${{ hashFiles('tests/init.lua') }}
+
+      - run: make test

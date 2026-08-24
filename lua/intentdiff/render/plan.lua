@@ -68,6 +68,11 @@ end
 --- WHY the file rendered hunks-only, on the row the reader is looking at. The
 --- old preview's max_lines truncated silently, which read as a renderer bug.
 local function separator(file, fallback_reason)
+  -- A file with no diff states WHY on this row, in place of the +N -M it has
+  -- no numbers for. This row is the file's entire rendering.
+  if file.no_diff_reason then
+    return ("── %s   %s   %s"):format(file.path, file.status or "M", file.no_diff_reason)
+  end
   if file.binary then
     return ("── %s   %s   binary"):format(file.path, file.status or "M")
   end
@@ -381,9 +386,10 @@ function M.build(files, visible, layout, opts)
   end
 
   for _, file in ipairs(files or {}) do
-    if file.binary then
-      -- The separator IS the binary marker row, and binary files have no rows
-      -- to fold, so they neither contribute folds nor disable anyone else's.
+    if file.no_diff_reason or file.binary then
+      -- The separator IS the whole rendering for a file with no diff — binary,
+      -- a pure rename, a chmod. Such files have no rows to fold, so they
+      -- neither contribute folds nor disable anyone else's.
       add_separator(separator(file))
       meta[#meta + 1] = { path = file.path, filetype = file.filetype,
                           status = file.status, binary = true, fallback = false }

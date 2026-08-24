@@ -192,6 +192,7 @@ local function render_entry(entry, path)
     if meta.binary then
       out.binary = true
     end
+    out.no_diff_reason = meta.no_diff_reason
   end
   return out
 end

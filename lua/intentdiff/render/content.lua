@@ -66,7 +66,8 @@ end
 local function fetch(sess, cache, file)
   local path, status = file.path, file.status
 
-  if file.binary then
+  -- Nothing to fetch: the file renders as a single reason row, not content.
+  if file.no_diff_reason or file.binary then
     cache.old[path], cache.new[path] = {}, {}
     return false
   end
@@ -164,9 +165,9 @@ function M.ensure(sess, files, on_ready)
   for _, file in ipairs(files) do
     if (cache.old[file.path] == nil or cache.new[file.path] == nil)
         and not cache.failed[file.path] then
-      -- Binary files resolve without I/O, so settle them inline rather than
-      -- reporting them missing and scheduling a worker for nothing.
-      if file.binary then
+      -- Files with no diff resolve without I/O, so settle them inline rather
+      -- than reporting them missing and scheduling a worker for nothing.
+      if file.no_diff_reason or file.binary then
         cache.old[file.path], cache.new[file.path] = {}, {}
       else
         missing[#missing + 1] = file.path
