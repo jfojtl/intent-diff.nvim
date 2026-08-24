@@ -214,14 +214,41 @@ README so the difference reads as intentional rather than as a limitation.
 
 ### 5. Selection
 
-The default action closes the picker and calls the same code path the
-sidebar's `<CR>` calls: `select_file(token, group_i, file_i, { focus_diff =
-true })`. One selection path, one render path.
+The default action closes the picker and calls one new public function,
+`M.select(tabpage, target)`, which resolves per section 3 and then delegates
+to the code path that already renders that kind of target.
 
-`select_file` is a file-local and `M._session(tabpage)` returns the entry
-without its token (`init.lua:83`), so the implementation adds a public
-`M.select(tabpage, target)` that resolves per section 3 and delegates. The
-extension calls only that.
+There are two such paths, not one. An earlier draft of this spec said all
+three target kinds route through the sidebar's `<CR>` handler; that is wrong,
+and the distinction matters for the implementation:
+
+- **File targets** take the `<CR>` path: `select_file(token, group_i, file_i,
+  { focus_diff = true })` (`init.lua:661`). This is what sidebar `<CR>` on a
+  file row does.
+- **Intent and directory targets** take the *hover* path. Sidebar `<CR>` on a
+  group or directory row toggles a fold — it does not render anything
+  (`sidebar.lua`, `map(skm.select, ...)`). Rendering a whole intent happens
+  only in `apply_hover` (`init.lua:990`), via `show_group(entry, group)` and,
+  for a directory, `show_group(entry, subtree_group(group, dir_path))`
+  (`init.lua:967`).
+
+Hover deliberately leaves focus in the sidebar, but a picker selection is an
+explicit choice and should land in the diff. `show_group` forwards `opts` to
+`view.show`, which supports `on_ready` firing once after the first paint
+(`view.lua:476-480`), so intent and directory selections pass
+`{ on_ready = function() focus_diff_pane(tabpage) end }`.
+
+`select_file`, `show_group`, `subtree_group` and `focus_diff_pane` are all
+file-locals in `init.lua`, and `M._session(tabpage)` returns the entry without
+its token (`init.lua:83`). `M.select` therefore lives in `init.lua` below
+`subtree_group` (`init.lua:967`), and is the only thing the extension calls.
+
+Intent and directory selections do not need to set `entry.user_selected`:
+auto-open is already suppressed while an intent is on screen — `if
+current.user_selected or showing_intent(current)` (`init.lua:422`) — and
+`show_group` sets `entry.shown = { group = group }`, which is what
+`showing_intent` reads. File selections set it via `select_file`, as they
+already do.
 
 The sidebar is not touched by selection. Hidden stays hidden; visible stays
 visible, and its cursor is left where it was.
