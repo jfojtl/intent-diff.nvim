@@ -1148,6 +1148,9 @@ describe("comments in a review tab", function()
     local messages = {}
     vim.notify = function(msg) messages[#messages + 1] = msg end
 
+    -- A bare headless Neovim drops writes to `+` entirely, so the SENTINEL
+    -- would not survive its own setup line. See helpers.fake_clipboard.
+    local restore_clipboard = helpers.fake_clipboard()
     vim.fn.setreg("+", "SENTINEL")
     local out_path = vim.fn.tempname() .. "/refused.md"
     local ok, err = pcall(function()
@@ -1157,9 +1160,13 @@ describe("comments in a review tab", function()
       end
     end)
     vim.notify = real_notify
+    -- Read the register and put the real provider back before asserting, so a
+    -- failure here cannot leak the fake one into the rest of the file.
+    local clipboard_after = vim.fn.getreg("+")
+    restore_clipboard()
     assert.is_true(ok, "a disabled command must refuse, not error: " .. tostring(err))
 
-    assert.equals("SENTINEL", vim.fn.getreg("+"),
+    assert.equals("SENTINEL", clipboard_after,
       "a refused :IntentDiffCommentsYank must not touch the clipboard")
     assert.equals(0, vim.fn.filereadable(out_path),
       "a refused :IntentDiffCommentsWrite must not create a file")

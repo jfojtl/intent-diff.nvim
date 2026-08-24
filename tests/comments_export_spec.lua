@@ -1,4 +1,5 @@
 local export = require("intentdiff.comments.export")
+local helpers = require("tests.intentdiff_helpers")
 
 --- A model with two groups. Hunk ranges are END-EXCLUSIVE, matching hunks.lua.
 --
@@ -284,33 +285,42 @@ describe("comments.export", function()
     assert.equals(0, vim.fn.filereadable(path))
   end)
 
-  it("refuses to touch the clipboard for an empty review", function()
-    vim.fn.setreg("+", "SENTINEL")
-    assert.is_false(export.to_clipboard({}, model()))
-    assert.equals("SENTINEL", vim.fn.getreg("+"))
-  end)
-
   -- The clipboard is the PRIMARY export target (`<localleader>cy`, `gq`,
-  -- :IntentDiffCommentsYank), and until this test nothing asserted the
-  -- Markdown ever reached a register — only the empty-review refusal was
-  -- covered. Both registers are asserted, but headless Neovim has no clipboard
-  -- provider and aliases `+` and `*`, so this environment cannot tell the two
-  -- writes apart: what it really pins down is that the generated Markdown —
-  -- not an empty string, not nothing at all — reaches the clipboard.
-  it("puts the generated Markdown on both clipboard registers", function()
-    vim.fn.setreg("+", "SENTINEL")
-    vim.fn.setreg("*", "SENTINEL")
-    local comments = {
-      { file = "src/api/routes.ts", line = 5, side = "new", type = "issue", text = "boom" },
-    }
+  -- :IntentDiffCommentsYank), so these tests have to be able to read `+` and
+  -- `*` back — which a bare headless Neovim cannot do. See
+  -- helpers.fake_clipboard.
+  describe("clipboard", function()
+    local restore
 
-    assert.is_true(export.to_clipboard(comments, model()))
+    before_each(function()
+      restore = helpers.fake_clipboard()
+    end)
 
-    local expected = export.generate(comments, model())
-    assert.equals(expected, vim.fn.getreg("+"))
-    assert.equals(expected, vim.fn.getreg("*"))
-    -- Not a vacuous comparison against another empty string.
-    assert.is_truthy(expected:match("%*%*%[ISSUE%]%*%* `src/api/routes%.ts:5`"))
+    after_each(function()
+      restore()
+    end)
+
+    it("refuses to touch the clipboard for an empty review", function()
+      vim.fn.setreg("+", "SENTINEL")
+      assert.is_false(export.to_clipboard({}, model()))
+      assert.equals("SENTINEL", vim.fn.getreg("+"))
+    end)
+
+    it("puts the generated Markdown on both clipboard registers", function()
+      vim.fn.setreg("+", "SENTINEL")
+      vim.fn.setreg("*", "SENTINEL")
+      local comments = {
+        { file = "src/api/routes.ts", line = 5, side = "new", type = "issue", text = "boom" },
+      }
+
+      assert.is_true(export.to_clipboard(comments, model()))
+
+      local expected = export.generate(comments, model())
+      assert.equals(expected, vim.fn.getreg("+"))
+      assert.equals(expected, vim.fn.getreg("*"))
+      -- Not a vacuous comparison against another empty string.
+      assert.is_truthy(expected:match("%*%*%[ISSUE%]%*%* `src/api/routes%.ts:5`"))
+    end)
   end)
 
   it("buckets comments by the intent owning their line", function()

@@ -96,4 +96,46 @@ function M.fake_bin(name, body)
   return function() vim.env.PATH = old_path end
 end
 
+--- Back the `+` and `*` registers with an in-process table. Returns a restore
+--- function.
+---
+--- Any test that reads a register back needs this. A bare headless Neovim
+--- cannot: with no clipboard tool on PATH (CI's ubuntu-latest has none) the
+--- provider resolves to nothing, every write to those registers is dropped and
+--- `getreg` answers "" — which fails even the `setreg` in a test's own setup.
+--- A macOS dev box passes off `pbcopy`, so the gap only ever shows up in CI.
+---
+--- `g:clipboard` is checked ahead of every built-in provider, so this makes the
+--- registers real and deterministic everywhere, with no clipboard tool,
+--- `$DISPLAY` or `xvfb` involved. It also keeps `+` and `*` genuinely
+--- independent (distinct copy functions), so asserting both is two assertions
+--- rather than one written twice.
+function M.fake_clipboard()
+  local board = { ["+"] = { {}, "v" }, ["*"] = { {}, "v" } }
+  local previous = vim.g.clipboard
+  -- The provider is resolved once, when its autoload file is first sourced,
+  -- and the answer cached in g:loaded_clipboard_provider. Setting g:clipboard
+  -- afterwards changes nothing until that runs again.
+  local function reload()
+    vim.g.loaded_clipboard_provider = nil
+    vim.cmd("runtime autoload/provider/clipboard.vim")
+  end
+  vim.g.clipboard = {
+    name = "intentdiff-test",
+    copy = {
+      ["+"] = function(lines, regtype) board["+"] = { lines, regtype } end,
+      ["*"] = function(lines, regtype) board["*"] = { lines, regtype } end,
+    },
+    paste = {
+      ["+"] = function() return board["+"] end,
+      ["*"] = function() return board["*"] end,
+    },
+  }
+  reload()
+  return function()
+    vim.g.clipboard = previous
+    reload()
+  end
+end
+
 return M
