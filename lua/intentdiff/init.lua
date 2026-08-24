@@ -1110,6 +1110,11 @@ end
 --- toggles a fold, and whole-intent rendering lives in apply_hover's
 --- show_group / subtree_group. Hover leaves focus in the sidebar on purpose,
 --- so an explicit pick asks view.show to move it once the first paint lands.
+---
+--- Both ways a pick can miss are announced at WARN: the target being gone
+--- outright (nothing opens) and a file or directory degrading to its intent
+--- (that intent opens). A degraded pick that said nothing would look like the
+--- picker had simply ignored the row.
 --- @return boolean opened
 function M.select(tabpage, target)
   tabpage = tabpage or vim.api.nvim_get_current_tabpage()
@@ -1132,6 +1137,18 @@ function M.select(tabpage, target)
     return false
   end
 
+  -- Hover state belongs to the sidebar cursor, and a pick has just made it
+  -- stale in two ways. First, a pending debounce armed by telescope's own
+  -- cursor write on close would fire after this and drag the panes (and, for a
+  -- file row, focus) back to whatever the sidebar cursor sits on. Second,
+  -- entry.hover_key still names the row hovered before the pick, so returning
+  -- to the sidebar and landing on ANOTHER line of that same wrapped row would
+  -- hit apply_hover's de-dupe and leave the panes showing what the picker
+  -- opened while the cursor says otherwise. Clearing both here, BEFORE the
+  -- dispatch, lets select_file set the correct key for the file branch after.
+  stop_hover_timer(entry)
+  entry.hover_key = nil
+
   if resolved.kind == "file" then
     select_file(token, resolved.group_i, resolved.file_i, { focus_diff = true })
     return true
@@ -1140,6 +1157,14 @@ function M.select(tabpage, target)
   local group = entry.model.groups[resolved.group_i]
   if resolved.kind == "dir" then
     group = subtree_group(group, resolved.dir_path)
+  end
+  if resolved.degraded_from then
+    -- The picked path is gone, so the whole intent is about to render in its
+    -- place. Say so: an unexplained intent view looks like the pick was
+    -- ignored. The nil case above covers the intent being gone as well.
+    vim.notify(("intent-diff: %s is no longer in this review — showing %s instead")
+      :format(resolved.degraded_from, group.title or "its intent"),
+      vim.log.levels.WARN)
   end
   show_group(entry, group, {
     on_ready = function()

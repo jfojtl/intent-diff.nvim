@@ -220,17 +220,62 @@ describe("telescope options", function()
     assert.equals(500, opts.telescope.preview_lines)
   end)
 
-  it("binds find on both the view and the sidebar", function()
+  -- `find` is a keymaps.VIEW action that both surfaces install, exactly as
+  -- toggle_sidebar is: a key whose whole point is being reachable with the
+  -- sidebar hidden cannot be sidebar-local. There is deliberately no
+  -- keymaps.sidebar.find — nothing would read it, so `false` there would not
+  -- unbind anything and a rebind there would do nothing.
+  local FIND_DESC = "intent-diff: fuzzy-find an intent, file or directory"
+
+  --- Every lhs the find action actually ends up installed on, per surface.
+  --- Both surfaces are exercised through their real install path rather than
+  --- trusting the config table, since the whole point of this option is where
+  --- it lands.
+  local function installed_find_keys()
+    local handle = require("intentdiff.sidebar").create({
+      on_select = function() end, on_fold = function() end,
+      on_fold_all = function() end, on_reclassify = function() end,
+      on_close = function() end, on_next_group = function() end,
+      on_prev_group = function() end, on_goto_file = function() end,
+    })
+    local pane = vim.api.nvim_create_buf(false, true)
+    require("intentdiff.view").map_view_keys(pane, { find = function() end })
+    local function keys(buf)
+      local out = {}
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+        if m.desc == FIND_DESC then
+          out[#out + 1] = m.lhs
+        end
+      end
+      return out
+    end
+    local found = { sidebar = keys(handle.bufnr), view = keys(pane) }
+    vim.api.nvim_win_close(handle.winid, true)
+    vim.api.nvim_buf_delete(pane, { force = true })
+    return found
+  end
+
+  it("installs keymaps.view.find on both the panes and the sidebar", function()
     require("intentdiff.config").setup({})
     local km = require("intentdiff.config").options.keymaps
     assert.equals("<leader>f", km.view.find)
-    assert.equals("<leader>f", km.sidebar.find)
+    assert.is_nil(km.sidebar.find) -- no dead sidebar twin
+
+    local found = installed_find_keys()
+    assert.equals(1, #found.view)
+    assert.same(found.view, found.sidebar,
+      "the sidebar installs the same keymaps.view.find the panes do")
   end)
 
-  it("honours false to disable the find key", function()
+  it("installs the find key on neither surface when it is false", function()
     require("intentdiff.config").setup({ keymaps = { view = { find = false } } })
     local km = require("intentdiff.config").options.keymaps
     assert.is_false(km.view.find)
     assert.equals("q", km.view.quit) -- sibling actions survive the override
+
+    local found = installed_find_keys()
+    assert.same({}, found.view)
+    assert.same({}, found.sidebar)
+    require("intentdiff.config").setup({})
   end)
 end)

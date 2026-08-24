@@ -423,7 +423,6 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       -- Unbound by default (`zR`/`zM` do the two halves explicitly) and
       -- reachable as :IntentDiffToggleAll.
       fold_toggle_all = false,
-      find = "<leader>f",
     },
     -- Review comments. Cross-surface by nature: an intent comment is added
     -- from a sidebar group row, a line comment from a diff pane row, and both

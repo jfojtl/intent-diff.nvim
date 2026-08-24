@@ -159,7 +159,6 @@ M.defaults = {
       -- (codediff's meaning), so this is unbound by default and reachable as
       -- :IntentDiffToggleAll.
       fold_toggle_all = false,
-      find = "<leader>f",
     },
     -- Review comments. Cross-surface by nature: installed on the diff panes
     -- AND the sidebar, since an intent comment is added from a group row and a
