@@ -45,6 +45,9 @@ intent-diff requires Neovim 0.10 or newer and
 grouping provider requires the `claude` CLI on `$PATH`. The built-in Codex
 provider requires the `codex` CLI instead; you can also replace either with a
 custom provider.
+[telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) is
+optional: install it and `:IntentDiffFind` fuzzy-finds intents and files;
+without it the rest of the plugin works exactly the same.
 
 ### `lazy.nvim`
 
@@ -52,7 +55,10 @@ custom provider.
 return {
   {
     "jfojtl/intent-diff.nvim",
-    dependencies = { "esmuellert/codediff.nvim" },
+    dependencies = {
+      "esmuellert/codediff.nvim",
+      "nvim-telescope/telescope.nvim", -- optional: enables :IntentDiffFind
+    },
     cmd = "IntentDiff",
     opts = {},
     keys = {
@@ -100,6 +106,37 @@ Added and untracked files show their real contents. Long new files are split
 at blank lines so separate parts can belong to separate intents; deleted files
 appear as a single whole-file hunk. Large files automatically fall back to a
 hunks-only view when they exceed `line_budget`.
+
+### Find an intent or file
+
+`:IntentDiffFind`, or `<leader>f` from either the diff panes or the sidebar,
+opens a Telescope picker over the current review. It lists every intent,
+directory, and file, in the same order the sidebar shows them, and one prompt
+fuzzy-matches intent titles and file paths together — typing part of an
+LLM-written title like "retry" finds "Add retry logic", and typing a filename
+finds the file. Selecting an entry closes the picker, renders that target in
+the real diff panes, and moves focus into the diff.
+
+This is what makes `<leader>b` (toggle the sidebar) worth using on a small
+screen. Hiding the sidebar used to be a dead end — there was no way back to
+another intent without showing it again. With the picker, hide the sidebar
+for good and navigate entirely through `<leader>f` instead, giving the diff
+panes the full width; the side-by-side layout depends on width more than most
+buffers do.
+
+The picker's own preview is plain unified diff. Character-level highlighting
+and side-by-side alignment exist only in the real panes — the preview is for
+orientation while picking, not a substitute for opening the diff.
+
+`:Telescope resume` works normally. A selection is re-resolved by intent
+title and file path rather than by list position, so resuming after pressing
+`R` to reclassify still lands correctly: if a picked file or directory moved
+but its intent is still there, you land on that intent; if the intent itself
+is gone, you get a warning instead of a silently wrong diff.
+
+telescope.nvim is optional. Without it, `:IntentDiffFind` and `<leader>f`
+notify that `:IntentDiffFind` needs telescope.nvim and do nothing else — the
+rest of the plugin is unaffected.
 
 ### Leave feedback for a coding agent
 
@@ -296,6 +333,13 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
                         -- past rows doesn't thrash the panes
   },
 
+  -- Optional Telescope picker (:IntentDiffFind / <leader>f). Inert when
+  -- telescope.nvim isn't installed.
+  telescope = {
+    include_dirs = true, -- directory rows alongside intents and files
+    preview_lines = 500, -- cap on lines shown in the picker's diff preview
+  },
+
   -- Review comments attached to diff lines and to whole intents, exported as
   -- Markdown for an agent to act on.
   comments = {
@@ -346,6 +390,11 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       -- in a new tab. No collision with the sidebar's own `gf` (goto_file) —
       -- a different surface, a different buffer.
       open_file = "gf",
+      -- Fuzzy-find any intent, directory, or file with Telescope. Installed
+      -- on the sidebar too, since the picker's whole point is being reachable
+      -- with the sidebar hidden. No-op with a notice when telescope.nvim
+      -- isn't installed.
+      find = "<leader>f",
     },
     -- The intent sidebar.
     sidebar = {
@@ -374,6 +423,7 @@ Defaults, passed via `opts` (or `require("intentdiff").setup(opts)`):
       -- Unbound by default (`zR`/`zM` do the two halves explicitly) and
       -- reachable as :IntentDiffToggleAll.
       fold_toggle_all = false,
+      find = "<leader>f",
     },
     -- Review comments. Cross-surface by nature: an intent comment is added
     -- from a sidebar group row, a line comment from a diff pane row, and both
