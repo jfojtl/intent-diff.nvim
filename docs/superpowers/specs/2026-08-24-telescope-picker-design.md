@@ -174,10 +174,21 @@ available here, and resume makes it reachable in normal use.
 So a target carries `group_title` and `path`, and resolution happens at select
 time against the live model:
 
-1. `path` present: `locate_in_model(entry.model, { path = path })`
-   (`init.lua:729`) gives `(group_i, file_i)`.
+1. `path` present: search every group for that path — model-wide, not inside
+   the title-matched group only. Where more than one group contains it, prefer
+   the group whose title matches `group_title`; otherwise take the first.
+
+   Path first is the load-bearing part. Intent titles are LLM-generated prose
+   and are rewritten on every reclassify, so a title is the *less* stable half
+   of a target's identity; resolving by title first would make a reworded title
+   report a file that is plainly on disk as "no longer in this review" — the
+   exact resume-after-reclassify case this design exists for. The title still
+   earns its place as the tie-breaker: `locate_in_model`'s bare first-group-wins
+   scan (`init.lua:729`) ignores it, and two groups can share a title, since
+   `classify.lua:166` defaults a missing one to "Untitled".
 2. `path` absent (`kind == "group"`): match `group_title` against
-   `entry.model.groups`; first exact title match wins.
+   `entry.model.groups`; first exact title match wins. A group target has no
+   other identity available.
 3. Directory targets resolve to their intent, then narrow through
    `subtree_group(group, dir_path)` (`init.lua:967`) — the same path a
    directory row already takes.
@@ -185,7 +196,10 @@ time against the live model:
 If a target no longer exists, notify at WARN with the target's name and
 degrade: a missing file falls back to its intent if that still exists,
 otherwise nothing opens. Degrading is always toward *less* specific, never
-toward a different target.
+toward a different target. A degraded resolution must be distinguishable from a
+resolution that genuinely wanted the whole intent — otherwise the fallback is
+silent, and the user sees a whole intent render with no hint that the file they
+picked is gone.
 
 ### 4. Display and preview
 
@@ -266,14 +280,17 @@ telescope = {
   preview_lines = 500,   -- cap on previewed diff lines
 },
 keymaps = {
-  view    = { find = "<leader>f" },
-  sidebar = { find = "<leader>f" },
+  view = { find = "<leader>f" },
 },
 ```
 
-Both keymaps are buffer-local inside the review tab, like every other key the
-plugin installs, and follow the existing `false`-disables convention
-(`config.lua:100-103`). `<leader>f` is consistent with `toggle_sidebar =
+`find` lives under `view` and is installed on the sidebar too — exactly how
+`toggle_sidebar` is handled, and for the same reason `config.lua` already gives
+there: a key whose whole point is being reachable with the sidebar hidden cannot
+be sidebar-local. There is deliberately no `keymaps.sidebar.find`; a second
+option that no code reads would be dead config. It is buffer-local inside the
+review tab like every other key the plugin installs, and follows the existing
+`false`-disables convention (`config.lua:100-103`). `<leader>f` is consistent with `toggle_sidebar =
 "<leader>b"` already being an in-tab leader key, and collides with nothing the
 plugin currently binds. It is user-overridable, as all of them are.
 
